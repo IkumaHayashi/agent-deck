@@ -2660,11 +2660,14 @@ PAGE = r"""<!doctype html>
 # （TERMINAL_PAGE）で共有する。format() の値として挿入するので brace は素のまま。
 SIDEBAR_CSS = r"""
   aside { width: 320px; flex: 0 0 320px; overflow-y: auto; --aside-pad-b: 12px;
-    padding: 12px 12px var(--aside-pad-b);
+    padding: 12px 12px var(--aside-pad-b); display: flex; flex-direction: column;
     border-right: 1px solid #30363d; background: #161b22; }
-  /* AI使用量フッター。usage_command 設定時のみ表示され、サイドバー下端に張り付く */
+  /* flex化してもリストは潰さずasideのスクロールに任せる */
+  aside > * { flex-shrink: 0; }
+  /* AI使用量フッター。usage_command 設定時のみ表示。リストが短くても
+     margin-top:auto で最下端に落とし、あふれたら sticky で張り付かせる */
   #ai-usage { position: sticky; bottom: calc(-1 * var(--aside-pad-b));
-    margin: 14px -12px calc(-1 * var(--aside-pad-b));
+    margin: auto -12px calc(-1 * var(--aside-pad-b));
     padding: 8px 12px var(--aside-pad-b); background: #161b22;
     border-top: 1px solid #30363d; font-size: .74rem; color: #8b949e; }
   #ai-usage .usage-row { display: flex; align-items: baseline; flex-wrap: wrap;
