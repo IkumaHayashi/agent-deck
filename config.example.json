@@ -1,0 +1,55 @@
+{
+  "_comment": "~/.config/agent-deck/config.json に置く。すべて任意（無くても既定値で動く）",
+
+  "port": 8787,
+
+  "_data_dir": "アップロード画像・キャッシュの保存先（既定 ~/.local/share/agent-deck）",
+  "data_dir": "~/.local/share/agent-deck",
+
+  "_project_bases": "直下のディレクトリをドロップダウンに列挙する親ディレクトリ",
+  "project_bases": [
+    "~/projects"
+  ],
+
+  "_pinned": "起動ページの固定ボタン",
+  "pinned": [
+    {"label": "my-app", "path": "~/projects/my-app"}
+  ],
+
+  "_extra_projects": "project_bases の外にある個別プロジェクト（ドロップダウン末尾）",
+  "extra_projects": [],
+
+  "_allowed_networks": "アクセスを許可する CIDR。既定は Tailscale 網内 + localhost",
+  "allowed_networks": [
+    "100.64.0.0/10",
+    "fd7a:115c:a1e0::/48",
+    "127.0.0.0/8",
+    "::1/128"
+  ],
+
+  "_bins": "CLI のパス。省略時は PATH と標準的なインストール先から自動検出",
+  "claude_bin": null,
+  "codex_bin": null,
+  "tmux_bin": null,
+  "wezterm_bin": null,
+  "gh_bin": null,
+
+  "_models": "モデル選択肢の上書き。[値, 表示ラベル] の配列",
+  "models": {
+    "claude": [
+      ["default", "デフォルト"],
+      ["opus", "opus"],
+      ["sonnet", "sonnet"],
+      ["haiku", "haiku"]
+    ]
+  },
+
+  "_chatwork": "Chatwork 受信箱（任意）。account_id を設定し token_path のファイルが存在するときだけ有効",
+  "chatwork": {
+    "account_id": null,
+    "token_path": "~/.chatwork-token"
+  },
+
+  "_legacy_upload_dirs": "過去に使っていた保存先。古い会話ログ内の添付表示に使う",
+  "legacy_upload_dirs": []
+}

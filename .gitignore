@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+# 各社ロゴはライセンス上リポジトリに含めない（icons/README.md 参照）
+icons/*.png
+.ruff_cache/
