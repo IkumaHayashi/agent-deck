@@ -41,6 +41,9 @@ mkdir -p ~/.config/agent-deck
 cp config.example.json ~/.config/agent-deck/config.json
 # → project_bases / pinned を自分のプロジェクトに書き換える
 
+# ツールアイコン（任意）: 公式配布元から取得する。無ければテキスト表示
+./icons/fetch.sh
+
 # Web UI を launchd で常駐させる
 mkdir -p ~/.local/share/agent-deck
 sed -e "s|__REPO_DIR__|$PWD|g" -e "s|__HOME__|$HOME|g" \
