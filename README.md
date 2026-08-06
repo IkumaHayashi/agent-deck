@@ -8,6 +8,12 @@ AI コーディング CLI（Claude Code / Codex）を Mac の WezTerm 上で起�
 > Launch sessions from your phone, watch progress, send messages, and
 > hand conversations off between CLIs. The UI is currently Japanese-only.
 
+![セッション操作画面（PC）](docs/images/terminal-pc.png)
+
+| スマホ: セッション一覧 | スマホ: セッション操作 |
+|:---:|:---:|
+| ![スマホのセッション一覧](docs/images/list-sp.png) | ![スマホのセッション操作](docs/images/terminal-sp.png) |
+
 ## できること
 
 - **ワンタップ起動**: プロジェクトのボタンを押すと WezTerm に新規タブが開き CLI が起動する
@@ -18,6 +24,11 @@ AI コーディング CLI（Claude Code / Codex）を Mac の WezTerm 上で起�
 - **Claude ⇔ Codex の引き継ぎ**: 会話履歴を引き継ぎ資料として保存し、同じ作業ディレクトリで反対側の CLI に交代させる
 - **ブックマークレット**: 閲覧中のページ（GitHub issue 等）をプロンプトにプリフィルして起動
 - **Chatwork 受信箱**（任意）: メンションを一覧し、そのままプロンプトにセットして起動
+
+起動ページではツール・起動方法・権限・モデル・最初のプロンプトを選んで
+ワンタップでセッションを開始できます。
+
+![起動ページ（PC）](docs/images/launch-pc.png)
 
 ## 動作要件
 
