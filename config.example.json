@@ -54,5 +54,8 @@
   },
 
   "_legacy_upload_dirs": "過去に使っていた保存先。古い会話ログ内の添付表示に使う",
-  "legacy_upload_dirs": []
+  "legacy_upload_dirs": [],
+
+  "_usage_command": "AI使用量をサイドバー下部に表示（任意）。{\"providers\": [{\"name\", \"ok\", \"rows\": [{\"label\", \"percent\", \"reset_label\", \"level\"}]}]} 形式のJSONを標準出力へ出すコマンド。結果は5分キャッシュされる",
+  "usage_command": null
 }

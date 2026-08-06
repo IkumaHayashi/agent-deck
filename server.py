@@ -2057,7 +2057,37 @@ def build_sidebar(active):
                 f'<span class="dir">{html.escape(dir_label(cwd))}</span>'
                 f'<span class="wez-badge">WezTerm</span></strong></div>'
             )
+    # AI使用量フッター。/api/usage から取得できたときだけJSが表示する
+    sidebar += '<div id="ai-usage" hidden></div>'
     return sidebar
+
+
+# AI使用量の表示（任意機能）。config の usage_command に、使用量JSONを標準出力へ
+# 出すコマンドを設定すると有効になる。期待する形式は
+# {"providers": [{"name", "ok", "rows": [{"label", "percent", "reset_label",
+# "level"}], "extra", "stale", "message"}]}（tools/ai-usage の --json 互換）。
+USAGE_COMMAND = CONFIG.get("usage_command", "")
+USAGE_TTL_SEC = 300  # 使用量APIは非公開なので叩きすぎない
+USAGE_CACHE = {"data": None, "at": 0.0}
+USAGE_LOCK = threading.Lock()
+
+
+def usage_data():
+    """usage_command の実行結果をTTL付きで返す。未設定・失敗時は None か古い値。"""
+    if not USAGE_COMMAND:
+        return None
+    with USAGE_LOCK:
+        if USAGE_CACHE["data"] is not None and time.time() - USAGE_CACHE["at"] < USAGE_TTL_SEC:
+            return USAGE_CACHE["data"]
+        try:
+            result = subprocess.run(
+                USAGE_COMMAND, shell=True, capture_output=True, text=True, timeout=25
+            )
+            data = json.loads(result.stdout)
+        except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            return USAGE_CACHE["data"]
+        USAGE_CACHE.update(data=data, at=time.time())
+        return data
 
 
 def capture_session(name):
@@ -2629,8 +2659,20 @@ PAGE = r"""<!doctype html>
 # セッション一覧サイドバーのCSS。一覧ページ（LIST_PAGE）と2ペイン表示
 # （TERMINAL_PAGE）で共有する。format() の値として挿入するので brace は素のまま。
 SIDEBAR_CSS = r"""
-  aside { width: 320px; flex: 0 0 320px; overflow-y: auto; padding: 12px;
+  aside { width: 320px; flex: 0 0 320px; overflow-y: auto; --aside-pad-b: 12px;
+    padding: 12px 12px var(--aside-pad-b);
     border-right: 1px solid #30363d; background: #161b22; }
+  /* AI使用量フッター。usage_command 設定時のみ表示され、サイドバー下端に張り付く */
+  #ai-usage { position: sticky; bottom: calc(-1 * var(--aside-pad-b));
+    margin: 14px -12px calc(-1 * var(--aside-pad-b));
+    padding: 8px 12px var(--aside-pad-b); background: #161b22;
+    border-top: 1px solid #30363d; font-size: .74rem; color: #8b949e; }
+  #ai-usage .usage-row { display: flex; align-items: baseline; flex-wrap: wrap;
+    gap: 2px 9px; margin: 3px 0; }
+  #ai-usage .usage-name { font-weight: 600; color: #cdd9e5; }
+  #ai-usage .usage-warning { color: #d9884f; }
+  #ai-usage .usage-critical { color: #f85149; }
+  #ai-usage .usage-err { color: #f85149; }
   aside h2 { margin: 4px 4px 12px; font-size: 1.05rem; }
   aside a { display: block; margin: 7px 0; padding: 10px; color: inherit; text-decoration: none;
     border: 1px solid #30363d; border-radius: 8px; overflow-wrap: anywhere; }
@@ -2790,6 +2832,52 @@ SIDEBAR_JS = r"""
     } catch (error) { /* サイドバーは更新失敗しても本体に影響させない */ }
   }
   setInterval(refreshSidebar, 5000);
+  // AI使用量フッター。サーバー側で5分キャッシュされるので同じ周期で見に行く
+  const aiUsage = document.getElementById("ai-usage");
+  async function refreshUsage() {
+    if (!aiUsage) return;
+    try {
+      const response = await fetch("/api/usage");
+      if (!response.ok) return;
+      const data = await response.json();
+      if (!data.providers || !data.providers.length) return;
+      if (data.updated_at) aiUsage.title = "取得 " + data.updated_at;
+      aiUsage.replaceChildren(...data.providers.map(provider => {
+        const row = document.createElement("div");
+        row.className = "usage-row";
+        const name = document.createElement("span");
+        name.className = "usage-name";
+        name.textContent = provider.name;
+        row.append(name);
+        if (!provider.ok) {
+          const err = document.createElement("span");
+          err.className = "usage-err";
+          err.textContent = "取得失敗";
+          err.title = provider.message || "";
+          row.append(err);
+          return row;
+        }
+        const items = provider.rows.concat(provider.extra ? [provider.extra] : []);
+        for (const item of items) {
+          const span = document.createElement("span");
+          span.className = "usage-item usage-" + item.level;
+          span.textContent = item.label.replace("枠", "") + " " + Math.round(item.percent) + "%";
+          if (item.reset_label) span.title = item.reset_label;
+          row.append(span);
+        }
+        if (provider.stale) {
+          const stale = document.createElement("span");
+          stale.textContent = "⚠";
+          stale.title = provider.stale;
+          row.append(stale);
+        }
+        return row;
+      }));
+      aiUsage.hidden = false;
+    } catch (error) { /* 使用量は取れなくても本体に影響させない */ }
+  }
+  refreshUsage();
+  setInterval(refreshUsage, 300000);
 """
 
 
@@ -2819,7 +2907,7 @@ LIST_PAGE = r"""<!doctype html>
   @media (max-width: 799px) {{
     /* SPは一覧を全画面にし、右ペインは出さない */
     aside {{ width: 100%; flex: 1; border-right: none;
-      padding-bottom: max(12px, env(safe-area-inset-bottom)); }}
+      --aside-pad-b: max(12px, env(safe-area-inset-bottom)); }}
     .placeholder {{ display: none; }}
   }}
 </style></head><body>
@@ -4065,6 +4153,8 @@ class Handler(BaseHTTPRequestHandler):
                 body_class="",
                 artifacts_html=artifact_links(item.get("artifacts", [])),
             ))
+        if parsed.path == "/api/usage":
+            return self._json(usage_data() or {"providers": []})
         if parsed.path == "/api/sidebar":
             items = []
             for entry in managed_sessions():
