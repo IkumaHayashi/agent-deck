@@ -2903,6 +2903,8 @@ TERMINAL_PAGE = r"""<!doctype html>
   .model-choices button:hover {{ border-color: #58a6ff; background: #1f6feb22; }}
   .model-choices button[disabled] {{ opacity: .5; cursor: default; }}
   header .icon {{ display: none; }}
+  /* SPのハンバーガーメニュー内だけで使う説明的ラベル */
+  header .menu-label {{ display: none; }}
   header img.icon {{ width: 19px; height: 19px; border-radius: 4px; vertical-align: -4px; }}
   header small {{ display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     color: #8b949e; margin-top: 2px; }}
@@ -3007,9 +3009,10 @@ TERMINAL_PAGE = r"""<!doctype html>
       position: absolute; top: calc(100% + 6px); right: 10px; z-index: 60;
       min-width: 190px; padding: 10px; background: #161b22;
       border: 1px solid #484f58; border-radius: 12px; box-shadow: 0 10px 28px #000c; }}
-    header .actions.open .label {{ display: inline; }}
+    header .actions.open .menu-label {{ display: inline; }}
     header .actions.open .icon {{ display: none; }}
-    header .actions.open button, header .actions.open a {{ text-align: left; padding: 11px 14px; }}
+    header .actions.open button, header .actions.open a {{ text-align: left; padding: 11px 14px;
+      font-size: .95rem; }}
   }}
 </style></head><body{body_class}>
 <div class="app"><aside><h2>セッション</h2>{sessions_sidebar}</aside><main class="terminal">
@@ -4029,27 +4032,33 @@ class Handler(BaseHTTPRequestHandler):
                 note_button=(
                     '<button type="button" class="note-button" id="note" title="'
                     f'{html.escape(item.get("note") or "メモを追加")}">'
-                    '<span class="label">メモ</span><span class="icon">📝</span></button>'
+                    '<span class="label">メモ</span><span class="icon">📝</span>'
+                    '<span class="menu-label">📝 メモを編集</span></button>'
                 ),
                 sessions_sidebar=build_sidebar(session),
                 sidebar_css=SIDEBAR_CSS, sidebar_js=SIDEBAR_JS,
                 restart_button=(
                     (
                         '<button type="button" data-restart="keep">'
-                        '<span class="label">再起動</span><span class="icon">↻</span></button>'
+                        '<span class="label">再起動</span><span class="icon">↻</span>'
+                        '<span class="menu-label">↻ セッションを再起動</span></button>'
                         if item["session_id"] else ""
                     )
                     +
                     f'<button type="button" id="handoff" data-target="'
                     f'{"Codex" if item["tool"] == "claude" else "Claude"}">'
                     f'<span class="label">→ {"Codex" if item["tool"] == "claude" else "Claude"}</span>'
-                    '<span class="icon">⇄</span></button>'
+                    '<span class="icon">⇄</span>'
+                    f'<span class="menu-label">⇄ {"Codex" if item["tool"] == "claude" else "Claude"}'
+                    'へ切り替え</span></button>'
                     + (
                         '<button type="button" class="warn" data-restart="bypass">'
-                        '<span class="label">⚠️ バイパス</span><span class="icon">⚠️</span></button>'
+                        '<span class="label">⚠️ バイパス</span><span class="icon">⚠️</span>'
+                        '<span class="menu-label">⚠️ バイパスで再起動</span></button>'
                         '<button type="button" id="to-terminal">'
                         '<span class="label">WezTermへ</span>'
-                        '<img class="icon" src="/tool-icon/wezterm.png" alt="WezTerm"></button>'
+                        '<img class="icon" src="/tool-icon/wezterm.png" alt="WezTerm">'
+                        '<span class="menu-label">WezTermターミナルへ移行</span></button>'
                         if item["session_id"] else ""
                     )
                 ),
