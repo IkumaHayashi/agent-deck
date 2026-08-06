@@ -2879,10 +2879,13 @@ TERMINAL_PAGE = r"""<!doctype html>
   #back-link {{ display: none; flex: 0 0 auto; padding: 7px 10px;
     border: 1px solid #484f58; border-radius: 8px; }}
   .terminal {{ min-width: 0; flex: 1; display: flex; flex-direction: column; }}
-  header {{ padding: 10px 12px; display: flex; align-items: center; gap: 10px;
+  header {{ position: relative; padding: 10px 12px; display: flex; align-items: center; gap: 10px;
     border-bottom: 1px solid #30363d; background: #161b22; flex-shrink: 0; z-index: 2; }}
   header a {{ color: #8ab4f8; text-decoration: none; font-size: 1rem; }}
   header button {{ flex: 0 0 auto; padding: 7px 10px; }}
+  /* 操作ボタン群: PCは従来どおり横並び（contentsで包みを消す）、SPはハンバーガーに畳む */
+  header .actions {{ display: contents; }}
+  #menu-toggle {{ display: none; }}
   header button.warn {{ border-color: #d63545; color: #ff9c9c; }}
   header button.note-button {{ color: #d29922; }}
   header div {{ min-width: 0; flex: 1; }}
@@ -2996,12 +2999,24 @@ TERMINAL_PAGE = r"""<!doctype html>
     header .icon {{ display: inline; }}
     header strong {{ font-size: .98rem; }}
     header small {{ font-size: .8rem; }}
+    /* 低頻度の操作（再起動・handoff・バイパス・WezTermへ・メモ）はハンバーガーに畳み、
+       頻繁に使うターミナル切替だけヘッダーに残す。誤タップ防止も兼ねる。 */
+    #menu-toggle {{ display: block; }}
+    header .actions {{ display: none; }}
+    header .actions.open {{ display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+      position: absolute; top: calc(100% + 6px); right: 10px; z-index: 60;
+      min-width: 190px; padding: 10px; background: #161b22;
+      border: 1px solid #484f58; border-radius: 12px; box-shadow: 0 10px 28px #000c; }}
+    header .actions.open .label {{ display: inline; }}
+    header .actions.open .icon {{ display: none; }}
+    header .actions.open button, header .actions.open a {{ text-align: left; padding: 11px 14px; }}
   }}
 </style></head><body{body_class}>
 <div class="app"><aside><h2>セッション</h2>{sessions_sidebar}</aside><main class="terminal">
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
-<small title="{cwd_full}">{cwd}</small></div>{restart_button}{note_button}<button type="button" id="history">
-<span class="label">ターミナル</span><span class="icon">▤</span></button></header>
+<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}</div>
+<button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
+<button type="button" id="menu-toggle" aria-label="メニュー">☰</button></header>
 <div id="artifacts">{artifacts_html}</div>
 <div id="chat"><div class="chat-empty">会話を読み込み中...</div></div>
 <pre id="screen" hidden>接続中...</pre>
@@ -3584,6 +3599,14 @@ TERMINAL_PAGE = r"""<!doctype html>
       if (Date.now() >= statusMessageUntil) status.textContent = "接続中";
     }} catch (error) {{ status.textContent = error.message; }}
   }}
+  const menuToggle = document.getElementById("menu-toggle");
+  const headerActions = document.getElementById("header-actions");
+  menuToggle.addEventListener("click", () => headerActions.classList.toggle("open"));
+  // メニュー外タップで閉じる。メニュー内ボタンのクリックもバブリングで届くので実行後に自動で閉じる
+  document.addEventListener("click", event => {{
+    if (menuToggle.contains(event.target)) return;
+    headerActions.classList.remove("open");
+  }});
   document.getElementById("history").addEventListener("click", async event => {{
     const historyButton = event.currentTarget;
     if (showingHistory) {{
