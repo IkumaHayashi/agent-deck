@@ -19,6 +19,9 @@
   "_extra_projects": "project_bases の外にある個別プロジェクト（ドロップダウン末尾）",
   "extra_projects": [],
 
+  "_recent_dirs": "「最近の会話を再開」に出す会話を cwd で限定（未設定なら home 配下すべて）",
+  "recent_dirs": [],
+
   "_allowed_networks": "アクセスを許可する CIDR。既定は Tailscale 網内 + localhost",
   "allowed_networks": [
     "100.64.0.0/10",

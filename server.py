@@ -132,6 +132,8 @@ DECK_CLI = os.path.join(SCRIPT_DIR, "deck")
 # pinned: 固定ボタンにする [{"label": ..., "path": ...}]
 # extra_projects: project_bases の外にある個別プロジェクト（ドロップダウンの末尾）
 PROJECT_BASES = [_expand(p) for p in CONFIG.get("project_bases", [])]
+# 「最近の会話を再開」に出す会話を cwd で限定するパス（未設定なら home 配下すべて）
+RECENT_DIRS = [_expand(p) for p in CONFIG.get("recent_dirs", [])]
 PINNED = [(item["label"], _expand(item["path"])) for item in CONFIG.get("pinned", [])]
 EXTRA_PROJECTS = [
     (item["label"], _expand(item["path"])) for item in CONFIG.get("extra_projects", [])
@@ -1743,6 +1745,11 @@ def recent_conversations(limit=24):
             continue
         # 起動時の validate_dir と同じ条件。ホーム外（scratchpad等）は起動できない
         if not (cwd == HOME or cwd.startswith(HOME + "/")) or not os.path.isdir(cwd):
+            continue
+        # recent_dirs 設定時は、その配下の会話だけを出す
+        if RECENT_DIRS and not any(
+            cwd == base or cwd.startswith(base + "/") for base in RECENT_DIRS
+        ):
             continue
         meta = log_meta(entry["path"], entry["tool"])
         summary = meta.get("summary") or meta.get("last_message")
