@@ -64,7 +64,8 @@ def find_bin(name, configured=None):
     return name
 
 
-PORT = int(CONFIG.get("port", 8787))
+# 優先順位: --port フラグ > AGENT_DECK_PORT > 設定ファイルの port > 8787
+PORT = int(os.environ.get("AGENT_DECK_PORT") or CONFIG.get("port", 8787))
 # サーバ再起動を検知して開きっぱなしのページを自動リロードさせるための ID
 BOOT_ID = uuid.uuid4().hex
 DATA_DIR = _expand(CONFIG.get("data_dir", "~/.local/share/agent-deck"))
@@ -4578,5 +4579,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Agent Deck — AI コーディング CLI の Web ランチャー & セッションマネージャ"
+    )
+    parser.add_argument(
+        "--port", type=int,
+        help="待ち受けポート（省略時: AGENT_DECK_PORT か設定ファイルの port、既定 8787）",
+    )
+    cli_args = parser.parse_args()
+    if cli_args.port:
+        PORT = cli_args.port
     os.makedirs(UPLOAD_DIR, mode=0o700, exist_ok=True)
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

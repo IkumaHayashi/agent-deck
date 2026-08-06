@@ -145,6 +145,10 @@ Web UI から起動したセッションは、WezTerm と Web UI の両方から
 `~/.config/agent-deck/config.json`（`AGENT_DECK_CONFIG` 環境変数で変更可）。
 全項目とコメントは [config.example.json](config.example.json) を参照してください。
 
+ポートは優先順に `--port` フラグ > `AGENT_DECK_PORT` 環境変数 > 設定ファイルの
+`port` > 既定値 8787 で決まります。設定ファイルを分ければ同じマシンで
+複数インスタンスを動かせます（例: `AGENT_DECK_CONFIG=demo.json python3 server.py --port 8788`）。
+
 実行時のデータ（アップロード画像・キャッシュ・ログ）は
 `~/.local/share/agent-deck/` に保存されます（`data_dir` で変更可）。
 
