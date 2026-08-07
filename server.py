@@ -2622,8 +2622,8 @@ PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>Agent Deck</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
+<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
 <style>
   :root {{ color-scheme: light dark; }}
   body {{ font-family: -apple-system, sans-serif; max-width: 620px; margin: 0 auto; padding: 20px; font-size: 18px; }}
@@ -3157,8 +3157,8 @@ LIST_PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>セッション一覧 - Agent Deck</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
+<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
 <style>
   :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}
@@ -3198,8 +3198,8 @@ TERMINAL_PAGE = r"""<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>{title}</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
+<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
 <style>
   :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}
@@ -4175,8 +4175,8 @@ MIGRATE_PAGE = r"""<!doctype html>
 <html lang="ja"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Web操作へ移行</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
-<link rel="apple-touch-icon" href="/favicon.svg">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
+<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
 <style>
   :root {{ color-scheme: light dark; }}
   body {{ font-family: -apple-system, sans-serif; max-width: 620px; margin: 0 auto; padding: 20px; font-size: 18px; }}
@@ -4286,6 +4286,7 @@ def render(message="", view="new", host=None):
             f' data-label="{more_label}">{more_label}</button>'
         )
     return PAGE.format(
+        favicon_version=urllib.parse.quote(VERSION),
         message=message, buttons=buttons, options=options, resume_items=resume_items,
         models_claude=model_radios("claude"), models_codex=model_radios("codex"),
         bookmarklet=html.escape(bookmarklet_js(origin)),
@@ -4374,6 +4375,7 @@ class Handler(BaseHTTPRequestHandler):
             if not has_sessions:
                 return self._redirect("/new")
             return self._page(LIST_PAGE.format(
+                favicon_version=urllib.parse.quote(VERSION),
                 sessions_sidebar=build_sidebar(None),
                 boot_json=json.dumps(BOOT_ID),
                 sidebar_css=SIDEBAR_CSS,
@@ -4398,6 +4400,7 @@ class Handler(BaseHTTPRequestHandler):
                 for item in candidates
             )
             return self._page(MIGRATE_PAGE.format(
+                favicon_version=urllib.parse.quote(VERSION),
                 title=html.escape(pane.get("title") or "(無題)"), cwd=html.escape(cwd),
                 tool=html.escape(agent["tool"]), pane_id=pane_id, options=options,
             ))
@@ -4412,6 +4415,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._page(render('<div class="msg err">❌ セッションが見つかりません</div>'), 404)
                 model = model_label(info["model"], info["tool"])
                 return self._page(TERMINAL_PAGE.format(
+                    favicon_version=urllib.parse.quote(VERSION),
                     title=html.escape(f'{info["tool"]} - WezTerm'),
                     tool_html=tool_label(info["tool"]),
                     cwd=html.escape(short_path(info["cwd"])), cwd_full=html.escape(info["cwd"]),
@@ -4445,6 +4449,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 badge = f'<span class="model">{html.escape(model)}</span>' if model else ""
             return self._page(TERMINAL_PAGE.format(
+                favicon_version=urllib.parse.quote(VERSION),
                 title=html.escape(f'{item["tool"]} - {item["name"]}'),
                 tool_html=tool_label(item["tool"]),
                 cwd=html.escape(short_path(item["cwd"])), cwd_full=html.escape(item["cwd"]),
