@@ -18,6 +18,7 @@ AI コーディング CLI（Claude Code / Codex）を Mac の WezTerm 上で起�
 
 - **ワンタップ起動**: プロジェクトのボタンを押すと WezTerm に新規タブが開き CLI が起動する
 - **スマホから操作**: 端末出力のリアルタイム表示、メッセージ送信、Enter / Esc / Ctrl+C、画像・ファイル添付
+- **ローカル音声入力（任意）**: Apple Silicon Mac上のWhisperで、API課金なしに音声を文字起こし
 - **セッション一覧**: 実行中/待機中の判定、会話の最初のプロンプト表示、コンテキスト使用率、作成した PR/issue のチップ表示
 - **会話の再開**: 最近の会話を `--resume` 付きでワンタップ再起動。モデル切り替えも resume 方式で安全に行う
 - **Web ⇔ WezTerm の移行**: 既存の WezTerm セッションを Web 操作へ、逆に Web セッションを素の TUI へ移行できる
@@ -168,6 +169,31 @@ Web UI から起動したセッションは、WezTerm と Web UI の両方から
 `~/.local/share/agent-deck/` に保存されます（`data_dir` で変更可）。
 
 ## 開発
+
+### ローカル音声入力（任意）
+
+Apple Silicon Macでは、専用のPython環境へ `mlx-whisper` を入れると、セッション画面の
+「🎙️ 音声」から録音した内容をMac内で文字起こしできます。音声は外部APIへ送信せず、
+処理後の一時ファイルも削除します。
+録音中はWeb AudioでPCM波形を直接取得し、約1秒ごとにWAVへ変換して、録音を継続した
+まま認識結果を入力欄へ順次反映します。MediaRecorderが停止時までデータを確定しない
+スマートフォンでも途中結果を取得できます。
+Whisperモデルは常駐ワーカーに一度だけ読み込み、途中結果が詰まった場合は最新分を優先します。
+`speech_to_text.realtime_model_dir` にsherpa-onnxの日本語ReazonSpeechモデルがある場合は、
+途中結果を低遅延なint8モデルで認識します。モデルがなければmlx-whisperへフォールバックします。
+現在のセッションからリポジトリ名、PR・Issue、コード表記、英数字を含む技術用語を
+自動抽出し、Whisperの認識ヒントとして渡します。固定語彙は設定の
+`speech_to_text.terms` で追加・変更できます。
+短い録音や無音でWhisperが生成しやすい字幕の定型文は入力せず、再録音を案内します。
+
+```sh
+python3 -m venv ~/.local/share/agent-deck/whisper-venv
+~/.local/share/agent-deck/whisper-venv/bin/pip install mlx-whisper
+```
+
+初回の文字起こし時はモデルをダウンロードするため時間がかかります。Tailscale IPの
+HTTP URLではブラウザがマイクを許可しないため、`localhost` またはTailscale Serve等の
+HTTPS URLからアクセスしてください。
 
 ```sh
 ruff check server.py
