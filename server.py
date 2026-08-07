@@ -21,6 +21,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -34,6 +35,14 @@ SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 CONFIG_PATH = os.environ.get("AGENT_DECK_CONFIG") or f"{HOME}/.config/agent-deck/config.json"
 
 
+def read_version():
+    try:
+        with open(os.path.join(SCRIPT_DIR, "VERSION"), encoding="utf-8") as source:
+            return source.read().strip()
+    except OSError:
+        return "0.0.0"
+
+
 def load_config(path=None):
     """設定ファイルを読む。無ければ空 dict（すべて既定値で動く）。"""
     try:
@@ -44,6 +53,11 @@ def load_config(path=None):
 
 
 CONFIG = load_config()
+VERSION = read_version()
+UPDATE_REPO = CONFIG.get("update_repo", "IkumaHayashi/agent-deck")
+UPDATE_CACHE = {"at": 0.0, "data": None}
+UPDATE_LOCK = threading.Lock()
+UPDATE_TTL = 3600
 
 
 def _expand(path):
@@ -62,6 +76,75 @@ def find_bin(name, configured=None):
         if os.path.exists(candidate):
             return candidate
     return name
+
+
+def version_tuple(value):
+    """比較用の SemVer 3要素。v0.1.0 以外のタグは更新対象にしない。"""
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", value or "")
+    return tuple(map(int, match.groups())) if match else None
+
+
+def latest_release(force=False):
+    """GitHub Releases の最新版を1時間キャッシュして返す。取得失敗は非表示扱い。"""
+    with UPDATE_LOCK:
+        if not force and UPDATE_CACHE["data"] is not None \
+                and UPDATE_CACHE["at"] + UPDATE_TTL > time.time():
+            return UPDATE_CACHE["data"]
+    request = urllib.request.Request(
+        f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
+        headers={"Accept": "application/vnd.github+json", "User-Agent": "agent-deck"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.load(response)
+        tag = payload.get("tag_name", "")
+        latest = version_tuple(tag)
+        current = version_tuple(VERSION)
+        data = {
+            "current": VERSION,
+            "latest": tag.removeprefix("v"),
+            "available": bool(latest and current and latest > current),
+            "url": payload.get("html_url", ""),
+        }
+    except (OSError, ValueError, json.JSONDecodeError):
+        data = {"current": VERSION, "latest": "", "available": False, "url": ""}
+    with UPDATE_LOCK:
+        UPDATE_CACHE.update(at=time.time(), data=data)
+    return data
+
+
+def install_release(tag):
+    """指定Releaseへfast-forwardする。ローカル変更や履歴の巻き戻しは拒否する。"""
+    if not version_tuple(tag):
+        raise ValueError("更新先のバージョンが不正です")
+    git = find_bin("git")
+    status = subprocess.run(
+        [git, "status", "--porcelain"], cwd=SCRIPT_DIR,
+        capture_output=True, text=True, timeout=10,
+    )
+    if status.returncode != 0:
+        raise RuntimeError(status.stderr.strip() or "Gitの状態を確認できませんでした")
+    if status.stdout.strip():
+        raise RuntimeError("ローカル変更があるため更新できません。変更をcommitまたは退避してください")
+    release_tag = f"v{tag.removeprefix('v')}"
+    fetched = subprocess.run(
+        [git, "fetch", "--tags", "origin", release_tag], cwd=SCRIPT_DIR,
+        capture_output=True, text=True, timeout=60,
+    )
+    if fetched.returncode != 0:
+        raise RuntimeError(fetched.stderr.strip() or "Releaseを取得できませんでした")
+    merged = subprocess.run(
+        [git, "merge", "--ff-only", f"refs/tags/{release_tag}"], cwd=SCRIPT_DIR,
+        capture_output=True, text=True, timeout=30,
+    )
+    if merged.returncode != 0:
+        raise RuntimeError(merged.stderr.strip() or "Releaseへ更新できませんでした")
+    if read_version() != tag.removeprefix("v"):
+        raise RuntimeError("更新後のバージョンを確認できませんでした")
+
+
+def restart_server():
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 # 優先順位: --port フラグ > AGENT_DECK_PORT > 設定ファイルの port > 8787
@@ -1416,7 +1499,12 @@ ARTIFACT_CACHE = {}  # log_path -> 増分パース状態（読み取り済みオ
 GH_CREATE_MARKERS = (b"gh pr create", b"gh issue create")
 # コマンド位置の gh pr/issue create のみ対象にする。grep の検索文字列や
 # ドキュメント内の言及（引用符の中など）を「実行した」と誤認しないため。
-GH_CREATE_RE = re.compile(r"(?m)(?:^|[;&|(]|\$\()\s*gh\s+(pr|issue)\s+create\b")
+# `SKIP_REVIEW_GATE=1 gh pr create` のようなコマンド単位の環境変数指定も許可する。
+GH_CREATE_RE = re.compile(
+    r"(?m)(?:^|[;&|(]|\$\()\s*"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+    r"gh\s+(pr|issue)\s+create\b"
+)
 GH_URL_RE = re.compile(r"https://github\.com/[\w.-]+/([\w.-]+)/(pull|issues)/(\d+)")
 
 # PR・issueの状態（open/merged/closed）。チップの色分けに使う。
@@ -1943,6 +2031,9 @@ def load_managed_sessions():
             note = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_note"
             ).stdout.strip()
+            pinned = tmux_run(
+                "show-option", "-qv", "-t", parts[0], "@launcher_pinned"
+            ).stdout.strip() == "1"
             agent = pane_agent({"tty_name": parts[4]})
             exact = None
             session_id = tmux_run(
@@ -1991,6 +2082,7 @@ def load_managed_sessions():
                 "command": parts[3], "tool": tool or parts[3], "summary": summary,
                 "last_message": last_message, "log_path": log_path,
                 "note": note,
+                "pinned": pinned,
                 "session_id": session_id, "bypass": bypass,
                 "running": running,
                 "background": "" if running else screen_background_label(screen),
@@ -2002,6 +2094,7 @@ def load_managed_sessions():
         # バックグラウンド監視中は返事を求めていないので実行中と同じ扱い。
         sessions.sort(key=lambda item: item["name"], reverse=True)
         sessions.sort(key=lambda item: bool(item["running"] or item["background"]))
+        sessions.sort(key=lambda item: not item["pinned"])
         return sessions
     except (OSError, subprocess.SubprocessError):
         return []
@@ -2093,7 +2186,9 @@ def build_sidebar(active):
         "要対応のみ表示</label>"
     )
     sidebar += '<div id="side-sessions">'
-    for other in managed_sessions():
+    # 表示中のセッションは、状態やピンの有無にかかわらず見失わないよう最上部へ置く。
+    sessions = sorted(managed_sessions(), key=lambda item: item["name"] != active)
+    for other in sessions:
         status_text, status_class = sidebar_status(other)
         keep = " f-keep" if status_class in ("need", "ask", "wait") else ""
         # 最初のプロンプトでセッションを識別し、最終メッセージは同じでなければ添える。
@@ -2110,6 +2205,7 @@ def build_sidebar(active):
             f'href="/terminal?session={urllib.parse.quote(other["name"])}">'
             f'<strong>{tool_label(other["tool"])}'
             f'<span class="dir">{html.escape(dir_label(other["cwd"]))}</span>'
+            f'{"<span class=\"pin\" title=\"ピン留め中\">📌</span>" if other.get("pinned") else ""}'
             f'<span class="st st-{status_class}">{html.escape(status_text)}</span>'
             f'{context_chip(other.get("context"))}</strong>'
             f'{lines}</a>'
@@ -2143,8 +2239,14 @@ def build_sidebar(active):
                 f'<span class="dir">{html.escape(dir_label(cwd))}</span>'
                 f'<span class="wez-badge">WezTerm</span></strong></div>'
             )
-    # AI使用量フッター。/api/usage から取得できたときだけJSが表示する
-    sidebar += '<div id="ai-usage" hidden></div>'
+    # バージョンとAI使用量は一覧が短いときもサイドバー最下部へ置く。
+    sidebar += (
+        '<div id="sidebar-footer"><div id="app-meta">'
+        f'<span>Agent Deck v{html.escape(VERSION)}</span>'
+        '<button type="button" id="app-update" hidden>アップデート</button>'
+        '<small id="update-status"></small></div>'
+        '<div id="ai-usage" hidden></div></div>'
+    )
     return sidebar
 
 
@@ -2352,7 +2454,9 @@ def launcher_session_name(output):
     return match.group(1) if match else ""
 
 
-def set_session_metadata(name, summary="", session_id="", bypass=False, note=""):
+def set_session_metadata(
+    name, summary="", session_id="", bypass=False, note="", pinned=False
+):
     if not name:
         return
     if summary:
@@ -2364,6 +2468,8 @@ def set_session_metadata(name, summary="", session_id="", bypass=False, note="")
         tmux_run("set-option", "-t", name, "@launcher_bypass", "1")
     if note:
         tmux_run("set-option", "-t", name, "@launcher_note", note[:1000])
+    if pinned:
+        tmux_run("set-option", "-t", name, "@launcher_pinned", "1")
 
 
 def wait_for_new_session_id(tool, cwd, started_at, timeout=4):
@@ -2752,10 +2858,15 @@ SIDEBAR_CSS = r"""
   aside > * { flex-shrink: 0; }
   /* AI使用量フッター。usage_command 設定時のみ表示。リストが短くても
      margin-top:auto で最下端に落とし、あふれたら sticky で張り付かせる */
-  #ai-usage { position: sticky; bottom: calc(-1 * var(--aside-pad-b));
-    margin: auto -12px calc(-1 * var(--aside-pad-b));
-    padding: 8px 12px var(--aside-pad-b); background: #161b22;
-    border-top: 1px solid #30363d; font-size: .74rem; color: #8b949e; }
+  #sidebar-footer { position: sticky; bottom: calc(-1 * var(--aside-pad-b));
+    margin: auto -12px calc(-1 * var(--aside-pad-b)); padding: 8px 12px var(--aside-pad-b);
+    background: #161b22; border-top: 1px solid #30363d; }
+  #app-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
+    color: #8b949e; font-size: .72rem; }
+  #app-meta button { flex: 0 0 auto; width: auto; padding: 4px 8px; font-size: .72rem;
+    color: #fff; background: #238636; border-color: #2ea043; }
+  #app-meta small { flex-basis: 100%; margin: 0; color: #d29922; }
+  #ai-usage { margin-top: 5px; font-size: .74rem; color: #8b949e; }
   #ai-usage .usage-row { display: flex; align-items: baseline; flex-wrap: wrap;
     gap: 2px 9px; margin: 3px 0; }
   #ai-usage .usage-name { font-weight: 600; color: #cdd9e5; }
@@ -2821,6 +2932,7 @@ SIDEBAR_CSS = r"""
   aside strong .dir { flex: 0 1 auto; min-width: 0; margin-left: 7px; color: #8b949e;
     font-weight: 400; font-size: .78rem; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; }
+  aside .pin { flex: 0 0 auto; font-size: .72rem; }
   aside #side-sessions .st { flex: 0 1 auto; min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
 """
@@ -2848,7 +2960,10 @@ SIDEBAR_JS = r"""
       if (!response.ok || !sideSessions) return;
       // サーバー再起動後は描画済みHTMLが古いので読み込み直す
       if (data.boot && data.boot !== bootId) { location.reload(); return; }
-      sideSessions.replaceChildren(...data.items.map(item => {
+      // 表示中を必ず先頭にする。残りはAPIの「ピン留め→従来順」を保つ。
+      const items = data.items.slice().sort((a, b) =>
+        Number(b.name === session) - Number(a.name === session));
+      sideSessions.replaceChildren(...items.map(item => {
         const link = document.createElement("a");
         link.href = "/terminal?session=" + encodeURIComponent(item.name);
         if (item.name === session) link.classList.add("active");
@@ -2869,10 +2984,19 @@ SIDEBAR_JS = r"""
         const dir = document.createElement("span");
         dir.className = "dir";
         dir.textContent = item.dir || "";
+        if (item.pinned) {
+          const pin = document.createElement("span");
+          pin.className = "pin";
+          pin.title = "ピン留め中";
+          pin.textContent = "📌";
+          title.append(tool, dir, pin);
+        } else {
+          title.append(tool, dir);
+        }
         const badge = document.createElement("span");
         badge.className = "st st-" + item.status_class;
         badge.textContent = item.status;
-        title.append(tool, dir, badge);
+        title.append(badge);
         if (item.context !== null && item.context !== undefined) {
           const ctx = document.createElement("span");
           ctx.className = "ctx" +
@@ -2921,6 +3045,41 @@ SIDEBAR_JS = r"""
     } catch (error) { /* サイドバーは更新失敗しても本体に影響させない */ }
   }
   setInterval(refreshSidebar, 5000);
+  // 最新Releaseがある場合だけ更新ボタンを表示する。
+  const updateButton = document.getElementById("app-update");
+  const updateStatus = document.getElementById("update-status");
+  async function checkVersion() {
+    if (!updateButton) return;
+    try {
+      const response = await fetch("/api/version");
+      const data = await response.json();
+      updateButton.hidden = !data.available;
+      if (data.available) {
+        updateButton.textContent = "v" + data.latest + "へ更新";
+        updateButton.dataset.version = data.latest;
+      }
+    } catch (error) { /* 更新確認の失敗は通常利用に影響させない */ }
+  }
+  if (updateButton) updateButton.addEventListener("click", async () => {
+    const version = updateButton.dataset.version;
+    if (!version || !confirm("Agent Deckをv" + version + "へ更新しますか？")) return;
+    updateButton.disabled = true;
+    updateStatus.textContent = "更新中…";
+    try {
+      const body = new URLSearchParams({version});
+      const response = await fetch("/api/update", {
+        method: "POST", headers: {"Content-Type": "application/x-www-form-urlencoded"}, body
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "更新できませんでした");
+      updateStatus.textContent = "更新しました。再起動中…";
+      setTimeout(() => location.reload(), 1800);
+    } catch (error) {
+      updateStatus.textContent = error.message;
+      updateButton.disabled = false;
+    }
+  });
+  checkVersion();
   // AI使用量フッター。サーバー側で5分キャッシュされるので同じ周期で見に行く
   const aiUsage = document.getElementById("ai-usage");
   async function refreshUsage() {
@@ -3200,7 +3359,7 @@ TERMINAL_PAGE = r"""<!doctype html>
 </style></head><body{body_class}>
 <div class="app"><aside><h2>セッション</h2>{sessions_sidebar}</aside><main class="terminal">
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
-<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}</div>
+<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{pin_button}{restart_button}{note_button}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
 <button type="button" id="menu-toggle" aria-label="メニュー">☰</button></header>
 <div id="artifacts">{artifacts_html}</div>
@@ -3236,6 +3395,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   const session = {session_json};
   const bootId = {boot_json};
   let sessionNote = {note_json};
+  let sessionPinned = {pinned_json};
   // 添付画像の拡大表示
   const lightbox = document.getElementById("lightbox");
   function showLightbox(src) {{
@@ -3251,6 +3411,25 @@ TERMINAL_PAGE = r"""<!doctype html>
   const noteButton = document.getElementById("note");
   const noteModal = document.getElementById("note-modal");
   const noteInput = document.getElementById("note-input");
+  const pinButton = document.getElementById("pin");
+  function renderPinButton() {{
+    if (!pinButton) return;
+    pinButton.classList.toggle("pinned", sessionPinned);
+    pinButton.title = sessionPinned ? "ピン留めを解除" : "ピン留め";
+    pinButton.querySelector(".label").textContent = sessionPinned ? "ピン解除" : "ピン留め";
+    pinButton.querySelector(".icon").textContent = sessionPinned ? "📌" : "📍";
+    pinButton.querySelector(".menu-label").textContent = sessionPinned ? "📌 ピン留めを解除" : "📍 ピン留め";
+  }}
+  renderPinButton();
+  if (pinButton) pinButton.addEventListener("click", async () => {{
+    try {{
+      const data = await post("/api/sessions/" + encodeURIComponent(session) + "/pin",
+        {{pinned: sessionPinned ? "0" : "1"}});
+      sessionPinned = !!data.pinned;
+      renderPinButton();
+      await refreshSidebar();
+    }} catch (error) {{ status.textContent = error.message; }}
+  }});
   if (noteButton) noteButton.addEventListener("click", () => {{
     noteInput.value = sessionNote;
     noteModal.hidden = false;
@@ -4213,7 +4392,7 @@ class Handler(BaseHTTPRequestHandler):
                     context_badge=context_badge_html(info.get("context")),
                     model_choices="",
                     session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
-                    note_json=json.dumps(""), note_button="",
+                    note_json=json.dumps(""), note_button="", pinned_json="false", pin_button="",
                     sessions_sidebar=build_sidebar(session),
                     sidebar_css=SIDEBAR_CSS, sidebar_js=SIDEBAR_JS,
                     upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
@@ -4253,6 +4432,11 @@ class Handler(BaseHTTPRequestHandler):
                 session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
                 upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
                 note_json=json.dumps(item.get("note", "")),
+                pinned_json=json.dumps(bool(item.get("pinned"))),
+                pin_button=(
+                    '<button type="button" id="pin"><span class="label">ピン留め</span>'
+                    '<span class="icon">📍</span><span class="menu-label">📍 ピン留め</span></button>'
+                ),
                 note_button=(
                     '<button type="button" class="note-button" id="note" title="'
                     f'{html.escape(item.get("note") or "メモを追加")}">'
@@ -4291,6 +4475,8 @@ class Handler(BaseHTTPRequestHandler):
             ))
         if parsed.path == "/api/usage":
             return self._json(usage_data() or {"providers": []})
+        if parsed.path == "/api/version":
+            return self._json(latest_release())
         if parsed.path == "/api/sidebar":
             items = []
             for entry in managed_sessions():
@@ -4307,6 +4493,7 @@ class Handler(BaseHTTPRequestHandler):
                     "summary": entry["summary"],
                     "last_message": entry["last_message"],
                     "note": entry.get("note", ""),
+                    "pinned": bool(entry.get("pinned")),
                     "artifacts": entry.get("artifacts", []),
                 })
             return self._json({"items": items, "boot": BOOT_ID})
@@ -4489,8 +4676,23 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(body.decode("utf-8"))
         except UnicodeDecodeError:
             return self._json({"error": "送信データを読み取れませんでした"}, 400)
+        if self.path == "/api/update":
+            try:
+                version = qs.get("version", [""])[0]
+                release = latest_release(force=True)
+                if not release["available"] or version != release["latest"]:
+                    return self._json({"error": "利用できるReleaseではありません"}, 400)
+                install_release(version)
+                self._json({"ok": True, "version": version})
+                # レスポンスをブラウザへ返してから、更新後のコードで再起動する。
+                timer = threading.Timer(0.5, restart_server)
+                timer.daemon = True
+                timer.start()
+                return
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 500)
         match = re.fullmatch(
-            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(input|key|kill|restart|handoff|answer|model|terminal|note)",
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(input|key|kill|restart|handoff|answer|model|terminal|note|pin)",
             self.path,
         )
         if match:
@@ -4519,6 +4721,18 @@ class Handler(BaseHTTPRequestHandler):
                         raise RuntimeError(result.stderr.strip() or "メモを保存できませんでした")
                     invalidate_session_cache()
                     return self._json({"ok": True, "note": value})
+                elif action == "pin":
+                    pinned = qs.get("pinned", ["0"])[0] == "1"
+                    result = (
+                        tmux_run("set-option", "-t", session, "@launcher_pinned", "1")
+                        if pinned else tmux_run(
+                            "set-option", "-u", "-t", session, "@launcher_pinned"
+                        )
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stderr.strip() or "ピン留めを変更できませんでした")
+                    invalidate_session_cache()
+                    return self._json({"ok": True, "pinned": pinned})
                 elif action == "model":
                     value = qs.get("model", [""])[0]
                     item = next(item for item in managed_sessions() if item["name"] == session)
@@ -4741,6 +4955,7 @@ class Handler(BaseHTTPRequestHandler):
             raise RuntimeError("再起動したセッション名を取得できませんでした")
         set_session_metadata(
             new_session, item["summary"], item["session_id"], bypass, item.get("note", ""),
+            bool(item.get("pinned")),
         )
         invalidate_session_cache()
         return new_session
@@ -4773,7 +4988,7 @@ class Handler(BaseHTTPRequestHandler):
         session_id = wait_for_new_session_id(target, item["cwd"], started_at)
         set_session_metadata(
             new_session, item.get("summary") or prompt, session_id,
-            bool(item.get("bypass")), item.get("note", ""),
+            bool(item.get("bypass")), item.get("note", ""), bool(item.get("pinned")),
         )
         result = tmux_run("kill-session", "-t", session)
         if result.returncode != 0:

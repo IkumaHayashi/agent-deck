@@ -135,6 +135,85 @@ class CodexSessionTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(upload_dir, "codex-images")))
 
 
+class SessionArtifactTest(unittest.TestCase):
+    def test_create_command_with_environment_variable_is_detected(self):
+        command = (
+            "cd /tmp/repo && SKIP_REVIEW_GATE=1 "
+            "gh pr create --base develop"
+        )
+
+        self.assertEqual(["pr"], server.GH_CREATE_RE.findall(command))
+
+    def test_create_command_mentioned_in_argument_is_not_detected(self):
+        command = "rg 'SKIP_REVIEW_GATE=1 gh pr create' README.md"
+
+        self.assertEqual([], server.GH_CREATE_RE.findall(command))
+
+
+class SessionPinTest(unittest.TestCase):
+    def test_active_session_is_rendered_first_even_when_not_pinned(self):
+        sessions = [
+            self._session("agent-pinned", pinned=True),
+            self._session("agent-active", pinned=False),
+            self._session("agent-other", pinned=False),
+        ]
+        with (
+            mock.patch.object(server, "managed_sessions", return_value=sessions),
+            mock.patch.object(server, "wezterm_panes", return_value=[]),
+        ):
+            sidebar = server.build_sidebar("agent-active")
+
+        self.assertLess(
+            sidebar.index("session=agent-active"),
+            sidebar.index("session=agent-pinned"),
+        )
+
+    def test_pinned_metadata_is_restored_on_restarted_session(self):
+        calls = []
+        with mock.patch.object(
+            server, "tmux_run",
+            side_effect=lambda *args: calls.append(args) or SimpleNamespace(),
+        ):
+            server.set_session_metadata(
+                "agent-new", "summary", "session-id", False, "note", True
+            )
+
+        self.assertIn(
+            ("set-option", "-t", "agent-new", "@launcher_pinned", "1"), calls
+        )
+
+    @staticmethod
+    def _session(name, pinned=False):
+        return {
+            "name": name, "tool": "codex", "cwd": "/tmp/project",
+            "summary": "summary", "last_message": "summary", "note": "",
+            "running": False, "background": "", "context": None,
+            "artifacts": [], "pinned": pinned,
+        }
+
+
+class VersionUpdateTest(unittest.TestCase):
+    def test_semver_is_compared_numerically(self):
+        self.assertEqual((1, 10, 2), server.version_tuple("v1.10.2"))
+        self.assertGreater(server.version_tuple("0.10.0"), server.version_tuple("0.9.9"))
+        self.assertIsNone(server.version_tuple("latest"))
+
+    def test_update_is_rejected_when_worktree_has_local_changes(self):
+        dirty = SimpleNamespace(returncode=0, stdout=" M server.py\n", stderr="")
+        with mock.patch.object(server.subprocess, "run", return_value=dirty) as run:
+            with self.assertRaisesRegex(RuntimeError, "ローカル変更"):
+                server.install_release("0.2.0")
+
+        run.assert_called_once()
+
+    def test_invalid_release_tag_is_rejected_before_git_is_called(self):
+        with mock.patch.object(server.subprocess, "run") as run:
+            with self.assertRaisesRegex(ValueError, "バージョンが不正"):
+                server.install_release("main")
+
+        run.assert_not_called()
+
+
 class ClaudeProjectDirTest(unittest.TestCase):
     def test_non_ascii_and_punctuation_are_replaced(self):
         self.assertEqual(

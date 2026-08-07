@@ -66,6 +66,10 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agent-deck.web.plist
 
 `http://<Mac の Tailscale IP>:8787` にアクセスすると起動ページが開きます。
 
+画面下部には現在のバージョンが表示されます。GitHub Releases に新しいバージョンが
+ある場合は更新ボタンが現れ、作業ツリーにローカル変更がなければ対象Releaseへ
+fast-forwardして自動再起動します。
+
 再起動後も動かすには WezTerm をログイン項目に追加してください。
 FileVault が有効な場合は再起動後に一度 Mac 本体でログインが必要です。
 
@@ -168,6 +172,15 @@ Web UI から起動したセッションは、WezTerm と Web UI の両方から
 ```sh
 ruff check server.py
 python3 -m unittest test_server
+```
+
+### リリース
+
+`VERSION` を更新して変更をmainへcommitした後、次のスクリプトを実行します。
+lint・test・ブランチ・作業ツリーを検証してから、タグとGitHub Releaseを公開します。
+
+```sh
+scripts/release.sh 0.1.0
 ```
 
 ## ライセンス
