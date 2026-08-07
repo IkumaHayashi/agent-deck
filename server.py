@@ -503,6 +503,21 @@ def bash_log_text(text, limit=4000):
     return "```\n" + output + "\n```"
 
 
+def user_shell_log_text(text, limit=4000):
+    """Claude Code の user_shell_command を読みやすい Markdown にする。"""
+    command = re.search(r"<command>(.*?)</command>", text, re.S)
+    result = re.search(r"<result>(.*?)</result>", text, re.S)
+    parts = []
+    if command and command.group(1).strip():
+        parts.append("```sh\n$ " + command.group(1).strip() + "\n```")
+    if result and result.group(1).strip():
+        output = result.group(1).strip()
+        if len(output) > limit:
+            output = output[:limit] + "\n…（省略）"
+        parts.append("```\n" + output + "\n```")
+    return "\n\n".join(parts)
+
+
 def slash_log_text(text, limit=2000):
     """スラッシュコマンドの実行ログ（/model など）を読める1行に畳む。"""
     name = re.search(r"<command-name>(.*?)</command-name>", text, re.S)
@@ -533,6 +548,9 @@ def user_message_entry(item, tool):
             return None
         # コマンド自体は発言側、その出力は結果側に置く。
         return {"role": "user" if text.startswith("<command-name>") else "assistant", "text": body}
+    if text.startswith("<user_shell_command>"):
+        body = user_shell_log_text(text)
+        return {"role": "user", "text": body} if body else None
     if not text.startswith("<bash-"):
         return {"role": "user", "text": text}
     body = bash_log_text(text)
@@ -555,6 +573,9 @@ def user_summary_text(item, tool):
         text = slash_log_text(text)
     elif text.startswith("<local-command-"):
         return ""  # スラッシュコマンドの出力も発言ではない
+    elif text.startswith("<user_shell_command>"):
+        command = re.search(r"<command>(.*?)</command>", text, re.S)
+        text = "$ " + command.group(1).strip() if command else ""
     # 添付画像のフルパスは一覧では邪魔なので目印に置き換える。
     text = UPLOAD_MENTION_RE.sub("📎画像", text)
     return " ".join(text.split())
@@ -813,6 +834,20 @@ def session_running(name):
     return screen.returncode == 0 and screen_is_running(screen.stdout)
 
 
+def dialog_is_foreground(lines, prompt_index):
+    """プロンプト行が画面最下部にあるか（＝実際に入力待ちのダイアログか）。
+
+    会話に引用された「Enter selection [1-N]」等のテキストは、下に本文や
+    入力欄・フッターが続くので、これで本物と区別できる。本物のダイアログの
+    下は空行か「Enter to confirm · Esc to cancel」のキー案内だけ。
+    """
+    for line in lines[prompt_index + 1:]:
+        text = line.strip()
+        if text and "Enter to confirm" not in text and "Esc to cancel" not in text:
+            return False
+    return True
+
+
 def parse_confirm_screen(lines):
     """複数質問の AskUserQuestion 最後にある y/n 確認画面を拾う。
 
@@ -824,10 +859,11 @@ def parse_confirm_screen(lines):
         Enter y/n:
     """
     prompt_index = next(
-        (i for i, line in enumerate(lines) if line.strip().startswith("Enter y/n")),
+        (i for i in range(len(lines) - 1, -1, -1)
+         if lines[i].strip().startswith("Enter y/n")),
         None,
     )
-    if prompt_index is None:
+    if prompt_index is None or not dialog_is_foreground(lines, prompt_index):
         return None
     choices = []
     for row in range(max(0, prompt_index - 6), prompt_index):
@@ -864,10 +900,15 @@ def parse_question_screen(screen):
         Enter selection [1-N], or Escape to cancel:
     """
     lines = screen.splitlines()
+    # 引用されたダイアログ風テキストが画面上部に残ることがあるため、
+    # 下から探して最下部にあるものだけを本物として扱う。
     prompt_index = next(
-        (i for i, line in enumerate(lines) if "Enter selection [" in line), None
+        (i for i in range(len(lines) - 1, -1, -1) if "Enter selection [" in lines[i]),
+        None,
     )
     if prompt_index is None:
+        return parse_confirm_screen(lines)
+    if not dialog_is_foreground(lines, prompt_index):
         return parse_confirm_screen(lines)
     match = re.search(r"Enter selection \[1-(\d)\]", lines[prompt_index])
     if not match:
@@ -904,7 +945,10 @@ def parse_question_screen(screen):
     while row >= 0 and not lines[row].strip():
         row -= 1
     while row >= 0 and lines[row].strip() and len(question_lines) < 4:
-        question_lines.insert(0, lines[row].strip())
+        line = lines[row].strip()
+        # 起動時ダイアログ（MCP承認等）の画面先頭に出るモード表示は質問文でない
+        if not line.startswith("[Screen Reader Mode"):
+            question_lines.insert(0, line)
         row -= 1
     question = " ".join(question_lines)
     if "☐" in question:
@@ -985,9 +1029,46 @@ def pending_question(name, tool):
         return None
     if screen.returncode != 0:
         return None
+    # 実行中のセッションに本物の選択ダイアログは出ない。会話に引用された
+    # 「Enter selection [1-N]」等が画面に残っているだけの誤検出を避ける。
+    if screen_is_running(screen.stdout):
+        return None
     if tool == "codex":
         return parse_codex_question_screen(screen.stdout)
     return parse_question_screen(screen.stdout)
+
+
+def parse_shell_auth_screen(screen):
+    """実行中の GitHub CLI デバイス認証案内を Markdown へ変換する。"""
+    matches = list(re.finditer(
+        r"First copy your one-time code:\s*([A-Z0-9-]+).*?"
+        r"Open this URL to continue in your web browser:\s*"
+        r"(https://github\.com/login/device)",
+        screen,
+        re.S,
+    ))
+    if not matches:
+        return ""
+    match = matches[-1]
+    if "Authentication complete" in screen[match.end():]:
+        return ""
+    code, url = match.groups()
+    return (
+        "**GitHub認証待ちです**\n\n"
+        f"ワンタイムコード: `{code}`\n\n"
+        f"[GitHubの認証ページを開く]({url})"
+    )
+
+
+def pending_shell_auth(name, tool):
+    """tmux画面にだけ出ている実行中の認証案内を返す。"""
+    if tool != "claude":
+        return ""
+    try:
+        screen = tmux_run("capture-pane", "-p", "-J", "-S", "-40", "-t", name)
+    except Exception:
+        return ""
+    return parse_shell_auth_screen(screen.stdout) if screen.returncode == 0 else ""
 
 
 def log_activity(path, tool):
@@ -3020,6 +3101,8 @@ TERMINAL_PAGE = r"""<!doctype html>
   .expand-toggle:hover {{ color: #e6edf3; border-color: #58a6ff; }}
   .message.activity {{ display: flex; align-items: center; gap: 9px; color: #d9884f;
     font-size: .92rem; }}
+  .message.auth .bubble {{ padding: 14px 16px; border: 1px solid #d29922;
+    border-radius: 10px; background: #d2992212; }}
   .message.question {{ padding: 14px; border: 1px solid #d29922; border-radius: 12px; }}
   .question-title {{ margin: 0 0 10px; font-weight: 700; }}
   .question .choice {{ display: block; width: 100%; margin: 6px 0; padding: 10px 13px;
@@ -3039,6 +3122,10 @@ TERMINAL_PAGE = r"""<!doctype html>
   .bubble li > ul, .bubble li > ol {{ margin: 4px 0; padding-left: 1.5em; }}
   .bubble code {{ padding: 2px 5px; border-radius: 5px; background: #6e768133;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }}
+  .bubble .inline-run {{ display: inline-block; width: auto; flex: none; margin-left: 6px;
+    padding: 2px 8px; border: 1px solid #3d444d; border-radius: 6px; background: #21262d;
+    color: #adbac7; font-size: .75rem; vertical-align: 1px; cursor: pointer; }}
+  .bubble .inline-run:hover {{ background: #30363d; border-color: #6e7681; color: #e6edf3; }}
   .bubble pre {{ margin: 12px 0; padding: 13px; overflow-x: auto; border: 1px solid #30363d;
     border-radius: 9px; background: #010409; white-space: pre; }}
   .bubble pre code {{ padding: 0; background: none; font-size: .88rem; }}
@@ -3214,6 +3301,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   let serverActivity = "";
   let serverQueued = [];
   let serverQuestion = null;
+  let serverAuth = "";
   // 送信直後はまだログに書かれていないので、確定するまで自前で吹き出しを出す。
   let pendingMessages = [];
   // 長文をユーザーが展開したら、再描画後も開いたままにするためのキー集合
@@ -3243,7 +3331,17 @@ TERMINAL_PAGE = r"""<!doctype html>
       if (match.index > cursor) target.append(document.createTextNode(text.slice(cursor, match.index)));
       const token = match[0];
       if (token.startsWith("`")) {{
-        const code = document.createElement("code"); code.textContent = token.slice(1, -1); target.append(code);
+        const value = token.slice(1, -1);
+        const code = document.createElement("code"); code.textContent = value; target.append(code);
+        // 文章中でも `! command` / `$ command` と明示されたものは、その場で実行できる。
+        if (/^[!$]\s+\S/.test(value) && !document.body.classList.contains("readonly")) {{
+          const run = document.createElement("button");
+          run.type = "button"; run.className = "inline-run"; run.textContent = "▶ 実行";
+          run.addEventListener("click", event => {{
+            event.stopPropagation(); runCommand(value.replace(/^[!$]\s+/, ""));
+          }});
+          target.append(run);
+        }}
       }} else if (token.startsWith("**")) {{
         // 太字の中の URL やインラインコードもリンク化・装飾したいので再帰する
         const strong = document.createElement("strong"); appendInlineMarkdown(strong, token.slice(2, -2)); target.append(strong);
@@ -3302,7 +3400,8 @@ TERMINAL_PAGE = r"""<!doctype html>
   }}
   function renderMarkdown(target, text) {{
     const lines = text.replace(/\r\n/g, "\n").split("\n");
-    let paragraph = [], listStack = [], codeLines = [], inCode = false, codeLanguage = "", codeIndent = 0;
+    let paragraph = [], listStack = [], codeLines = [], inCode = false, codeLanguage = "", codeIndent = 0,
+      codeTarget = target;
     const flushParagraph = () => {{
       if (!paragraph.length) return;
       const p = document.createElement("p"); appendInlineMarkdown(p, paragraph.join("\n"));
@@ -3310,7 +3409,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     }};
     // リストは作成時にDOMへ追加する。空行や別ブロックではスタックだけを閉じる。
     const flushList = () => {{ listStack = []; }};
-    const appendListItem = (indent, tag, content) => {{
+    const appendListItem = (indent, tag, content, start = 1) => {{
       while (listStack.length && indent < listStack[listStack.length - 1].indent) listStack.pop();
       if (listStack.length && indent === listStack[listStack.length - 1].indent
           && tag !== listStack[listStack.length - 1].tag) listStack.pop();
@@ -3318,6 +3417,9 @@ TERMINAL_PAGE = r"""<!doctype html>
       let level = listStack[listStack.length - 1];
       if (!level || indent > level.indent || tag !== level.tag) {{
         const list = document.createElement(tag.toLowerCase());
+        // コードブロックや補足段落を挟んで ol が分割されても、Markdown に
+        // 明記された `2.` などの番号を維持する。
+        if (tag === "OL" && start !== 1) list.start = start;
         if (level && indent > level.indent && level.lastItem) level.lastItem.append(list);
         else target.append(list);
         level = {{indent, tag, list, lastItem: null}};
@@ -3325,22 +3427,42 @@ TERMINAL_PAGE = r"""<!doctype html>
       }}
       const li = document.createElement("li");
       appendInlineMarkdown(li, content); level.list.append(li); level.lastItem = li;
+      return li;
+    }};
+    const appendCodeBlock = () => {{
+      const pre = document.createElement("pre"), code = document.createElement("code");
+      if (codeLanguage) code.dataset.language = codeLanguage;
+      code.textContent = codeLines.join("\n"); pre.append(code);
+      codeTarget.append(decorateCode(pre, codeLanguage, codeLines));
+      inCode = false; codeTarget = target;
     }};
     const tableCells = line => line.trim().replace(/^\|/, "").replace(/\|$/, "")
       .split("|").map(cell => cell.trim());
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {{
       const line = lines[lineIndex];
+      // `2. ```sh` のように、リスト項目そのものから始まるコードフェンス。
+      // 通常の numbered item として処理すると ``` が文字で表示され、閉じフェンスから
+      // 後続の文章すべてがコードブロックになるため、code block を li の子にする。
+      const listFence = !inCode && line.match(/^(\s*)(?:([-*])|(\d+)\.)\s+```(.*)$/);
+      if (listFence) {{
+        flushParagraph();
+        const indent = listFence[1].replace(/\t/g, "    ").length;
+        const li = appendListItem(
+          indent, listFence[2] ? "UL" : "OL", "", listFence[3] ? Number(listFence[3]) : 1
+        );
+        inCode = true; codeLanguage = listFence[4].trim();
+        codeIndent = indent + (listFence[2] ? 2 : listFence[3].length + 2);
+        codeLines = []; codeTarget = li;
+        continue;
+      }}
       // リスト内などでインデントされたフェンスもコードブロックとして扱う
       const fence = line.match(/^(\s{{0,6}})```(.*)$/);
       if (fence) {{
-        flushParagraph(); flushList();
-        if (!inCode) {{ inCode = true; codeLanguage = fence[2].trim(); codeIndent = fence[1].length; codeLines = []; }}
-        else {{
-          const pre = document.createElement("pre"), code = document.createElement("code");
-          if (codeLanguage) code.dataset.language = codeLanguage;
-          code.textContent = codeLines.join("\n"); pre.append(code);
-          target.append(decorateCode(pre, codeLanguage, codeLines)); inCode = false;
-        }}
+        flushParagraph();
+        if (!inCode) {{
+          flushList(); inCode = true; codeLanguage = fence[2].trim();
+          codeIndent = fence[1].length; codeLines = []; codeTarget = target;
+        }} else appendCodeBlock();
         continue;
       }}
       if (inCode) {{
@@ -3407,7 +3529,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       }} else if (bullet || numbered) {{
         flushParagraph(); const match = bullet || numbered;
         const indent = match[1].replace(/\t/g, "    ").length;
-        appendListItem(indent, bullet ? "UL" : "OL", match[2]);
+        appendListItem(indent, bullet ? "UL" : "OL", match[2], numbered ? Number(line.match(/^\s*(\d+)\./)[1]) : 1);
       }} else if (/^\s*>\s?/.test(line)) {{
         flushParagraph(); flushList(); const quote = document.createElement("blockquote");
         appendInlineMarkdown(quote, line.replace(/^\s*>\s?/, "")); target.append(quote);
@@ -3421,7 +3543,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     }}
     if (inCode) {{
       const pre = document.createElement("pre"), code = document.createElement("code");
-      code.textContent = codeLines.join("\n"); pre.append(code); target.append(pre);
+      code.textContent = codeLines.join("\n"); pre.append(code); codeTarget.append(pre);
     }}
     flushParagraph(); flushList();
   }}
@@ -3450,9 +3572,9 @@ TERMINAL_PAGE = r"""<!doctype html>
   function stopPendingTimer() {{
     if (pendingTimer) {{ clearInterval(pendingTimer); pendingTimer = null; }}
   }}
-  function renderMessages(messages, activity, question) {{
-    activity = activity || ""; question = question || null;
-    const serialized = JSON.stringify([messages, activity, question]);
+  function renderMessages(messages, activity, question, auth) {{
+    activity = activity || ""; question = question || null; auth = auth || "";
+    const serialized = JSON.stringify([messages, activity, question, auth]);
     if (serialized === lastMessages) return;
     const firstLoad = !lastMessages;
     lastMessages = serialized; chat.replaceChildren();
@@ -3508,6 +3630,11 @@ TERMINAL_PAGE = r"""<!doctype html>
       }});
       entry.row.append(toggle);
     }});
+    if (auth) {{
+      const row = document.createElement("div"); row.className = "message assistant auth";
+      const bubble = document.createElement("div"); bubble.className = "bubble";
+      renderMarkdown(bubble, auth); row.append(bubble); chat.append(row);
+    }}
     if (activity) {{
       const row = document.createElement("div"); row.className = "message activity";
       row.textContent = activity; chat.append(row);
@@ -3550,6 +3677,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       serverActivity = data.activity || "";
       serverQueued = data.queued || [];
       serverQuestion = data.question || null;
+      serverAuth = data.auth || "";
       if (modelBadge && data.model && data.model !== modelBadge.textContent) {{
         modelBadge.textContent = data.model;
       }}
@@ -3564,7 +3692,7 @@ TERMINAL_PAGE = r"""<!doctype html>
         }}
       }}
       renderArtifacts(data.artifacts || []);
-      renderMessages(withPending(serverMessages, serverQueued), serverActivity, serverQuestion);
+      renderMessages(withPending(serverMessages, serverQueued), serverActivity, serverQuestion, serverAuth);
       if (Date.now() >= statusMessageUntil) status.textContent = "接続中";
     }} catch (error) {{
       status.textContent = error.message;
@@ -4216,11 +4344,26 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 if view == "transcript":
                     if not item["log_path"]:
-                        return self._json({"error": "保存された会話履歴が見つかりません"}, 404)
+                        # 起動直後はJSONLがまだ無いが、MCP承認や信頼確認などの
+                        # 起動時ダイアログはこの段階で出る。画面から拾った選択肢
+                        # だけでも返し、チャット画面から回答できるようにする。
+                        return self._json({
+                            "messages": [],
+                            "queued": [],
+                            "question": pending_question(session, item["tool"]),
+                            "auth": pending_shell_auth(session, item["tool"]),
+                            "boot": BOOT_ID,
+                            "model": model_label(item.get("model", ""), item["tool"]),
+                            "context": item.get("context"),
+                            "activity": "",
+                            "output": "",
+                            "artifacts": [],
+                        })
                     return self._json({
                         "messages": session_messages(item["log_path"], item["tool"]),
                         "queued": queued_inputs(item["log_path"]),
                         "question": pending_question(session, item["tool"]),
+                        "auth": pending_shell_auth(session, item["tool"]),
                         "boot": BOOT_ID,
                         "model": model_label(item.get("model", ""), item["tool"]),
                         "context": item.get("context"),

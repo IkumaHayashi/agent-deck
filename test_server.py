@@ -132,7 +132,53 @@ class CodexSessionTest(unittest.TestCase):
             server, "UPLOAD_DIR", upload_dir
         ):
             self.assertEqual([], server.assistant_parts(item, "codex"))
-            self.assertFalse(os.path.exists(os.path.join(upload_dir, "codex-images")))
+        self.assertFalse(os.path.exists(os.path.join(upload_dir, "codex-images")))
+
+
+class ClaudeShellCommandTest(unittest.TestCase):
+    def test_user_shell_command_is_rendered_as_markdown(self):
+        item = {
+            "type": "user",
+            "message": {"content": (
+                "<user_shell_command>\n"
+                "<command>gh auth login --web</command>\n"
+                "<result>Exit code: 0\nOutput:\nAuthentication complete.</result>\n"
+                "</user_shell_command>"
+            )},
+        }
+
+        self.assertEqual({
+            "role": "user",
+            "text": (
+                "```sh\n$ gh auth login --web\n```\n\n"
+                "```\nExit code: 0\nOutput:\nAuthentication complete.\n```"
+            ),
+        }, server.user_message_entry(item, "claude"))
+        self.assertEqual(
+            "$ gh auth login --web",
+            server.user_summary_text(item, "claude"),
+        )
+
+    def test_running_github_device_auth_is_rendered(self):
+        screen = """
+! First copy your one-time code: ABCD-1234
+Open this URL to continue in your web browser: https://github.com/login/device
+(11s)
+"""
+        self.assertEqual(
+            "**GitHub認証待ちです**\n\n"
+            "ワンタイムコード: `ABCD-1234`\n\n"
+            "[GitHubの認証ページを開く](https://github.com/login/device)",
+            server.parse_shell_auth_screen(screen),
+        )
+
+    def test_completed_github_device_auth_is_not_rendered_as_pending(self):
+        screen = """
+! First copy your one-time code: ABCD-1234
+Open this URL to continue in your web browser: https://github.com/login/device
+Authentication complete.
+"""
+        self.assertEqual("", server.parse_shell_auth_screen(screen))
 
 
 class CodexQuestionTest(unittest.TestCase):
@@ -161,6 +207,65 @@ class CodexQuestionTest(unittest.TestCase):
                 {"number": 3, "label": "Cancel", "description": "Cancel this tool call"},
             ],
         }, server.parse_codex_question_screen(screen))
+
+
+class ClaudeQuestionTest(unittest.TestCase):
+    MCP_DIALOG = """\
+[Screen Reader Mode: on via flag]
+New MCP server found in this project: mfc_ca
+MCP servers may execute code or access system resources. All tool calls require
+approval. Learn more in the MCP documentation.
+1. Use this MCP server
+2. Use this and all future MCP servers in this project
+3. Continue without using this MCP server
+Enter selection [1-3], or Escape to cancel:
+Enter to confirm · Esc to cancel
+"""
+
+    def test_parses_startup_mcp_dialog(self):
+        result = server.parse_question_screen(self.MCP_DIALOG)
+        self.assertEqual(
+            "New MCP server found in this project: mfc_ca MCP servers may "
+            "execute code or access system resources. All tool calls require "
+            "approval. Learn more in the MCP documentation.",
+            result["question"],
+        )
+        self.assertEqual(
+            ["Use this MCP server",
+             "Use this and all future MCP servers in this project",
+             "Continue without using this MCP server"],
+            [choice["label"] for choice in result["choices"]],
+        )
+
+    def test_quoted_dialog_text_is_not_a_question(self):
+        # 会話に引用されたダイアログ風テキストは、下に本文やフッターが
+        # 続くので選択待ちとして拾わない
+        screen = self.MCP_DIALOG.replace(
+            "Enter to confirm · Esc to cancel",
+            "以上です。これは選択プロンプトの引用ですね。\n"
+            "auto mode on (shift+tab to cycle)\n/rc\n$",
+        )
+        self.assertIsNone(server.parse_question_screen(screen))
+
+    def test_real_dialog_wins_over_quoted_text_above(self):
+        screen = (
+            "claude: 復唱します:\n"
+            "1. Use this MCP server\n"
+            "2. Use this and all future MCP servers in this project\n"
+            "3. Continue without using this MCP server\n"
+            "Enter selection [1-3], or Escape to cancel:\n"
+            "以上です。\n"
+            "☐ りんごとみかんどちらが好き？\n"
+            "1. りんご — 甘酸っぱい\n"
+            "2. みかん — ジューシー\n"
+            "Enter selection [1-2], or Escape to cancel:\n"
+        )
+        result = server.parse_question_screen(screen)
+        self.assertEqual("りんごとみかんどちらが好き？", result["question"])
+        self.assertEqual(
+            ["りんご", "みかん"],
+            [choice["label"] for choice in result["choices"]],
+        )
 
 
 if __name__ == "__main__":
