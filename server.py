@@ -18,6 +18,7 @@ import ipaddress
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import subprocess
@@ -163,6 +164,26 @@ CW_ENABLED = bool(CW_ACCOUNT_ID) and os.path.exists(CW_TOKEN_PATH)
 CW_CACHE_PATH = f"{DATA_DIR}/cw_cache.json"
 # 過去の会話の画像も表示し続けられるよう、tmp ではなく永続領域に置く
 UPLOAD_DIR = f"{DATA_DIR}/uploads"
+TRANSCRIPTION_DIR = f"{DATA_DIR}/transcriptions"
+SPEECH_CONFIG = CONFIG.get("speech_to_text") or {}
+SPEECH_PYTHON = _expand(
+    SPEECH_CONFIG.get("python") or "~/.local/share/agent-deck/whisper-venv/bin/python"
+)
+SPEECH_MODEL = SPEECH_CONFIG.get(
+    "model", "mlx-community/whisper-large-v3-turbo"
+)
+SPEECH_LANGUAGE = SPEECH_CONFIG.get("language", "ja")
+SPEECH_REALTIME_MODEL_DIR = _expand(SPEECH_CONFIG.get("realtime_model_dir") or (
+    "~/.local/share/agent-deck/speech-models/"
+    "sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01"
+))
+FFMPEG_BIN = find_bin("ffmpeg", SPEECH_CONFIG.get("ffmpeg"))
+SPEECH_TERMS = SPEECH_CONFIG.get("terms") or [
+    "Agent Deck（エージェントデッキ）", "Claude Code", "Codex", "GitHub",
+    "pull request",
+]
+SPEECH_WORKER_LOCK = threading.Lock()
+SPEECH_WORKER = None
 # 過去ログに残る旧保存先の添付も表示できるよう、パス検出の対象に含める
 UPLOAD_PATH_PREFIXES = [DATA_DIR] + [_expand(p) for p in CONFIG.get("legacy_upload_dirs", [])]
 # 会話ログ中の「添付画像: <パス>」等を検出する正規表現（Python 側）
@@ -2447,6 +2468,162 @@ def save_uploaded_file(data, filename, session_name):
     return path
 
 
+def speech_context_prompt(item):
+    """現在のセッションからWhisper向けの短い固有語ヒントを組み立てる。"""
+    terms = []
+    seen = set()
+
+    def add(value):
+        value = re.sub(r"\s+", " ", str(value or "")).strip(" `\"'.,:;()[]{}")
+        if value.startswith(("http://", "https://")):
+            return
+        if "/" in value:
+            value = os.path.basename(value.rstrip("/"))
+        key = value.casefold()
+        if key == "agent-deck":
+            return
+        if 2 <= len(value) <= 60 and key not in seen:
+            seen.add(key)
+            terms.append(value)
+
+    for term in SPEECH_TERMS:
+        add(term)
+    project_name = os.path.basename((item.get("cwd") or "").rstrip("/"))
+    # 固定辞書に読み付きで登録した製品名は、rawなディレクトリ名を重ねない。
+    if project_name.casefold() != "agent-deck":
+        add(project_name)
+    for artifact in item.get("artifacts") or []:
+        add(artifact.get("repo"))
+
+    messages = session_messages(item.get("log_path", ""), item.get("tool", ""), limit=16)
+    recent = "\n".join(message.get("text", "") for message in messages[-16:])[-12000:]
+    # コード表記は最優先。続いて、ハイフン・大文字・数字等を含む技術語を拾う。
+    for value in reversed(re.findall(r"`([^`\n]{2,60})`", recent)):
+        add(value)
+    token_pattern = r"(?<![\w/])([A-Za-z][A-Za-z0-9_.#/:-]{2,59})"
+    common = {
+        "http", "https", "www", "com", "true", "false", "none", "null",
+        "the", "and", "for", "with", "from", "this", "that", "into",
+    }
+    for value in reversed(re.findall(token_pattern, recent)):
+        if value.casefold() in common or value.startswith(("http:", "https:")):
+            continue
+        if value.casefold() == "agent-deck":
+            continue
+        # 一般英単語を大量に混ぜず、技術語らしい表記だけを採用する。
+        if not (re.search(r"[A-Z0-9_.#/:-]", value[1:]) or "-" in value):
+            continue
+        add(value)
+    selected = terms[:40]
+    return (
+        "次の技術用語と固有名詞を使用する会話です: " + "、".join(selected)
+        if selected else ""
+    )[:1000]
+
+
+def _start_speech_worker():
+    """音声認識器を常駐させ、リクエストごとのモデル再ロードを避ける。"""
+    global SPEECH_WORKER
+    realtime = os.path.isfile(os.path.join(SPEECH_REALTIME_MODEL_DIR, "tokens.txt"))
+    script = os.path.join(
+        SCRIPT_DIR, "scripts/transcribe_realtime.py" if realtime
+        else "scripts/transcribe_local.py",
+    )
+    speech_env = os.environ.copy()
+    speech_env["PATH"] = os.path.dirname(FFMPEG_BIN) + os.pathsep + speech_env.get(
+        "PATH", ""
+    )
+    command = (
+        [SPEECH_PYTHON, script, SPEECH_REALTIME_MODEL_DIR] if realtime else
+        [SPEECH_PYTHON, script, "--worker", SPEECH_MODEL, SPEECH_LANGUAGE]
+    )
+    SPEECH_WORKER = subprocess.Popen(
+        command,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+        env=speech_env,
+    )
+    return SPEECH_WORKER
+
+
+def _run_speech_worker(path, initial_prompt):
+    """常駐Whisperワーカーへ1件送り、JSON応答を待つ。"""
+    global SPEECH_WORKER
+    with SPEECH_WORKER_LOCK:
+        worker = SPEECH_WORKER
+        if worker is None or worker.poll() is not None:
+            worker = _start_speech_worker()
+        try:
+            request = json.dumps({"audio": path, "initial_prompt": initial_prompt})
+            worker.stdin.write(request + "\n")
+            worker.stdin.flush()
+            ready, _, _ = select.select([worker.stdout], [], [], 180)
+            if not ready:
+                raise RuntimeError("音声認識がタイムアウトしました")
+            line = worker.stdout.readline()
+            if not line:
+                raise RuntimeError("音声認識ワーカーが終了しました")
+            payload = json.loads(line)
+            if payload.get("error"):
+                raise RuntimeError(payload["error"])
+            return payload
+        except (BrokenPipeError, OSError, json.JSONDecodeError) as exc:
+            SPEECH_WORKER = None
+            raise RuntimeError(f"音声認識ワーカーと通信できませんでした: {exc}") from exc
+
+
+def transcribe_audio(data, content_type, initial_prompt=""):
+    """ブラウザで録音した音声を、任意導入の mlx-whisper で文字起こしする。"""
+    media_type = content_type.split(";", 1)[0].lower()
+    extensions = {
+        "audio/webm": ".webm",
+        "audio/ogg": ".ogg",
+        "audio/mp4": ".m4a",
+        "audio/mpeg": ".mp3",
+        "audio/wav": ".wav",
+        "audio/x-wav": ".wav",
+    }
+    if media_type not in extensions:
+        raise ValueError("WebM・Ogg・M4A・MP3・WAV音声のみ文字起こしできます")
+    if not data or len(data) > 15 * 1024 * 1024:
+        raise ValueError("音声は15MBまでです")
+    if not os.path.isfile(SPEECH_PYTHON):
+        raise RuntimeError("ローカル音声認識が未セットアップです")
+    os.makedirs(TRANSCRIPTION_DIR, mode=0o700, exist_ok=True)
+    path = os.path.join(
+        TRANSCRIPTION_DIR, f"{uuid.uuid4().hex}{extensions[media_type]}"
+    )
+    try:
+        with open(path, "xb") as output:
+            output.write(data)
+        os.chmod(path, 0o600)
+        payload = _run_speech_worker(path, initial_prompt)
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise RuntimeError("音声を認識できませんでした")
+        normalized = re.sub(r"[\s。.!！?？]+", "", text)
+        common_hallucinations = {
+            "ご視聴ありがとうございました",
+            "ご覧いただきありがとうございました",
+            "最後までご視聴ありがとうございました",
+            "チャンネル登録よろしくお願いします",
+            "字幕をご覧いただきありがとうございました",
+        }
+        if normalized in common_hallucinations:
+            raise RuntimeError("発話を認識できませんでした。マイクに近づいてもう一度お試しください")
+        return text
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"音声を認識できませんでした: {exc}") from exc
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def save_handoff(item):
     """別ツールへ渡す会話記録をローカルの Markdown として保存する。"""
     cleanup_uploads()
@@ -3338,6 +3515,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     background: #0d1117; border: 1px solid #484f58; border-radius: 8px;
     font-family: inherit; font-size: 17px; line-height: 1.5; }}
   .buttons {{ display: flex; gap: 6px; margin-top: 7px; }}
+  #voice.recording {{ color: #fff; background: #da3633; border-color: #f85149; }}
   button {{ flex: 1; padding: 10px 6px; color: #e6edf3; background: #21262d;
     border: 1px solid #484f58; border-radius: 8px; font-size: 1rem; }}
   button.primary {{ background: #238636; border-color: #2ea043; font-weight: 600; }}
@@ -3391,6 +3569,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     <button type="button" data-key="Escape">Esc</button>
     <button type="button" data-key="C-c">Ctrl+C</button>
     <button type="button" id="enter">Enter</button>
+    <button type="button" id="voice" title="ローカルWhisperで音声入力">🎙️ 音声</button>
     <button type="button" class="primary" id="send">送信</button>
     <button type="button" class="danger" id="kill">終了</button>
   </div>
@@ -3495,6 +3674,196 @@ TERMINAL_PAGE = r"""<!doctype html>
     autoGrow();
   }}
   input.addEventListener("input", syncInput);
+  const voiceButton = document.getElementById("voice");
+  let voiceStream = null;
+  let voiceAudioContext = null;
+  let voiceSource = null;
+  let voiceProcessor = null;
+  let voiceSamples = [];
+  let voiceSampleCount = 0;
+  let voiceActive = false;
+  let voiceChunkTimer = null;
+  let voiceRecordingStartedAt = 0;
+  let voiceInsertStart = 0;
+  let voiceRequestedInsertStart = 0;
+  let voiceInsertedLength = 0;
+  let voiceCommittedText = "";
+  let voicePreviousHypothesis = "";
+  let voicePendingJob = null;
+  let voiceTranscriptionRunning = false;
+  const voiceChunkDuration = 1000;
+  function stopVoiceTracks() {{
+    if (voiceStream) voiceStream.getTracks().forEach(track => track.stop());
+    voiceStream = null;
+  }}
+  function commonPrefix(left, right) {{
+    let index = 0;
+    while (index < left.length && index < right.length && left[index] === right[index]) index++;
+    return left.slice(0, index);
+  }}
+  function renderVoiceHypothesis(text, finalResult) {{
+    if (finalResult) voiceCommittedText = text;
+    else {{
+      const common = commonPrefix(voicePreviousHypothesis, text);
+      // 一致部分の末尾2文字は文脈で変わりやすいため、暫定のまま残す。
+      const stableLength = Math.max(voiceCommittedText.length, common.length - 2);
+      const stable = common.slice(0, stableLength);
+      if (stable.startsWith(voiceCommittedText)) voiceCommittedText = stable;
+    }}
+    voicePreviousHypothesis = text;
+    const prefix = voiceInsertStart > 0
+      && !/\s$/.test(input.value.slice(0, voiceInsertStart)) ? " " : "";
+    // 確定済みの先頭は固定しつつ、整合する暫定末尾は入力欄にも即時表示する。
+    const displayText = finalResult || text.startsWith(voiceCommittedText)
+      ? text : voiceCommittedText;
+    const replacement = prefix + displayText;
+    input.setRangeText(
+      replacement, voiceInsertStart, voiceInsertStart + voiceInsertedLength, "end"
+    );
+    voiceInsertedLength = replacement.length;
+    syncInput();
+    const provisional = text.startsWith(voiceCommittedText)
+      ? text.slice(voiceCommittedText.length) : "";
+    if (finalResult) status.textContent = "文字起こししました";
+    else status.textContent = provisional ? "認識中: " + provisional : "録音中…";
+  }}
+  async function transcribeVoice(blob, finalResult) {{
+    status.textContent = "ローカル音声認識で文字起こし中…";
+    const response = await fetch(
+      "/api/sessions/" + encodeURIComponent(session) + "/transcribe",
+      {{method: "POST", headers: {{"Content-Type": blob.type || "audio/webm"}}, body: blob}}
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "音声を認識できませんでした");
+    renderVoiceHypothesis(data.text, finalResult);
+    if (!voiceActive) input.focus();
+  }}
+  async function drainVoiceTranscription() {{
+    if (voiceTranscriptionRunning) return;
+    voiceTranscriptionRunning = true;
+    while (voicePendingJob) {{
+      const job = voicePendingJob;
+      voicePendingJob = null;
+      try {{ await transcribeVoice(job.blob, job.finalResult); }}
+      catch (error) {{
+        // 無音チャンクは録音を止めず、次の発話を待つ。
+        status.textContent = voiceActive ? "録音中…" : error.message;
+      }}
+    }}
+    voiceTranscriptionRunning = false;
+    if (!voiceActive) status.textContent = "文字起こししました";
+  }}
+  function queueVoiceTranscription(blob, finalResult = false) {{
+    // 処理中に複数届いた場合は最新の累積音声だけ残し、遅延の増加を防ぐ。
+    voicePendingJob = {{blob, finalResult}};
+    drainVoiceTranscription();
+  }}
+  function voiceWavBlob() {{
+    if (!voiceSampleCount || !voiceAudioContext) return null;
+    const buffer = new ArrayBuffer(44 + voiceSampleCount * 2);
+    const view = new DataView(buffer);
+    const write = (offset, value) => {{
+      for (let i = 0; i < value.length; i++) view.setUint8(offset + i, value.charCodeAt(i));
+    }};
+    const sampleRate = voiceAudioContext.sampleRate;
+    write(0, "RIFF"); view.setUint32(4, 36 + voiceSampleCount * 2, true);
+    write(8, "WAVE"); write(12, "fmt "); view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+    view.setUint32(24, sampleRate, true); view.setUint32(28, sampleRate * 2, true);
+    view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    write(36, "data"); view.setUint32(40, voiceSampleCount * 2, true);
+    let offset = 44;
+    for (const samples of voiceSamples) {{
+      for (const value of samples) {{
+        const sample = Math.max(-1, Math.min(1, value));
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }}
+    }}
+    return new Blob([buffer], {{type: "audio/wav"}});
+  }}
+  function startVoiceRecording() {{
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error("このブラウザはリアルタイム音声入力に対応していません");
+    voiceSamples = [];
+    voiceSampleCount = 0;
+    voiceRecordingStartedAt = Date.now();
+    voiceAudioContext = new AudioContextClass();
+    voiceSource = voiceAudioContext.createMediaStreamSource(voiceStream);
+    voiceProcessor = voiceAudioContext.createScriptProcessor(4096, 1, 1);
+    voiceProcessor.onaudioprocess = event => {{
+      if (!voiceActive) return;
+      const samples = new Float32Array(event.inputBuffer.getChannelData(0));
+      voiceSamples.push(samples);
+      voiceSampleCount += samples.length;
+    }};
+    voiceSource.connect(voiceProcessor);
+    // 一部のSafariはdestinationへ接続しないとonaudioprocessを発火しない。
+    voiceProcessor.connect(voiceAudioContext.destination);
+    voiceAudioContext.resume();
+    voiceChunkTimer = setInterval(() => {{
+      if (!voiceActive) return;
+      const blob = voiceWavBlob();
+      if (blob) queueVoiceTranscription(blob);
+    }}, voiceChunkDuration);
+  }}
+  function stopVoiceRecording() {{
+    voiceActive = false;
+    clearInterval(voiceChunkTimer);
+    const elapsed = Date.now() - voiceRecordingStartedAt;
+    const blob = voiceWavBlob();
+    voiceProcessor?.disconnect();
+    voiceSource?.disconnect();
+    voiceProcessor = null;
+    voiceSource = null;
+    voiceAudioContext?.close();
+    voiceAudioContext = null;
+    voiceButton.classList.remove("recording");
+    voiceButton.textContent = "🎙️ 音声";
+    stopVoiceTracks();
+    if (elapsed >= 500 && blob) queueVoiceTranscription(blob, true);
+  }}
+  async function toggleVoice() {{
+    if (voiceActive) {{
+      status.textContent = "最後の音声を文字起こし中…";
+      stopVoiceRecording();
+      return;
+    }}
+    if (!navigator.mediaDevices?.getUserMedia) {{
+      throw new Error("音声入力にはHTTPSまたはlocalhostでの接続が必要です");
+    }}
+    try {{
+      voiceStream = await navigator.mediaDevices.getUserMedia({{audio: {{
+        echoCancellation: {{ideal: true}},
+        noiseSuppression: {{ideal: true}},
+        autoGainControl: {{ideal: true}},
+        channelCount: {{ideal: 1}}
+      }}}});
+    }} catch (error) {{
+      // Safariなど、個別制約を受け付けないブラウザでは標準設定で再試行する。
+      if (error.name !== "OverconstrainedError" && error.name !== "TypeError") throw error;
+      voiceStream = await navigator.mediaDevices.getUserMedia({{audio: true}});
+    }}
+    voiceInsertStart = Math.min(voiceRequestedInsertStart, input.value.length);
+    voiceInsertedLength = 0;
+    voiceCommittedText = "";
+    voicePreviousHypothesis = "";
+    voiceActive = true;
+    startVoiceRecording();
+    voiceButton.classList.add("recording");
+    voiceButton.textContent = "⏹️ 停止";
+    status.textContent = "録音中（約1秒ごとに反映）…";
+  }}
+  voiceButton.addEventListener("click", () => {{
+    toggleVoice().catch(error => {{
+      stopVoiceTracks(); status.textContent = error.message;
+    }});
+  }});
+  voiceButton.addEventListener("pointerdown", event => {{
+    // ボタン押下でtextareaのフォーカスとカーソル位置を失わないようにする。
+    voiceRequestedInsertStart = input.selectionStart ?? input.value.length;
+    event.preventDefault();
+  }});
   let lastOutput = "";
   let lastMessages = "";
   let followOutput = true;
@@ -4699,6 +5068,26 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(exc)}, 400)
             except OSError as exc:
                 return self._json({"error": f"ファイルを保存できませんでした: {exc}"}, 500)
+        transcription_match = re.fullmatch(
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/transcribe", self.path
+        )
+        if transcription_match:
+            session = transcription_match.group(1)
+            if not valid_session(session):
+                return self._json({"error": "セッションが見つかりません"}, 404)
+            try:
+                item = next(
+                    item for item in managed_sessions() if item["name"] == session
+                )
+                text = transcribe_audio(
+                    body, self.headers.get("Content-Type", ""),
+                    speech_context_prompt(item),
+                )
+                return self._json({"ok": True, "text": text})
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+            except RuntimeError as exc:
+                return self._json({"error": str(exc)}, 503)
         try:
             qs = urllib.parse.parse_qs(body.decode("utf-8"))
         except UnicodeDecodeError:

@@ -175,6 +175,92 @@ class SessionArtifactTest(unittest.TestCase):
         self.assertEqual([], server.GH_CREATE_RE.findall(command))
 
 
+class LocalTranscriptionTest(unittest.TestCase):
+    def test_voice_recording_falls_back_to_default_constraints(self):
+        self.assertIn("channelCount: {{ideal: 1}}", server.TERMINAL_PAGE)
+        self.assertIn("getUserMedia({{audio: true}})", server.TERMINAL_PAGE)
+
+    def test_voice_recording_transcribes_pcm_in_one_second_chunks(self):
+        self.assertIn("const voiceChunkDuration = 1000", server.TERMINAL_PAGE)
+        self.assertIn("createScriptProcessor(4096, 1, 1)", server.TERMINAL_PAGE)
+        self.assertIn('type: "audio/wav"', server.TERMINAL_PAGE)
+        self.assertIn("queueVoiceTranscription(blob)", server.TERMINAL_PAGE)
+        self.assertIn("voicePendingJob = {{blob, finalResult}}", server.TERMINAL_PAGE)
+
+    def test_voice_input_separates_committed_and_provisional_text(self):
+        self.assertIn("commonPrefix(voicePreviousHypothesis, text)", server.TERMINAL_PAGE)
+        self.assertIn('"認識中: " + provisional', server.TERMINAL_PAGE)
+        self.assertIn("queueVoiceTranscription(blob, true)", server.TERMINAL_PAGE)
+        self.assertIn("event.preventDefault()", server.TERMINAL_PAGE)
+        self.assertIn("text.startsWith(voiceCommittedText)", server.TERMINAL_PAGE)
+
+    def test_builds_prompt_from_current_session_context(self):
+        item = {
+            "cwd": "/projects/agent-deck",
+            "tool": "codex",
+            "log_path": "/tmp/session.jsonl",
+            "artifacts": [{"repo": "lc-infrastructure"}],
+        }
+        messages = [{
+            "role": "user",
+            "text": "`MicroCMS` のWebhookを libe-city で確認して",
+        }]
+        with (
+            mock.patch.object(
+                server, "SPEECH_TERMS", ["Agent Deck（エージェントデッキ）", "Codex"]
+            ),
+            mock.patch.object(server, "session_messages", return_value=messages),
+        ):
+            prompt = server.speech_context_prompt(item)
+
+        self.assertIn("Agent Deck", prompt)
+        self.assertIn("lc-infrastructure", prompt)
+        self.assertIn("MicroCMS", prompt)
+        self.assertIn("libe-city", prompt)
+
+    def test_rejects_unsupported_audio_type(self):
+        with self.assertRaisesRegex(ValueError, "WebM"):
+            server.transcribe_audio(b"audio", "application/octet-stream")
+
+    def test_reports_missing_local_runtime(self):
+        with mock.patch.object(server, "SPEECH_PYTHON", "/missing/python"):
+            with self.assertRaisesRegex(RuntimeError, "未セットアップ"):
+                server.transcribe_audio(b"audio", "audio/webm")
+
+    def test_transcribes_and_removes_temporary_audio(self):
+        with tempfile.TemporaryDirectory() as workdir:
+            with (
+                mock.patch.object(server, "TRANSCRIPTION_DIR", workdir),
+                mock.patch.object(server, "SPEECH_PYTHON", __file__),
+                mock.patch.object(
+                    server, "_run_speech_worker",
+                    return_value={"text": " テスト入力です。 "},
+                ) as run_worker,
+            ):
+                text = server.transcribe_audio(
+                    b"audio", "audio/webm;codecs=opus", "Agent Deck"
+                )
+                remaining = os.listdir(workdir)
+                prompt = run_worker.call_args.args[1]
+
+        self.assertEqual("テスト入力です。", text)
+        self.assertEqual([], remaining)
+        self.assertEqual("Agent Deck", prompt)
+
+    def test_rejects_common_silence_hallucination(self):
+        with tempfile.TemporaryDirectory() as workdir:
+            with (
+                mock.patch.object(server, "TRANSCRIPTION_DIR", workdir),
+                mock.patch.object(server, "SPEECH_PYTHON", __file__),
+                mock.patch.object(
+                    server, "_run_speech_worker",
+                    return_value={"text": "ご視聴ありがとうございました。"},
+                ),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "マイクに近づいて"):
+                    server.transcribe_audio(b"audio", "audio/webm")
+
+
 class SessionPinTest(unittest.TestCase):
     def test_pinned_session_is_rendered_before_active_unpinned_session(self):
         sessions = [

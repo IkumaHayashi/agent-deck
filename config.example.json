@@ -59,5 +59,15 @@
   "legacy_upload_dirs": [],
 
   "_usage_command": "AI使用量をサイドバー下部に表示（任意）。{\"providers\": [{\"name\", \"ok\", \"rows\": [{\"label\", \"percent\", \"reset_label\", \"level\"}]}]} 形式のJSONを標準出力へ出すコマンド。結果は5分キャッシュされる",
-  "usage_command": null
+  "usage_command": null,
+
+  "_speech_to_text": "ローカル音声入力（任意）。scripts/setup-whisper.sh 実行後に利用可能",
+  "speech_to_text": {
+    "python": "~/.local/share/agent-deck/whisper-venv/bin/python",
+    "ffmpeg": "/opt/homebrew/bin/ffmpeg",
+    "model": "mlx-community/whisper-large-v3-turbo",
+    "realtime_model_dir": "~/.local/share/agent-deck/speech-models/sherpa-onnx-zipformer-ja-reazonspeech-2024-08-01",
+    "language": "ja",
+    "terms": ["Agent Deck（エージェントデッキ）", "Claude Code", "Codex", "GitHub", "pull request"]
+  }
 }
