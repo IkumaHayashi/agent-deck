@@ -297,6 +297,21 @@ Open this URL to continue in your web browser: https://github.com/login/device
             server.parse_shell_auth_screen(screen),
         )
 
+    def test_running_codex_github_auth_is_read_from_tmux_screen(self):
+        screen = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "! First copy your one-time code: ABCD-1234\n"
+                "Open this URL to continue in your web browser:\n"
+                "https://github.com/login/device\n"
+            ),
+        )
+        with mock.patch.object(server, "tmux_run", return_value=screen):
+            auth = server.pending_shell_auth("agent-test", "codex")
+
+        self.assertIn("ABCD-1234", auth)
+        self.assertIn("https://github.com/login/device", auth)
+
     def test_completed_github_device_auth_is_not_rendered_as_pending(self):
         screen = """
 ! First copy your one-time code: ABCD-1234

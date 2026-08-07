@@ -1145,7 +1145,7 @@ def parse_shell_auth_screen(screen):
 
 def pending_shell_auth(name, tool):
     """tmux画面にだけ出ている実行中の認証案内を返す。"""
-    if tool != "claude":
+    if tool not in {"claude", "codex"}:
         return ""
     try:
         screen = tmux_run("capture-pane", "-p", "-J", "-S", "-40", "-t", name)
@@ -3736,6 +3736,13 @@ TERMINAL_PAGE = r"""<!doctype html>
     // ! 実行はログに残る形（$ コマンド）へ寄せ、確定時に見た目が変わらないようにする。
     return text.startsWith("!") ? "```sh\n$ " + text.slice(1).trim() + "\n```" : text;
   }}
+  function messageMatchesPending(entry, pending) {{
+    if (entry.role !== "user") return false;
+    if (entry.text === pending) return true;
+    // user_shell_command は完了後に結果ブロックが加わるため、送信時の !command と
+    // 完全一致しない。先頭のコマンドブロックが一致すれば確定済みとして扱う。
+    return pending.startsWith("!") && entry.text.startsWith(pendingText(pending) + "\n");
+  }}
   function withPending(messages, queued) {{
     // 送信してからログに載るまでの数百ミリ秒だけ、こちらで吹き出しを出す。
     // 待ち行列に入ったか会話に現れたら、以降はログ側の情報に任せる。
@@ -3743,7 +3750,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     const count = userCount(messages), now = Date.now();
     pendingMessages = pendingMessages.filter(item =>
       !queued.includes(item.text)
-      && !messages.some(entry => entry.role === "user" && entry.text === item.text)
+      && !messages.some(entry => messageMatchesPending(entry, item.text))
       && count < item.threshold && now - item.since <= 60000
     );
     if (!pendingMessages.length) stopPendingTimer();
