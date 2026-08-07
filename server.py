@@ -1727,6 +1727,11 @@ def find_log_by_id(tool, session_id):
     return paths[0] if paths else ""
 
 
+def claude_project_dir(cwd):
+    """cwd を Claude Code の会話ログ用プロジェクト名へ変換する。"""
+    return "-" + re.sub(r"[^A-Za-z0-9]", "-", cwd.strip("/"))
+
+
 def resume_candidates(tool, cwd, explicit_id=""):
     """cwdに属する保存済みセッションを新しい順で返す。
 
@@ -1735,7 +1740,7 @@ def resume_candidates(tool, cwd, explicit_id=""):
     """
     entries = []
     if tool == "claude":
-        project_dir = "-" + cwd.strip("/").replace("/", "-")
+        project_dir = claude_project_dir(cwd)
         for path in glob.glob(f"{HOME}/.claude/projects/{project_dir}/*.jsonl"):
             session_id = os.path.basename(path).removesuffix(".jsonl")
             if not re.fullmatch(r"[0-9a-f-]{36}", session_id):
@@ -1848,7 +1853,7 @@ def recent_conversations(limit=24):
 def conversation_log_path(tool, cwd, session_id):
     """cwd の会話ログから session_id のファイルを探す。見つからなければ空文字。"""
     if tool == "claude":
-        project_dir = "-" + cwd.strip("/").replace("/", "-")
+        project_dir = claude_project_dir(cwd)
         path = f"{HOME}/.claude/projects/{project_dir}/{session_id}.jsonl"
         return path if os.path.isfile(path) else ""
     for path in glob.glob(f"{HOME}/.codex/sessions/**/*.jsonl", recursive=True):

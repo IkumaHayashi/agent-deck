@@ -135,6 +135,52 @@ class CodexSessionTest(unittest.TestCase):
         self.assertFalse(os.path.exists(os.path.join(upload_dir, "codex-images")))
 
 
+class ClaudeProjectDirTest(unittest.TestCase):
+    def test_non_ascii_and_punctuation_are_replaced(self):
+        self.assertEqual(
+            "-Users-xxx-Dropbox-----",
+            server.claude_project_dir("/Users/xxx/Dropbox (個人)"),
+        )
+
+    def test_conversation_log_path_uses_encoded_project_dir(self):
+        session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+        cwd = "/Users/xxx/Dropbox (個人)"
+        with tempfile.TemporaryDirectory() as home, mock.patch.object(
+            server, "HOME", home
+        ):
+            project = os.path.join(
+                home, ".claude", "projects", server.claude_project_dir(cwd)
+            )
+            os.makedirs(project)
+            log_path = os.path.join(project, f"{session_id}.jsonl")
+            with open(log_path, "w"):
+                pass
+
+            self.assertEqual(
+                log_path,
+                server.conversation_log_path("claude", cwd, session_id),
+            )
+
+    def test_resume_candidates_uses_encoded_project_dir(self):
+        session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+        cwd = "/Users/xxx/Dropbox (個人)"
+        with tempfile.TemporaryDirectory() as home, (
+            mock.patch.object(server, "HOME", home)
+        ), mock.patch.object(server, "log_meta", return_value={}):
+            project = os.path.join(
+                home, ".claude", "projects", server.claude_project_dir(cwd)
+            )
+            os.makedirs(project)
+            log_path = os.path.join(project, f"{session_id}.jsonl")
+            with open(log_path, "w"):
+                pass
+
+            candidates = server.resume_candidates("claude", cwd)
+
+        self.assertEqual([session_id], [item["id"] for item in candidates])
+        self.assertEqual(log_path, candidates[0]["path"])
+
+
 class ClaudeShellCommandTest(unittest.TestCase):
     def test_user_shell_command_is_rendered_as_markdown(self):
         item = {
