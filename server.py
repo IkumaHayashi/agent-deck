@@ -2186,8 +2186,11 @@ def build_sidebar(active):
         "要対応のみ表示</label>"
     )
     sidebar += '<div id="side-sessions">'
-    # 表示中のセッションは、状態やピンの有無にかかわらず見失わないよう最上部へ置く。
-    sessions = sorted(managed_sessions(), key=lambda item: item["name"] != active)
+    # ピン留めを最優先し、その中では表示中のセッションを上へ置く。
+    sessions = sorted(
+        managed_sessions(),
+        key=lambda item: (not item.get("pinned"), item["name"] != active),
+    )
     for other in sessions:
         status_text, status_class = sidebar_status(other)
         keep = " f-keep" if status_class in ("need", "ask", "wait") else ""
@@ -2960,9 +2963,10 @@ SIDEBAR_JS = r"""
       if (!response.ok || !sideSessions) return;
       // サーバー再起動後は描画済みHTMLが古いので読み込み直す
       if (data.boot && data.boot !== bootId) { location.reload(); return; }
-      // 表示中を必ず先頭にする。残りはAPIの「ピン留め→従来順」を保つ。
+      // ピン留めを最優先し、その中では表示中を上へ置く。
       const items = data.items.slice().sort((a, b) =>
-        Number(b.name === session) - Number(a.name === session));
+        Number(b.pinned) - Number(a.pinned)
+        || Number(b.name === session) - Number(a.name === session));
       sideSessions.replaceChildren(...items.map(item => {
         const link = document.createElement("a");
         link.href = "/terminal?session=" + encodeURIComponent(item.name);

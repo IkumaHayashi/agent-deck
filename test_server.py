@@ -151,7 +151,7 @@ class SessionArtifactTest(unittest.TestCase):
 
 
 class SessionPinTest(unittest.TestCase):
-    def test_active_session_is_rendered_first_even_when_not_pinned(self):
+    def test_pinned_session_is_rendered_before_active_unpinned_session(self):
         sessions = [
             self._session("agent-pinned", pinned=True),
             self._session("agent-active", pinned=False),
@@ -164,8 +164,8 @@ class SessionPinTest(unittest.TestCase):
             sidebar = server.build_sidebar("agent-active")
 
         self.assertLess(
-            sidebar.index("session=agent-active"),
             sidebar.index("session=agent-pinned"),
+            sidebar.index("session=agent-active"),
         )
 
     def test_pinned_metadata_is_restored_on_restarted_session(self):
