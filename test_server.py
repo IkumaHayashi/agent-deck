@@ -134,6 +134,31 @@ class CodexSessionTest(unittest.TestCase):
             self.assertEqual([], server.assistant_parts(item, "codex"))
         self.assertFalse(os.path.exists(os.path.join(upload_dir, "codex-images")))
 
+    def test_codex_custom_tool_output_image_is_saved_for_chat_rendering(self):
+        image = b"\x89PNG\r\n\x1a\n" + b"custom-tool-image"
+        item = {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call_output",
+                "output": [{
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64," + base64.b64encode(image).decode(),
+                }],
+            },
+        }
+        with tempfile.TemporaryDirectory() as upload_dir, mock.patch.object(
+            server, "UPLOAD_DIR", upload_dir
+        ):
+            parts = server.assistant_parts(item, "codex")
+            files = os.listdir(os.path.join(upload_dir, "codex-images"))
+
+        self.assertEqual(1, len(files))
+        self.assertEqual("assistant", parts[0]["role"])
+        self.assertRegex(
+            parts[0]["text"],
+            r"^添付画像: .*/codex-images/codex-[0-9a-f]{16}\.png$",
+        )
+
 
 class SessionArtifactTest(unittest.TestCase):
     def test_create_command_with_environment_variable_is_detected(self):
@@ -165,6 +190,23 @@ class SessionPinTest(unittest.TestCase):
 
         self.assertLess(
             sidebar.index("session=agent-pinned"),
+            sidebar.index("session=agent-active"),
+        )
+
+    def test_active_session_keeps_its_original_position(self):
+        sessions = [
+            self._session("agent-newer"),
+            self._session("agent-active"),
+            self._session("agent-older"),
+        ]
+        with (
+            mock.patch.object(server, "managed_sessions", return_value=sessions),
+            mock.patch.object(server, "wezterm_panes", return_value=[]),
+        ):
+            sidebar = server.build_sidebar("agent-active")
+
+        self.assertLess(
+            sidebar.index("session=agent-newer"),
             sidebar.index("session=agent-active"),
         )
 

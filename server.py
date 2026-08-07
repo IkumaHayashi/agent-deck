@@ -259,8 +259,16 @@ BYPASS_FLAGS = {
 # 全ページ共通のファビコン（/favicon.svg で配信）。
 FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
-    '<rect width="100" height="100" rx="22" fill="#6c5ce7"/>'
-    '<text x="50" y="50" font-size="58" text-anchor="middle" dominant-baseline="central">🚀</text>'
+    '<defs><linearGradient id="g" x1="12" y1="8" x2="88" y2="92" gradientUnits="userSpaceOnUse">'
+    '<stop stop-color="#8B7CF6"/><stop offset="1" stop-color="#5546D7"/>'
+    '</linearGradient></defs>'
+    '<rect width="100" height="100" rx="23" fill="#171523"/>'
+    '<rect x="19" y="16" width="58" height="68" rx="10" fill="#343047" '
+    'transform="rotate(-8 48 50)"/>'
+    '<rect x="27" y="16" width="58" height="68" rx="10" fill="url(#g)"/>'
+    '<path d="M42 39l11 10-11 10" fill="none" stroke="#fff" stroke-width="7" '
+    'stroke-linecap="round" stroke-linejoin="round"/>'
+    '<path d="M57 60h12" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round"/>'
     "</svg>"
 )
 
@@ -692,13 +700,15 @@ def codex_tool_images_text(item):
     mcp_tool_call_end に base64 で記録される。ログの再パースごとに同じ画像を
     増やさないよう、画像内容のハッシュを保存名に使う。
     """
-    if item.get("type") != "event_msg":
-        return ""
     payload = item.get("payload") or {}
-    if payload.get("type") != "mcp_tool_call_end":
+    if item.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end":
+        result = payload.get("result") or {}
+        content = ((result.get("Ok") or {}).get("content") or [])
+    elif item.get("type") == "response_item" and payload.get("type") == "custom_tool_call_output":
+        # functions.exec の image(...) / view_image はこの形式で保存される。
+        content = payload.get("output") or []
+    else:
         return ""
-    result = payload.get("result") or {}
-    content = ((result.get("Ok") or {}).get("content") or [])
     lines = []
     image_types = (
         (b"\x89PNG\r\n\x1a\n", ".png"),
@@ -708,9 +718,16 @@ def codex_tool_images_text(item):
         (b"RIFF", ".webp"),
     )
     for part in content:
-        if not isinstance(part, dict) or part.get("type") != "image":
+        if not isinstance(part, dict):
             continue
-        encoded = part.get("data")
+        if part.get("type") == "image":
+            encoded = part.get("data")
+        elif part.get("type") in {"input_image", "output_image"}:
+            image_url = part.get("image_url") or ""
+            match = re.fullmatch(r"data:image/[a-zA-Z0-9.+-]+;base64,(.+)", image_url, re.S)
+            encoded = match.group(1) if match else ""
+        else:
+            continue
         if not isinstance(encoded, str) or not encoded or len(encoded) > 20 * 1024 * 1024:
             continue
         try:
@@ -2186,10 +2203,10 @@ def build_sidebar(active):
         "要対応のみ表示</label>"
     )
     sidebar += '<div id="side-sessions">'
-    # ピン留めを最優先し、その中では表示中のセッションを上へ置く。
+    # ピン留めだけを最優先し、各グループ内では一覧本来の順序を保つ。
     sessions = sorted(
         managed_sessions(),
-        key=lambda item: (not item.get("pinned"), item["name"] != active),
+        key=lambda item: not item.get("pinned"),
     )
     for other in sessions:
         status_text, status_class = sidebar_status(other)
@@ -2963,10 +2980,9 @@ SIDEBAR_JS = r"""
       if (!response.ok || !sideSessions) return;
       // サーバー再起動後は描画済みHTMLが古いので読み込み直す
       if (data.boot && data.boot !== bootId) { location.reload(); return; }
-      // ピン留めを最優先し、その中では表示中を上へ置く。
+      // ピン留めだけを最優先し、各グループ内ではAPIの順序を保つ。
       const items = data.items.slice().sort((a, b) =>
-        Number(b.pinned) - Number(a.pinned)
-        || Number(b.name === session) - Number(a.name === session));
+        Number(b.pinned) - Number(a.pinned));
       sideSessions.replaceChildren(...items.map(item => {
         const link = document.createElement("a");
         link.href = "/terminal?session=" + encodeURIComponent(item.name);
