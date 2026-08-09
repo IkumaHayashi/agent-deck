@@ -205,6 +205,7 @@ WAIT_CLASS_LOCK = threading.Lock()
 WAIT_CLASS_CACHE = {}
 WAIT_CLASS_PENDING = set()
 WAIT_CLASS_RETRY = 120  # 分類失敗時に再試行するまでの秒数
+WAIT_CLASS_MODEL = CONFIG.get("wait_classifier_model", "haiku")
 CLAUDE_BIN = find_bin("claude", CONFIG.get("claude_bin"))
 CODEX_BIN = find_bin("codex", CONFIG.get("codex_bin"))
 CW_INITIAL_ROOM_LIMIT = 20
@@ -1230,7 +1231,7 @@ def run_wait_classifier(path, tool, key):
             )
             # cwd をホーム外にして、-p のログが「最近の会話を再開」に混ざらないようにする
             result = subprocess.run(
-                [CLAUDE_BIN, "-p", "--model", "haiku", prompt],
+                [CLAUDE_BIN, "-p", "--model", WAIT_CLASS_MODEL, prompt],
                 capture_output=True, text=True, timeout=90, cwd="/tmp",
             )
             answer = result.stdout.strip() if result.returncode == 0 else ""

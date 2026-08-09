@@ -450,5 +450,24 @@ Enter to confirm · Esc to cancel
         )
 
 
+class WaitClassifierTest(unittest.TestCase):
+    def setUp(self):
+        server.WAIT_CLASS_CACHE.clear()
+        server.WAIT_CLASS_PENDING.clear()
+
+    @mock.patch.object(server, "wait_classifier_context", return_value="直近の会話")
+    @mock.patch.object(server.subprocess, "run")
+    def test_uses_configured_model(self, run, _context):
+        run.return_value = SimpleNamespace(returncode=0, stdout="完了\n")
+
+        with mock.patch.object(server, "WAIT_CLASS_MODEL", "sonnet"):
+            server.run_wait_classifier("/tmp/session.jsonl", "claude", (1, 2, "claude"))
+
+        args, kwargs = run.call_args
+        self.assertEqual("sonnet", args[0][3])
+        self.assertEqual("/tmp", kwargs["cwd"])
+        self.assertEqual("完了", server.WAIT_CLASS_CACHE["/tmp/session.jsonl"]["label"])
+
+
 if __name__ == "__main__":
     unittest.main()
