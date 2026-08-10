@@ -915,28 +915,20 @@ def screen_is_running(screen, tool=None):
 
 
 def screen_background_label(screen):
-    """アイドル中のバックグラウンドタスク（Monitor等）を画面下部から検出する。
+    """アイドル中のMonitorを画面下部から検出する。
 
     Monitor 稼働中は入力欄の下のヒント行に「auto mode on · … · 1 monitor」の
     ような表示が常駐する。転写本文にも monitor という語は現れうるので、
-    下数行だけを見る。検出できたらステータスラベルを、なければ空文字を返す。
+    下数行だけを見る。background terminal やlocal agentは入力待ちと両立するため、
+    ステータスを上書きしない。
     """
     lines = screen.splitlines()
     while lines and not lines[-1].strip():
         lines.pop()
-    match = re.search(
-        r"\b\d+\s+(monitors?|background tasks?|background terminals?|local agents?)"
-        r"(?:\s+running)?\b",
+    return "監視中" if re.search(
+        r"\b\d+\s+monitors?(?:\s+running)?\b",
         "\n".join(lines[-8:]),
-    )
-    if not match:
-        return ""
-    noun = match.group(1)
-    if noun.startswith("monitor"):
-        return "監視中"
-    if noun.startswith("background"):
-        return "タスク実行中"
-    return "エージェント実行中"
+    ) else ""
 
 
 def session_running(name):

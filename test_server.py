@@ -516,5 +516,22 @@ class ScreenRunningTest(unittest.TestCase):
         self.assertTrue(server.screen_is_running(screen, "claude"))
 
 
+class ScreenBackgroundTest(unittest.TestCase):
+    def test_monitor_keeps_watch_status(self):
+        screen = "auto mode on · 1 monitor"
+
+        self.assertEqual("監視中", server.screen_background_label(screen))
+
+    def test_background_terminal_does_not_override_wait_status(self):
+        screen = "1 background terminal running · /ps to view · /stop to close"
+
+        self.assertEqual("", server.screen_background_label(screen))
+
+    def test_local_agent_does_not_override_wait_status(self):
+        screen = "1 local agent running"
+
+        self.assertEqual("", server.screen_background_label(screen))
+
+
 if __name__ == "__main__":
     unittest.main()
