@@ -890,12 +890,25 @@ def queued_inputs(path, limit=400):
     return waiting
 
 
-def screen_is_running(screen):
+def screen_is_running(screen, tool=None):
     """画面から、TUI がまだ処理中かを見る。
 
     処理中は Running… / Hatching… のようなスピナー行が出る（語は毎回変わる）。
     esc to interrupt を出す版もあるので、そちらも拾う。
+    Codex は過去のスピナーをスクロール履歴に残すため、最後の回答完了を示す
+    水平区切り線より後に現在のスピナーがある場合だけ実行中とする。
     """
+    if tool == "codex":
+        lines = screen.splitlines()
+        boundary = max(
+            (index for index, line in enumerate(lines)
+             if re.fullmatch(r"\s*─{10,}\s*", line)),
+            default=-1,
+        )
+        return any(
+            re.search(r"^\s*•\s+.*\besc to interrupt\b", line, re.I)
+            for line in lines[boundary + 1:]
+        )
     if "esc to interrupt" in screen.lower():
         return True
     return any(re.fullmatch(r"\s*[A-Za-z]+ing…\s*", line) for line in screen.splitlines())
@@ -1132,7 +1145,7 @@ def pending_question(name, tool):
         return None
     # 実行中のセッションに本物の選択ダイアログは出ない。会話に引用された
     # 「Enter selection [1-N]」等が画面に残っているだけの誤検出を避ける。
-    if screen_is_running(screen.stdout):
+    if screen_is_running(screen.stdout, tool):
         return None
     if tool == "codex":
         return parse_codex_question_screen(screen.stdout)
@@ -2094,7 +2107,7 @@ def load_managed_sessions():
             if not last_message:
                 last_message = summary
             log_path = exact.get("path", "") if exact else ""
-            running = screen_is_running(screen)
+            running = screen_is_running(screen, tool or parts[3])
             sessions.append({
                 "name": parts[0], "pane_id": parts[1], "cwd": parts[2],
                 "command": parts[3], "tool": tool or parts[3], "summary": summary,
@@ -4554,7 +4567,7 @@ class Handler(BaseHTTPRequestHandler):
                         "context": info.get("context"),
                         "activity": (
                             log_activity(info["log_path"], info["tool"])
-                            if screen_is_running(screen_text) else ""
+                            if screen_is_running(screen_text, info["tool"]) else ""
                         ),
                         "output": session_transcript(info["log_path"], info["tool"]),
                         "artifacts": session_artifacts(info["log_path"], info["tool"]),

@@ -469,5 +469,52 @@ class WaitClassifierTest(unittest.TestCase):
         self.assertEqual("完了", server.WAIT_CLASS_CACHE["/tmp/session.jsonl"]["label"])
 
 
+class ScreenRunningTest(unittest.TestCase):
+    def test_codex_ignores_spinner_before_completed_short_response(self):
+        screen = "\n".join(
+            [
+                "• Working (24s • esc to interrupt)",
+                "• 完了しました。",
+                "────────────────────────────────────────",
+                "› Write tests for @filename",
+            ]
+        )
+
+        self.assertFalse(server.screen_is_running(screen, "codex"))
+
+    def test_codex_detects_spinner_after_last_completed_response(self):
+        screen = "\n".join(
+            [
+                "• 前の回答です。",
+                "────────────────────────────────────────",
+                "› 新しい依頼",
+                "• 調べています。",
+                "• Working (3s • esc to interrupt)",
+                "› Improve documentation in @filename",
+            ]
+        )
+
+        self.assertTrue(server.screen_is_running(screen, "codex"))
+
+    def test_codex_does_not_treat_quoted_interrupt_text_as_spinner(self):
+        screen = "\n".join(
+            [
+                "────────────────────────────────────────",
+                "• `esc to interrupt`という文字列について説明しました。",
+                "────────────────────────────────────────",
+                "› Write tests for @filename",
+            ]
+        )
+
+        self.assertFalse(server.screen_is_running(screen, "codex"))
+
+    def test_claude_keeps_existing_full_screen_detection(self):
+        screen = "Running…\n" + "\n".join(
+            f"idle line {index}" for index in range(24)
+        )
+
+        self.assertTrue(server.screen_is_running(screen, "claude"))
+
+
 if __name__ == "__main__":
     unittest.main()
