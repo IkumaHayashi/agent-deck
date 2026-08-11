@@ -160,6 +160,51 @@ class CodexSessionTest(unittest.TestCase):
         )
 
 
+class ShellCommandTest(unittest.TestCase):
+    def test_launches_login_shell_and_sends_multiline_command(self):
+        results = [
+            SimpleNamespace(returncode=0, stdout="123\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(server, "HOME", os.path.realpath(cwd)),
+            mock.patch.object(server, "wezterm_cli", side_effect=results) as wezterm,
+        ):
+            pane = server.launch_shell_command(cwd, "npm install\nnpm test")
+
+        self.assertEqual("123", pane)
+        self.assertEqual(
+            mock.call("spawn", "--cwd", os.path.realpath(cwd), "--", "/bin/zsh", "-l"),
+            wezterm.call_args_list[0],
+        )
+        self.assertEqual(
+            mock.call(
+                "send-text", "--pane-id", "123", "--no-paste",
+                input_text="npm install\nnpm test\n",
+            ),
+            wezterm.call_args_list[1],
+        )
+
+    def test_kills_new_pane_when_sending_command_fails(self):
+        results = [
+            SimpleNamespace(returncode=0, stdout="123\n", stderr=""),
+            SimpleNamespace(returncode=1, stdout="", stderr="send failed"),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(server, "HOME", os.path.realpath(cwd)),
+            mock.patch.object(server, "wezterm_cli", side_effect=results) as wezterm,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "send failed"):
+                server.launch_shell_command(cwd, "npm install")
+
+        self.assertEqual(
+            mock.call("kill-pane", "--pane-id", "123"), wezterm.call_args_list[-1]
+        )
+
+
 class SessionArtifactTest(unittest.TestCase):
     def test_create_command_with_environment_variable_is_detected(self):
         command = (
@@ -173,6 +218,61 @@ class SessionArtifactTest(unittest.TestCase):
         command = "rg 'SKIP_REVIEW_GATE=1 gh pr create' README.md"
 
         self.assertEqual([], server.GH_CREATE_RE.findall(command))
+
+
+class PullRequestDiffTest(unittest.TestCase):
+    def test_normalizes_number_and_github_url(self):
+        self.assertEqual("123", server.normalize_pr_selector("123"))
+        self.assertEqual(
+            "https://github.com/example/repo/pull/456",
+            server.normalize_pr_selector("https://github.com/example/repo/pull/456"),
+        )
+
+    def test_rejects_non_github_selector(self):
+        with self.assertRaisesRegex(ValueError, "PR番号"):
+            server.normalize_pr_selector("https://example.com/repo/pull/1")
+
+    def test_fetches_current_branch_pull_request_and_patch(self):
+        metadata = {
+            "number": 42,
+            "title": "差分ペインを追加",
+            "url": "https://github.com/example/repo/pull/42",
+            "state": "OPEN",
+            "baseRefName": "main",
+            "headRefName": "feature/review",
+            "files": [{"path": "server.py", "additions": 10, "deletions": 2}],
+        }
+        results = [
+            SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr=""),
+            SimpleNamespace(returncode=0, stdout="diff --git a/server.py b/server.py\n", stderr=""),
+        ]
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/gh"),
+            mock.patch.object(server.subprocess, "run", side_effect=results) as run,
+        ):
+            result = server.pull_request_diff(cwd)
+
+        self.assertEqual(42, result["number"])
+        self.assertIn("diff --git", result["patch"])
+        self.assertEqual(
+            ["/usr/bin/gh", "pr", "view", "--json",
+             "number,title,url,state,baseRefName,headRefName,files"],
+            run.call_args_list[0].args[0],
+        )
+        self.assertEqual(
+            ["/usr/bin/gh", "pr", "diff", "42", "--patch"],
+            run.call_args_list[1].args[0],
+        )
+
+    def test_missing_current_branch_pull_request_has_friendly_error(self):
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found")
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(server.subprocess, "run", return_value=failed),
+        ):
+            with self.assertRaisesRegex(LookupError, "現在のブランチ"):
+                server.pull_request_diff(cwd)
 
 
 class SessionPinTest(unittest.TestCase):
@@ -222,6 +322,24 @@ class SessionPinTest(unittest.TestCase):
 
         self.assertIn(
             ("set-option", "-t", "agent-new", "@launcher_pinned", "1"), calls
+        )
+
+    def test_pull_request_metadata_is_saved(self):
+        calls = []
+        with mock.patch.object(
+            server, "tmux_run",
+            side_effect=lambda *args: calls.append(args) or SimpleNamespace(),
+        ):
+            server.set_session_metadata(
+                "agent-new", pull_request="https://github.com/example/repo/pull/42"
+            )
+
+        self.assertIn(
+            (
+                "set-option", "-t", "agent-new", "@launcher_pull_request",
+                "https://github.com/example/repo/pull/42",
+            ),
+            calls,
         )
 
     @staticmethod

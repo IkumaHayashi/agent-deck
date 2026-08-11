@@ -206,6 +206,9 @@ WAIT_CLASS_CACHE = {}
 WAIT_CLASS_PENDING = set()
 WAIT_CLASS_RETRY = 120  # 分類失敗時に再試行するまでの秒数
 WAIT_CLASS_MODEL = CONFIG.get("wait_classifier_model", "haiku")
+PR_DIFF_OPEN = CONFIG.get("pr_diff_open", "auto")
+if PR_DIFF_OPEN not in {"auto", "always", "never"}:
+    PR_DIFF_OPEN = "auto"
 CLAUDE_BIN = find_bin("claude", CONFIG.get("claude_bin"))
 CODEX_BIN = find_bin("codex", CONFIG.get("codex_bin"))
 CW_INITIAL_ROOM_LIMIT = 20
@@ -350,14 +353,14 @@ def find_wezterm_sock():
     return None
 
 
-def wezterm_cli(*args, timeout=10):
+def wezterm_cli(*args, timeout=10, input_text=None):
     sock = find_wezterm_sock()
     if not sock:
         return None
     env = dict(os.environ, WEZTERM_UNIX_SOCKET=sock)
     return subprocess.run(
         [WEZTERM, "cli", *args],
-        capture_output=True, text=True, timeout=timeout, env=env,
+        input=input_text, capture_output=True, text=True, timeout=timeout, env=env,
     )
 
 
@@ -370,6 +373,33 @@ def wezterm_panes():
         return json.loads(out.stdout or "[]")
     except (json.JSONDecodeError, OSError, subprocess.SubprocessError):
         return []
+
+
+def launch_shell_command(cwd, command):
+    """WezTerm にログインシェルを開き、Codex/Claude を介さずコマンドを実行する。"""
+    if not command or not command.strip():
+        raise ValueError("実行するコマンドが空です")
+    if len(command) > 20000:
+        raise ValueError("コマンドが長すぎます（20000文字まで）")
+    cwd, error = validate_dir(cwd)
+    if error:
+        raise ValueError(error)
+    spawned = wezterm_cli("spawn", "--cwd", cwd, "--", "/bin/zsh", "-l")
+    if spawned is None:
+        raise RuntimeError("WezTermが起動していません")
+    if spawned.returncode != 0:
+        raise RuntimeError(spawned.stderr.strip() or "シェルを起動できませんでした")
+    pane = (spawned.stdout or "").strip()
+    if not pane.isdigit():
+        raise RuntimeError("起動したWezTerm paneを取得できませんでした")
+    sent = wezterm_cli(
+        "send-text", "--pane-id", pane, "--no-paste", input_text=command + "\n"
+    )
+    if sent is None or sent.returncode != 0:
+        detail = sent.stderr.strip() if sent is not None else ""
+        wezterm_cli("kill-pane", "--pane-id", pane)
+        raise RuntimeError(detail or "シェルへコマンドを送信できませんでした")
+    return pane
 
 
 def argv_model(argv):
@@ -1766,6 +1796,58 @@ def artifact_links(items):
     )
 
 
+PR_SELECTOR_RE = re.compile(
+    r"(?:https://github\.com/[\w.-]+/[\w.-]+/pull/)?(\d+)/?"
+)
+
+
+def normalize_pr_selector(value):
+    """gh に安全に渡せる PR 番号またはURLを返す。"""
+    value = (value or "").strip()
+    if not value:
+        return ""
+    match = PR_SELECTOR_RE.fullmatch(value)
+    if not match:
+        raise ValueError("PR番号またはGitHubのPR URLを入力してください")
+    return value.rstrip("/") if value.startswith("https://") else match.group(1)
+
+
+def pull_request_diff(cwd, selector=""):
+    """cwd の現在ブランチ、または指定されたPRのメタデータと差分を取得する。"""
+    selector = normalize_pr_selector(selector)
+    if not cwd or not os.path.isdir(cwd):
+        raise ValueError("セッションの作業ディレクトリが見つかりません")
+    gh = find_bin("gh")
+    target = [selector] if selector else []
+    fields = "number,title,url,state,baseRefName,headRefName,files"
+    metadata = subprocess.run(
+        [gh, "pr", "view", *target, "--json", fields],
+        cwd=cwd, capture_output=True, text=True, timeout=20,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    if metadata.returncode != 0:
+        detail = metadata.stderr.strip()
+        if not selector:
+            raise LookupError("現在のブランチに紐づくPRが見つかりません")
+        raise LookupError(detail or "PRが見つかりません")
+    try:
+        result = json.loads(metadata.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHubから返されたPR情報を読み取れませんでした") from exc
+    diff_target = selector or str(result.get("number") or "")
+    diff = subprocess.run(
+        [gh, "pr", "diff", diff_target, "--patch"],
+        cwd=cwd, capture_output=True, text=True, timeout=30,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    if diff.returncode != 0:
+        raise RuntimeError(diff.stderr.strip() or "PRの差分を取得できませんでした")
+    if len(diff.stdout.encode("utf-8")) > 5 * 1024 * 1024:
+        raise ValueError("差分が5MBを超えています。GitHubで確認してください")
+    result["patch"] = diff.stdout
+    return result
+
+
 def codex_session_head(path):
     """codexログ先頭の session_meta から会話識別情報を返す。"""
     with CODEX_HEAD_LOCK:
@@ -2057,6 +2139,9 @@ def load_managed_sessions():
             pinned = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_pinned"
             ).stdout.strip() == "1"
+            pull_request = tmux_run(
+                "show-option", "-qv", "-t", parts[0], "@launcher_pull_request"
+            ).stdout.strip()
             agent = pane_agent({"tty_name": parts[4]})
             exact = None
             session_id = tmux_run(
@@ -2106,6 +2191,7 @@ def load_managed_sessions():
                 "last_message": last_message, "log_path": log_path,
                 "note": note,
                 "pinned": pinned,
+                "pull_request": pull_request,
                 "session_id": session_id, "bypass": bypass,
                 "running": running,
                 "background": "" if running else screen_background_label(screen),
@@ -2481,7 +2567,8 @@ def launcher_session_name(output):
 
 
 def set_session_metadata(
-    name, summary="", session_id="", bypass=False, note="", pinned=False
+    name, summary="", session_id="", bypass=False, note="", pinned=False,
+    pull_request="",
 ):
     if not name:
         return
@@ -2496,6 +2583,10 @@ def set_session_metadata(
         tmux_run("set-option", "-t", name, "@launcher_note", note[:1000])
     if pinned:
         tmux_run("set-option", "-t", name, "@launcher_pinned", "1")
+    if pull_request:
+        tmux_run(
+            "set-option", "-t", name, "@launcher_pull_request", pull_request
+        )
 
 
 def wait_for_new_session_id(tool, cwd, started_at, timeout=4):
@@ -3241,6 +3332,44 @@ TERMINAL_PAGE = r"""<!doctype html>
   #back-link {{ display: none; flex: 0 0 auto; padding: 7px 10px;
     border: 1px solid #484f58; border-radius: 8px; }}
   .terminal {{ min-width: 0; flex: 1; display: flex; flex-direction: column; }}
+  #review-pane {{ width: min(46vw, 760px); min-width: 420px; display: flex;
+    flex-direction: column; border-left: 1px solid #30363d; background: #0d1117; }}
+  body.review-closed #review-pane {{ display: none; }}
+  .review-head {{ flex-shrink: 0; padding: 10px 12px; border-bottom: 1px solid #30363d;
+    background: #161b22; }}
+  .review-title-row {{ display: flex; align-items: center; gap: 8px; }}
+  .review-title-row strong {{ min-width: 0; flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }}
+  .review-title-row a {{ color: #58a6ff; text-decoration: none; }}
+  .review-title-row button {{ flex: 0 0 auto; width: auto; padding: 5px 9px; font-size: .82rem; }}
+  .review-meta {{ margin-top: 4px; color: #8b949e; font-size: .76rem; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }}
+  .review-picker {{ display: flex; gap: 6px; margin-top: 8px; }}
+  .review-picker input {{ min-width: 0; flex: 1; padding: 7px 9px; color: #e6edf3;
+    background: #0d1117; border: 1px solid #484f58; border-radius: 7px; font-size: .82rem; }}
+  .review-picker button {{ flex: 0 0 auto; width: auto; padding: 7px 10px; font-size: .82rem; }}
+  #review-content {{ flex: 1; min-height: 0; display: flex; flex-direction: column; }}
+  #review-message {{ padding: 20px; color: #8b949e; line-height: 1.5; }}
+  #review-files {{ flex-shrink: 0; max-height: 30%; overflow-y: auto;
+    border-bottom: 1px solid #30363d; }}
+  .review-file {{ display: flex; align-items: center; width: 100%; gap: 8px; padding: 8px 11px;
+    text-align: left; border: 0; border-bottom: 1px solid #21262d; border-radius: 0;
+    background: #161b22; font: .78rem ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  .review-file.active {{ background: #1f6feb22; color: #fff; }}
+  .review-file .path {{ min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; }}
+  .review-file .adds {{ color: #3fb950; }} .review-file .dels {{ color: #f85149; }}
+  #review-diff {{ flex: 1; min-height: 0; overflow: auto; font: 12px/1.5 ui-monospace,
+    SFMono-Regular, Menlo, monospace; }}
+  .diff-file-title {{ position: sticky; top: 0; z-index: 1; padding: 8px 10px;
+    background: #161b22; border-bottom: 1px solid #30363d; font-weight: 700; }}
+  .diff-row {{ display: flex; min-width: max-content; white-space: pre; }}
+  .diff-row:hover {{ filter: brightness(1.2); }}
+  .diff-no {{ position: sticky; left: 0; width: 48px; flex: 0 0 48px; padding: 0 6px;
+    text-align: right; color: #6e7681; background: inherit; user-select: none; }}
+  .diff-code {{ padding-right: 16px; }}
+  .diff-add {{ background: #2ea04326; }} .diff-del {{ background: #f8514926; }}
+  .diff-hunk {{ color: #8ab4f8; background: #1f6feb20; }}
+  .diff-note {{ color: #8b949e; }}
   header {{ position: relative; padding: 10px 12px; display: flex; align-items: center; gap: 10px;
     border-bottom: 1px solid #30363d; background: #161b22; flex-shrink: 0; z-index: 2; }}
   header a {{ color: #8ab4f8; text-decoration: none; font-size: 1rem; }}
@@ -3361,6 +3490,11 @@ TERMINAL_PAGE = r"""<!doctype html>
     aside {{ display: none; }}
     #back-link {{ display: block; }}
     .terminal {{ width: 100%; }}
+    #review-pane {{ display: none; width: 100%; min-width: 0; border-left: 0; }}
+    body.review-open .terminal {{ display: none; }}
+    body.review-open #review-pane {{ display: flex; }}
+    body.review-closed #review-pane {{ display: none; }}
+    #review-files {{ max-height: 34%; }}
     /* 狭い画面ではボタンを記号だけにして、ツール名とモデルを読める幅を残す。 */
     header {{ gap: 7px; padding: 9px 10px; }}
     header a {{ font-size: .95rem; }}
@@ -3387,6 +3521,7 @@ TERMINAL_PAGE = r"""<!doctype html>
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
 <small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{pin_button}{restart_button}{note_button}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
+<button type="button" id="review-toggle" title="PR差分"><span class="label">差分</span><span class="icon">±</span></button>
 <button type="button" id="menu-toggle" aria-label="メニュー">☰</button></header>
 <div id="artifacts">{artifacts_html}</div>
 <div id="chat"><div class="chat-empty">会話を読み込み中...</div></div>
@@ -3402,7 +3537,26 @@ TERMINAL_PAGE = r"""<!doctype html>
   </div>
   <div id="status"></div>
 </div>
-</main></div>
+</main><section id="review-pane" aria-label="PR差分">
+  <div class="review-head">
+    <div class="review-title-row"><strong id="review-title">PR差分</strong>
+      <a id="review-link" target="_blank" rel="noopener" hidden>GitHub ↗</a>
+      <button type="button" id="review-unlink" title="PRの紐づけを解除" hidden>解除</button>
+      <button type="button" id="review-refresh" title="再読み込み">↻</button>
+      <button type="button" id="review-close" title="差分を閉じる">×</button>
+    </div>
+    <div class="review-meta" id="review-meta">現在のブランチからPRを探します</div>
+    <form class="review-picker" id="review-picker">
+      <input id="review-pr" inputmode="numeric" placeholder="PR番号またはGitHub PR URL">
+      <button type="submit">表示</button>
+    </form>
+  </div>
+  <div id="review-content">
+    <div id="review-message">PR差分を読み込み中...</div>
+    <div id="review-files" hidden></div>
+    <div id="review-diff" hidden></div>
+  </div>
+</section></div>
 <div id="lightbox" hidden><img alt="添付画像"></div>
 <div class="modal" id="confirm-modal" hidden><div class="modal-card" role="dialog" aria-modal="true">
   <p id="confirm-message">このセッションを終了しますか？</p><div class="modal-actions"><button type="button" id="confirm-cancel">キャンセル</button><button type="button" class="danger" id="confirm-ok">実行する</button></div>
@@ -3438,6 +3592,168 @@ TERMINAL_PAGE = r"""<!doctype html>
   const noteModal = document.getElementById("note-modal");
   const noteInput = document.getElementById("note-input");
   const pinButton = document.getElementById("pin");
+  const reviewPane = document.getElementById("review-pane");
+  const reviewTitle = document.getElementById("review-title");
+  const reviewMeta = document.getElementById("review-meta");
+  const reviewLink = document.getElementById("review-link");
+  const reviewMessage = document.getElementById("review-message");
+  const reviewFiles = document.getElementById("review-files");
+  const reviewDiff = document.getElementById("review-diff");
+  const reviewPr = document.getElementById("review-pr");
+  const reviewUnlink = document.getElementById("review-unlink");
+  const reviewKey = "reviewPr:" + session;
+  const reviewOpenMode = {pr_diff_open_json};
+  let linkedPullRequest = {pr_selector_json};
+  let reviewSelector = linkedPullRequest || localStorage.getItem(reviewKey) || "";
+  let reviewData = null;
+  let reviewManuallyOpened = false;
+  function splitPatch(patch) {{
+    const sections = new Map();
+    let current = null;
+    const saveCurrent = () => {{
+      if (!current || !current.path) return;
+      const existing = sections.get(current.path) || [];
+      sections.set(current.path, existing.concat(current.lines));
+    }};
+    for (const line of (patch || "").split("\n")) {{
+      if (line.startsWith("diff --git ")) {{
+        saveCurrent();
+        current = {{path: "", lines: [line]}};
+        continue;
+      }}
+      if (!current) continue;
+      current.lines.push(line);
+      if (line.startsWith("+++ b/")) current.path = line.slice(6);
+      else if (!current.path && line.startsWith("--- a/")) current.path = line.slice(6);
+    }}
+    saveCurrent();
+    return sections;
+  }}
+  function renderDiffFile(file, lines) {{
+    reviewDiff.replaceChildren();
+    const heading = document.createElement("div");
+    heading.className = "diff-file-title"; heading.textContent = file.path;
+    reviewDiff.append(heading);
+    let oldLine = null, newLine = null;
+    for (const line of lines || []) {{
+      const row = document.createElement("div"); row.className = "diff-row";
+      let shownLine = "", lineClass = "diff-note";
+      const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+      if (hunk) {{
+        oldLine = Number(hunk[1]); newLine = Number(hunk[2]); lineClass = "diff-hunk";
+      }} else if (oldLine !== null && line.startsWith("+") && !line.startsWith("+++")) {{
+        shownLine = String(newLine++); lineClass = "diff-add";
+      }} else if (oldLine !== null && line.startsWith("-") && !line.startsWith("---")) {{
+        shownLine = String(oldLine++); lineClass = "diff-del";
+      }} else if (oldLine !== null && line.startsWith(" ")) {{
+        shownLine = String(newLine); oldLine++; newLine++;
+      }}
+      row.classList.add(lineClass);
+      const no = document.createElement("span"); no.className = "diff-no"; no.textContent = shownLine;
+      const code = document.createElement("span"); code.className = "diff-code"; code.textContent = line;
+      row.append(no, code);
+      if (shownLine && !document.body.classList.contains("readonly")) {{
+        row.title = "クリックして入力欄へ位置を追加";
+        row.addEventListener("click", () => {{
+          const prefix = input.value && !input.value.endsWith("\n") ? "\n" : "";
+          input.value += prefix + "確認対象: " + file.path + ":" + shownLine + "\n";
+          syncInput(); input.focus();
+        }});
+      }}
+      reviewDiff.append(row);
+    }}
+    reviewDiff.hidden = false;
+  }}
+  function renderPullRequest(data) {{
+    reviewData = data;
+    reviewTitle.textContent = "#" + data.number + " " + data.title;
+    reviewMeta.textContent = data.baseRefName + " ← " + data.headRefName + " · "
+      + data.state + " · " + (data.files || []).length + " files";
+    reviewLink.href = data.url; reviewLink.hidden = false;
+    reviewUnlink.hidden = !linkedPullRequest;
+    reviewMessage.hidden = true; reviewFiles.hidden = false; reviewDiff.hidden = false;
+    const patches = splitPatch(data.patch);
+    const files = data.files || [];
+    reviewFiles.replaceChildren(...files.map((file, index) => {{
+      const button = document.createElement("button"); button.type = "button";
+      button.className = "review-file" + (index === 0 ? " active" : "");
+      const path = document.createElement("span"); path.className = "path"; path.textContent = file.path;
+      const adds = document.createElement("span"); adds.className = "adds"; adds.textContent = "+" + file.additions;
+      const dels = document.createElement("span"); dels.className = "dels"; dels.textContent = "−" + file.deletions;
+      button.append(path, adds, dels);
+      button.addEventListener("click", () => {{
+        reviewFiles.querySelectorAll(".review-file").forEach(item => item.classList.remove("active"));
+        button.classList.add("active"); renderDiffFile(file, patches.get(file.path) || []);
+      }});
+      return button;
+    }}));
+    if (files.length) renderDiffFile(files[0], patches.get(files[0].path) || []);
+    else {{ reviewDiff.textContent = "変更ファイルはありません"; }}
+  }}
+  function openReview() {{
+    document.body.classList.remove("review-closed");
+    if (matchMedia("(max-width: 799px)").matches) document.body.classList.add("review-open");
+  }}
+  async function loadPullRequest(selector = reviewSelector, userInitiated = false) {{
+    reviewSelector = selector.trim(); reviewPr.value = reviewSelector;
+    reviewMessage.hidden = false; reviewMessage.textContent = "PR差分を読み込み中...";
+    reviewFiles.hidden = true; reviewDiff.hidden = true; reviewLink.hidden = true;
+    reviewTitle.textContent = "PR差分";
+    try {{
+      const query = reviewSelector ? "?pr=" + encodeURIComponent(reviewSelector) : "";
+      const response = await fetch("/api/sessions/" + encodeURIComponent(session) + "/pull-request" + query);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "PR差分を取得できませんでした");
+      if (userInitiated && !document.body.classList.contains("readonly")) {{
+        await post("/api/sessions/" + encodeURIComponent(session) + "/pull-request", {{pr: data.url}});
+        linkedPullRequest = data.url; reviewSelector = data.url;
+        localStorage.removeItem(reviewKey);
+      }} else if (reviewSelector && !linkedPullRequest) {{
+        localStorage.setItem(reviewKey, reviewSelector);
+      }}
+      renderPullRequest(data);
+      // SPは会話を突然隠さない。設定にかかわらず明示操作のときだけ差分へ切り替える。
+      if (userInitiated) openReview();
+      else if (reviewOpenMode !== "never" && !matchMedia("(max-width: 799px)").matches) {{
+        openReview();
+      }}
+    }} catch (error) {{
+      reviewMeta.textContent = "PR番号またはURLを指定できます";
+      reviewMessage.textContent = error.message;
+      if (!userInitiated && !reviewManuallyOpened && reviewOpenMode === "auto") closeReview();
+    }}
+  }}
+  document.getElementById("review-picker").addEventListener("submit", event => {{
+    event.preventDefault(); reviewManuallyOpened = true; loadPullRequest(reviewPr.value, true);
+  }});
+  document.getElementById("review-refresh").addEventListener("click", () => loadPullRequest(reviewSelector, true));
+  reviewUnlink.addEventListener("click", async () => {{
+    try {{
+      await post("/api/sessions/" + encodeURIComponent(session) + "/pull-request", {{pr: ""}});
+      linkedPullRequest = ""; reviewSelector = ""; reviewUnlink.hidden = true;
+      localStorage.removeItem(reviewKey); reviewPr.value = "";
+      await loadPullRequest("", false);
+    }} catch (error) {{ reviewMessage.hidden = false; reviewMessage.textContent = error.message; }}
+  }});
+  function closeReview() {{
+    reviewManuallyOpened = false;
+    if (matchMedia("(max-width: 799px)").matches) document.body.classList.remove("review-open");
+    else document.body.classList.add("review-closed");
+  }}
+  document.getElementById("review-close").addEventListener("click", closeReview);
+  document.getElementById("review-toggle").addEventListener("click", () => {{
+    const mobile = matchMedia("(max-width: 799px)").matches;
+    const opening = mobile
+      ? !document.body.classList.contains("review-open")
+      : document.body.classList.contains("review-closed");
+    if (opening) {{
+      reviewManuallyOpened = true;
+      openReview();
+      if (!reviewData) loadPullRequest(reviewSelector, true);
+    }} else closeReview();
+  }});
+  if (reviewOpenMode !== "never") loadPullRequest();
+  else reviewMessage.textContent = "差分ボタンからPRを読み込めます";
   function renderPinButton() {{
     if (!pinButton) return;
     pinButton.classList.toggle("pinned", sessionPinned);
@@ -3571,15 +3887,14 @@ TERMINAL_PAGE = r"""<!doctype html>
     if (cursor < text.length) target.append(document.createTextNode(text.slice(cursor)));
   }}
   function shellCommand(language, lines) {{
-    // 実行できるのは TUI の bash モードに渡せる1行だけ。出力の貼り付けを
-    // 誤って実行しないよう、シェルだと明示されたブロックか、! / $ で
-    // コマンドだと分かる行に限る。
+    // 出力の貼り付けを誤って実行しないよう、複数行はシェルだと明示された
+    // コードブロックだけ、言語指定なしは ! / $ で始まる1行だけに限る。
     const body = lines.filter(line => line.trim());
+    if (!body.length) return "";
+    if (/^(sh|bash|zsh|shell)$/i.test(language || "")) return lines.join("\n").trim();
     if (body.length !== 1) return "";
     const line = body[0].trim();
-    if (/^[!$]\s/.test(line)) return line.replace(/^[!$]\s+/, "");
-    if (!/^(sh|bash|zsh|shell)$/i.test(language || "")) return "";
-    return line;
+    return /^[!$]\s/.test(line) ? line.replace(/^[!$]\s+/, "") : "";
   }}
   function copyText(text, button) {{
     // http 配信では navigator.clipboard が使えないので textarea 経由で書く
@@ -3602,7 +3917,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     const command = shellCommand(language, lines);
     if (command && !document.body.classList.contains("readonly")) {{
       const run = document.createElement("button");
-      run.type = "button"; run.className = "run"; run.textContent = "▶ 実行";
+      run.type = "button"; run.className = "run"; run.textContent = "▶ シェルで実行";
       run.addEventListener("click", () => runCommand(command));
       actions.append(run);
     }}
@@ -4094,8 +4409,14 @@ TERMINAL_PAGE = r"""<!doctype html>
     catch (error) {{ input.value = sent; syncInput(); status.textContent = error.message; }}
   }});
   async function runCommand(command) {{
-    if (!await askConfirm("このコマンドを実行しますか？　" + command)) return;
-    try {{ await sendText("!" + command); }}
+    if (!await askConfirm("WezTermの新しいシェルで実行しますか？\n\n" + command)) return;
+    try {{
+      const data = await post(
+        "/api/sessions/" + encodeURIComponent(session) + "/shell", {{command}}
+      );
+      status.textContent = "WezTerm pane " + data.pane + " で実行しました";
+      statusMessageUntil = Date.now() + 8000;
+    }}
     catch (error) {{ status.textContent = error.message; }}
   }}
   const enterButton = document.getElementById("enter");
@@ -4429,6 +4750,8 @@ class Handler(BaseHTTPRequestHandler):
                     context_badge=context_badge_html(info.get("context")),
                     model_choices="",
                     session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
+                    pr_diff_open_json=json.dumps(PR_DIFF_OPEN),
+                    pr_selector_json=json.dumps(""),
                     note_json=json.dumps(""), note_button="", pinned_json="false", pin_button="",
                     sessions_sidebar=build_sidebar(session),
                     sidebar_css=SIDEBAR_CSS, sidebar_js=SIDEBAR_JS,
@@ -4437,7 +4760,10 @@ class Handler(BaseHTTPRequestHandler):
                         f'<a class="wez-migrate" href="/migrate?pane_id={info["pane_id"]}">'
                         f'Web操作へ移行</a>'
                     ),
-                    body_class=' class="readonly"',
+                    body_class=(
+                        ' class="readonly review-closed"'
+                        if PR_DIFF_OPEN != "always" else ' class="readonly"'
+                    ),
                     artifacts_html=artifact_links(
                         session_artifacts(info["log_path"], info["tool"])
                     ),
@@ -4468,6 +4794,8 @@ class Handler(BaseHTTPRequestHandler):
                     if value in choices
                 ),
                 session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
+                pr_diff_open_json=json.dumps(PR_DIFF_OPEN),
+                pr_selector_json=json.dumps(item.get("pull_request", "")),
                 upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
                 note_json=json.dumps(item.get("note", "")),
                 pinned_json=json.dumps(bool(item.get("pinned"))),
@@ -4508,7 +4836,9 @@ class Handler(BaseHTTPRequestHandler):
                         if item["session_id"] else ""
                     )
                 ),
-                body_class="",
+                body_class=(
+                    ' class="review-closed"' if PR_DIFF_OPEN != "always" else ""
+                ),
                 artifacts_html=artifact_links(item.get("artifacts", [])),
             ))
         if parsed.path == "/api/usage":
@@ -4535,6 +4865,37 @@ class Handler(BaseHTTPRequestHandler):
                     "artifacts": entry.get("artifacts", []),
                 })
             return self._json({"items": items, "boot": BOOT_ID})
+        pr_match = re.fullmatch(
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+|wez-\d+)/pull-request",
+            parsed.path,
+        )
+        if pr_match:
+            session = pr_match.group(1)
+            linked_selector = ""
+            if session.startswith("wez-"):
+                info = wez_view_session(session[4:])
+                cwd = info.get("cwd", "") if info else ""
+            else:
+                item = next(
+                    (entry for entry in managed_sessions() if entry["name"] == session), None
+                )
+                cwd = item.get("cwd", "") if item else ""
+                linked_selector = item.get("pull_request", "") if item else ""
+            if not cwd:
+                return self._json({"error": "セッションが見つかりません"}, 404)
+            selector = urllib.parse.parse_qs(parsed.query).get("pr", [linked_selector])[0]
+            try:
+                return self._json(pull_request_diff(cwd, selector))
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+            except LookupError as exc:
+                return self._json({"error": str(exc), "not_found": True}, 404)
+            except FileNotFoundError:
+                return self._json({"error": "gh CLIが見つかりません"}, 503)
+            except subprocess.TimeoutExpired:
+                return self._json({"error": "GitHubからの取得がタイムアウトしました"}, 504)
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 500)
         if parsed.path.startswith("/uploads/"):
             return self._upload_file(parsed.path)
         match = re.fullmatch(
@@ -4730,7 +5091,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
         match = re.fullmatch(
-            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(input|key|kill|restart|handoff|answer|model|terminal|note|pin)",
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(input|key|kill|restart|handoff|answer|model|terminal|shell|note|pin|pull-request)",
             self.path,
         )
         if match:
@@ -4746,6 +5107,10 @@ class Handler(BaseHTTPRequestHandler):
                         session, value, qs.get("enter", ["1"])[0] == "1"
                     )
                     return self._json({"ok": True, "message": message})
+                elif action == "shell":
+                    item = next(item for item in managed_sessions() if item["name"] == session)
+                    pane = launch_shell_command(item["cwd"], qs.get("command", [""])[0])
+                    return self._json({"ok": True, "pane": pane})
                 elif action == "note":
                     value = qs.get("note", [""])[0].strip()
                     if len(value) > 1000:
@@ -4771,6 +5136,26 @@ class Handler(BaseHTTPRequestHandler):
                         raise RuntimeError(result.stderr.strip() or "ピン留めを変更できませんでした")
                     invalidate_session_cache()
                     return self._json({"ok": True, "pinned": pinned})
+                elif action == "pull-request":
+                    value = qs.get("pr", [""])[0].strip()
+                    if value:
+                        value = normalize_pr_selector(value)
+                    result = (
+                        tmux_run(
+                            "set-option", "-t", session,
+                            "@launcher_pull_request", value,
+                        )
+                        if value else tmux_run(
+                            "set-option", "-u", "-t", session,
+                            "@launcher_pull_request",
+                        )
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(
+                            result.stderr.strip() or "PRの紐づけを変更できませんでした"
+                        )
+                    invalidate_session_cache()
+                    return self._json({"ok": True, "pull_request": value})
                 elif action == "model":
                     value = qs.get("model", [""])[0]
                     item = next(item for item in managed_sessions() if item["name"] == session)
@@ -4993,7 +5378,7 @@ class Handler(BaseHTTPRequestHandler):
             raise RuntimeError("再起動したセッション名を取得できませんでした")
         set_session_metadata(
             new_session, item["summary"], item["session_id"], bypass, item.get("note", ""),
-            bool(item.get("pinned")),
+            bool(item.get("pinned")), item.get("pull_request", ""),
         )
         invalidate_session_cache()
         return new_session
@@ -5027,6 +5412,7 @@ class Handler(BaseHTTPRequestHandler):
         set_session_metadata(
             new_session, item.get("summary") or prompt, session_id,
             bool(item.get("bypass")), item.get("note", ""), bool(item.get("pinned")),
+            item.get("pull_request", ""),
         )
         result = tmux_run("kill-session", "-t", session)
         if result.returncode != 0:
