@@ -3516,6 +3516,11 @@ TERMINAL_PAGE = r"""<!doctype html>
     header .actions.open button, header .actions.open a {{ text-align: left; padding: 11px 14px;
       font-size: .95rem; }}
   }}
+  /* サイドバー・会話・差分の3ペインを並べる余裕がない幅では会話を優先する。 */
+  @media (max-width: 1099px) {{
+    #review-toggle, #review-pane {{ display: none !important; }}
+    body.review-open .terminal {{ display: flex; }}
+  }}
 </style></head><body{body_class}>
 <div class="app"><aside><h2>セッション</h2>{sessions_sidebar}</aside><main class="terminal">
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
@@ -3601,6 +3606,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   const reviewDiff = document.getElementById("review-diff");
   const reviewPr = document.getElementById("review-pr");
   const reviewUnlink = document.getElementById("review-unlink");
+  const narrowReviewViewport = matchMedia("(max-width: 1099px)");
   const reviewKey = "reviewPr:" + session;
   const reviewOpenMode = {pr_diff_open_json};
   let linkedPullRequest = {pr_selector_json};
@@ -3692,7 +3698,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   }}
   function openReview() {{
     document.body.classList.remove("review-closed");
-    if (matchMedia("(max-width: 799px)").matches) document.body.classList.add("review-open");
+    if (narrowReviewViewport.matches) return;
   }}
   async function loadPullRequest(selector = reviewSelector, userInitiated = false) {{
     reviewSelector = selector.trim(); reviewPr.value = reviewSelector;
@@ -3712,9 +3718,9 @@ TERMINAL_PAGE = r"""<!doctype html>
         localStorage.setItem(reviewKey, reviewSelector);
       }}
       renderPullRequest(data);
-      // SPは会話を突然隠さない。設定にかかわらず明示操作のときだけ差分へ切り替える。
+      // 狭い画面では会話を優先し、設定や明示操作にかかわらず差分を表示しない。
       if (userInitiated) openReview();
-      else if (reviewOpenMode !== "never" && !matchMedia("(max-width: 799px)").matches) {{
+      else if (reviewOpenMode !== "never" && !narrowReviewViewport.matches) {{
         openReview();
       }}
     }} catch (error) {{
@@ -3737,15 +3743,13 @@ TERMINAL_PAGE = r"""<!doctype html>
   }});
   function closeReview() {{
     reviewManuallyOpened = false;
-    if (matchMedia("(max-width: 799px)").matches) document.body.classList.remove("review-open");
-    else document.body.classList.add("review-closed");
+    document.body.classList.remove("review-open");
+    document.body.classList.add("review-closed");
   }}
   document.getElementById("review-close").addEventListener("click", closeReview);
   document.getElementById("review-toggle").addEventListener("click", () => {{
-    const mobile = matchMedia("(max-width: 799px)").matches;
-    const opening = mobile
-      ? !document.body.classList.contains("review-open")
-      : document.body.classList.contains("review-closed");
+    if (narrowReviewViewport.matches) return;
+    const opening = document.body.classList.contains("review-closed");
     if (opening) {{
       reviewManuallyOpened = true;
       openReview();
