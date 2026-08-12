@@ -171,6 +171,9 @@ UPLOAD_MENTION_RE = re.compile(
     r"(?:" + "|".join(re.escape(p) for p in UPLOAD_PATH_PREFIXES) + r")"
     r"/uploads/[^\s\]]+\]?"
 )
+CODEX_FILE_CITATION_RE = re.compile(
+    r':codex-file-citation\{path="([^"\r\n]+)"\s+purpose="output"\}'
+)
 
 
 def _js_regex_escape(path):
@@ -717,11 +720,13 @@ def assistant_message_text(item, tool):
     else:
         return ""
     if isinstance(content, str):
-        return content.strip()
-    return "\n".join(
-        part.get("text", "").strip() for part in content
-        if part.get("type") in kinds and part.get("text", "").strip()
-    )
+        text = content.strip()
+    else:
+        text = "\n".join(
+            part.get("text", "").strip() for part in content
+            if part.get("type") in kinds and part.get("text", "").strip()
+        )
+    return materialize_codex_file_citations(text) if tool == "codex" else text
 
 
 def codex_tool_images_text(item):
@@ -841,6 +846,31 @@ def sent_files_text(payload):
     if caption and lines:
         lines.append(caption)
     return "\n".join(lines)
+
+
+def materialize_codex_file_citations(text):
+    """Codex の出力ファイル参照を Web UI から配信できる添付へ変換する。"""
+    def replace(match):
+        source = os.path.realpath(os.path.expanduser(match.group(1)))
+        if not os.path.isfile(source):
+            return match.group(0)
+        try:
+            stat = os.stat(source)
+            fingerprint = f"{source}\0{stat.st_mtime_ns}\0{stat.st_size}"
+            digest = hashlib.sha256(fingerprint.encode()).hexdigest()[:16]
+            basename = re.sub(r"\s+", "_", os.path.basename(source))
+            session_dir = os.path.join(UPLOAD_DIR, "codex-files")
+            dest = os.path.join(session_dir, f"codex-{digest}-{basename}")
+            if not os.path.exists(dest):
+                os.makedirs(session_dir, mode=0o700, exist_ok=True)
+                shutil.copyfile(source, dest)
+                os.chmod(dest, 0o600)
+        except OSError:
+            return match.group(0)
+        # Markdown 文中に埋め込まれた citation でも専用行として描画できるよう改行する。
+        return f"\n\n添付ファイル: {dest}"
+
+    return CODEX_FILE_CITATION_RE.sub(replace, text)
 
 
 def assistant_parts(item, tool):
@@ -1108,11 +1138,18 @@ def parse_codex_question_screen(screen):
     """
     lines = screen.splitlines()
     prompt_index = next(
-        (i for i in range(len(lines) - 1, -1, -1)
-         if "enter to submit" in lines[i].lower()),
+        (
+            i for i in range(len(lines) - 1, -1, -1)
+            if "enter to submit" in lines[i].lower()
+            or re.search(r"\benter to select\b", lines[i], re.I)
+        ),
         None,
     )
     if prompt_index is None:
+        return None
+    # 会話中に表示された過去の選択画面ではなく、現在フォアグラウンドで
+    # 入力を待っているダイアログだけを扱う。
+    if any(line.strip() for line in lines[prompt_index + 1:]):
         return None
 
     field_index = next(
@@ -1121,6 +1158,18 @@ def parse_codex_question_screen(screen):
         None,
     )
     scan_start = field_index + 1 if field_index is not None else max(0, prompt_index - 30)
+    if field_index is None:
+        # App connector のサインイン画面には Field 行がない。直前の Calling
+        # 表示を質問へ混ぜないよう、最後のイベント行より後をダイアログとする。
+        event_index = next(
+            (
+                i for i in range(prompt_index - 1, scan_start - 1, -1)
+                if re.match(r"^\s*•\s+(?:Calling|Called|Opened)\b", lines[i], re.I)
+            ),
+            None,
+        )
+        if event_index is not None:
+            scan_start = event_index + 1
     choices = []
     current = None
     first_choice = None
@@ -3324,6 +3373,10 @@ TERMINAL_PAGE = r"""<!doctype html>
     border: 1px solid #30363d; border-radius: 9px; background: #21262d;
     color: #e6edf3; text-decoration: none; font-size: .92em; }}
   .bubble a.file-chip:hover {{ border-color: #58a6ff; }}
+  .bubble .pdf-card {{ margin: 12px 0; }}
+  .bubble .pdf-card .file-chip {{ margin-bottom: 8px; }}
+  .bubble iframe.pdf-preview {{ display: block; width: 100%; height: min(68vh, 680px);
+    min-height: 420px; border: 1px solid #3d444d; border-radius: 9px; background: #fff; }}
   #lightbox {{ position: fixed; inset: 0; z-index: 200; display: grid; place-items: center;
     padding: 14px; background: #000d; cursor: zoom-out; }}
   #lightbox[hidden] {{ display: none; }}
@@ -4025,7 +4078,15 @@ TERMINAL_PAGE = r"""<!doctype html>
         // 保存名の「日時-乱数-」プレフィックスを外して元のファイル名を出す
         chip.textContent = "📄 " + rel.split("/").pop().replace(/^(?:\d{{8}}-\d{{6}}-[0-9a-f]{{8}}|sent-[0-9a-f]{{8}})-/, "");
         chip.addEventListener("click", event => event.stopPropagation());
-        target.append(chip);
+        if (rel.toLowerCase().endsWith(".pdf")) {{
+          const card = document.createElement("div"); card.className = "pdf-card";
+          const preview = document.createElement("iframe");
+          preview.className = "pdf-preview"; preview.title = chip.textContent;
+          preview.src = chip.href; preview.loading = "lazy";
+          card.append(chip, preview); target.append(card);
+        }} else {{
+          target.append(chip);
+        }}
         continue;
       }}
       const nextLine = lines[lineIndex + 1] || "";
@@ -4137,7 +4198,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       }}
       row.append(bubble); chat.append(row);
       // 最新の回答は読みに来た本文なので畳まない。それ以外の長文は折りたたみ候補
-      if (!(item === lastItem && item.role === "assistant")) {{
+      if (!(item === lastItem && item.role === "assistant") && !bubble.querySelector(".pdf-card")) {{
         collapsible.push({{row, bubble, key: item.role + "|" + index + "|" + item.text.length}});
       }}
     }}

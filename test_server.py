@@ -159,6 +159,39 @@ class CodexSessionTest(unittest.TestCase):
             r"^添付画像: .*/codex-images/codex-[0-9a-f]{16}\.png$",
         )
 
+    def test_codex_file_citation_is_saved_for_chat_rendering(self):
+        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as upload_dir:
+            source = os.path.join(source_dir, "確認用 PDF.pdf")
+            with open(source, "wb") as output:
+                output.write(b"%PDF-1.4\ntest")
+            item = {
+                "type": "response_item",
+                "payload": {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": (
+                            "確認用PDF："
+                            f':codex-file-citation{{path="{source}" purpose="output"}}'
+                        ),
+                    }],
+                },
+            }
+            with mock.patch.object(server, "UPLOAD_DIR", upload_dir):
+                parts = server.assistant_parts(item, "codex")
+
+            self.assertRegex(
+                parts[0]["text"],
+                r"^確認用PDF：\n\n添付ファイル: .*/codex-files/codex-[0-9a-f]{16}-確認用_PDF\.pdf$",
+            )
+            saved = parts[0]["text"].split("添付ファイル: ", 1)[1]
+            with open(saved, "rb") as copied:
+                self.assertEqual(b"%PDF-1.4\ntest", copied.read())
+
+    def test_missing_codex_file_citation_remains_visible(self):
+        citation = ':codex-file-citation{path="/missing/sample.pdf" purpose="output"}'
+        self.assertEqual(citation, server.materialize_codex_file_citations(citation))
+
 
 class ShellCommandTest(unittest.TestCase):
     def test_launches_login_shell_and_sends_multiline_command(self):
@@ -507,6 +540,47 @@ class CodexQuestionTest(unittest.TestCase):
                 {"number": 3, "label": "Cancel", "description": "Cancel this tool call"},
             ],
         }, server.parse_codex_question_screen(screen))
+
+    def test_parses_codex_app_sign_in_choices(self):
+        screen = """
+• Calling codex_apps.gmail.get_profile({})
+
+
+  Gmail
+
+  Sign in to Gmail on ChatGPT to use it in Codex.
+
+  URL
+  https://chatgpt.com/apps/gmail/connector_example
+
+  Sign in to this app in your browser, then return here.
+
+
+  › 1. Open sign-in URL
+    2. Back
+  Use tab / ↑ ↓ to move, enter to select, esc to close
+"""
+        self.assertEqual({
+            "question": (
+                "Gmail Sign in to Gmail on ChatGPT to use it in Codex. URL "
+                "https://chatgpt.com/apps/gmail/connector_example "
+                "Sign in to this app in your browser, then return here."
+            ),
+            "choices": [
+                {"number": 1, "label": "Open sign-in URL", "description": ""},
+                {"number": 2, "label": "Back", "description": ""},
+            ],
+        }, server.parse_codex_question_screen(screen))
+
+    def test_quoted_codex_app_dialog_is_not_a_question(self):
+        screen = """
+  › 1. Open sign-in URL
+    2. Back
+  Use tab / ↑ ↓ to move, enter to select, esc to close
+
+• 認証画面は上記の内容でした。
+"""
+        self.assertIsNone(server.parse_codex_question_screen(screen))
 
 
 class ClaudeQuestionTest(unittest.TestCase):
