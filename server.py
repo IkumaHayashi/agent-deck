@@ -209,9 +209,9 @@ WAIT_CLASS_CACHE = {}
 WAIT_CLASS_PENDING = set()
 WAIT_CLASS_RETRY = 120  # 分類失敗時に再試行するまでの秒数
 WAIT_CLASS_MODEL = CONFIG.get("wait_classifier_model", "haiku")
-PR_DIFF_OPEN = CONFIG.get("pr_diff_open", "auto")
+PR_DIFF_OPEN = CONFIG.get("pr_diff_open", "never")
 if PR_DIFF_OPEN not in {"auto", "always", "never"}:
-    PR_DIFF_OPEN = "auto"
+    PR_DIFF_OPEN = "never"
 CLAUDE_BIN = find_bin("claude", CONFIG.get("claude_bin"))
 CODEX_BIN = find_bin("codex", CONFIG.get("codex_bin"))
 CW_INITIAL_ROOM_LIMIT = 20
@@ -2362,14 +2362,17 @@ def build_sidebar(active):
             lines += f'<small class="note">📝 {html.escape(other["note"])}</small>'
         lines += artifact_chips(other.get("artifacts", []))
         sidebar += (
-            f'<a class="{"active" if other["name"] == active else ""}{keep}" '
+            f'<div class="session-card{keep}" data-session="{html.escape(other["name"])}">'
+            f'<a class="{"active" if other["name"] == active else ""}" '
             f'href="/terminal?session={urllib.parse.quote(other["name"])}">'
             f'<strong>{tool_label(other["tool"])}'
             f'<span class="dir">{html.escape(dir_label(other["cwd"]))}</span>'
-            f'{"<span class=\"pin\" title=\"ピン留め中\">📌</span>" if other.get("pinned") else ""}'
             f'<span class="st st-{status_class}">{html.escape(status_text)}</span>'
             f'{context_chip(other.get("context"))}</strong>'
-            f'{lines}</a>'
+            f'{lines}</a><button type="button" class="side-pin{" pinned" if other.get("pinned") else ""}" '
+            f'aria-label="{"ピン留めを解除" if other.get("pinned") else "ピン留め"}" '
+            f'title="{"ピン留めを解除" if other.get("pinned") else "ピン留め"}">'
+            f'{"📌" if other.get("pinned") else "📍"}</button></div>'
         )
     sidebar += "</div>"
     # WezTermタブで動いているCLIも一覧に出す。tmux管理外なので操作は
@@ -3089,7 +3092,17 @@ SIDEBAR_CSS = r"""
     color: #8b949e; font-size: .85rem; cursor: pointer; user-select: none; }
   aside .filter-toggle input { accent-color: #f85149; }
   /* 要対応のみ表示: 自分のアクションが要るもの（要対応・選択待ち・未分類の返事待ち）だけ残す */
-  body.filter-need #side-sessions a:not(.f-keep) { display: none; }
+  body.filter-need #side-sessions .session-card:not(.f-keep) { display: none; }
+  aside .session-card { position: relative; }
+  aside .session-card > a { padding-right: 40px; }
+  aside .side-pin { position: absolute; top: 12px; right: 7px; z-index: 1;
+    width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
+    border: 0; border-radius: 7px; background: transparent; color: #8b949e;
+    font-size: .82rem; opacity: 0; cursor: pointer; }
+  aside .session-card:hover .side-pin, aside .side-pin:focus-visible,
+  aside .side-pin.pinned { opacity: 1; }
+  aside .side-pin:hover { background: #30363d; color: #e6edf3; }
+  @media (pointer: coarse) { aside .side-pin { opacity: 1; } }
   aside #side-sessions strong { display: flex; align-items: center; min-width: 0; }
   /* ツール名は潰さず、長いステータスやディレクトリ名は…で切る（縦書き化防止） */
   aside strong .tool { flex: 0 0 auto; }
@@ -3098,7 +3111,6 @@ SIDEBAR_CSS = r"""
   aside strong .dir { flex: 0 1 auto; min-width: 0; margin-left: 7px; color: #8b949e;
     font-weight: 400; font-size: .78rem; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; }
-  aside .pin { flex: 0 0 auto; font-size: .72rem; }
   aside #side-sessions .st { flex: 0 1 auto; min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
 """
@@ -3130,10 +3142,13 @@ SIDEBAR_JS = r"""
       const items = data.items.slice().sort((a, b) =>
         Number(b.pinned) - Number(a.pinned));
       sideSessions.replaceChildren(...items.map(item => {
+        const card = document.createElement("div");
+        card.className = "session-card";
+        card.dataset.session = item.name;
         const link = document.createElement("a");
         link.href = "/terminal?session=" + encodeURIComponent(item.name);
         if (item.name === session) link.classList.add("active");
-        if (["need", "ask", "wait"].includes(item.status_class)) link.classList.add("f-keep");
+        if (["need", "ask", "wait"].includes(item.status_class)) card.classList.add("f-keep");
         const title = document.createElement("strong");
         // 公式アイコンのあるツールは画像、それ以外はテキストで表示する
         let tool;
@@ -3150,15 +3165,7 @@ SIDEBAR_JS = r"""
         const dir = document.createElement("span");
         dir.className = "dir";
         dir.textContent = item.dir || "";
-        if (item.pinned) {
-          const pin = document.createElement("span");
-          pin.className = "pin";
-          pin.title = "ピン留め中";
-          pin.textContent = "📌";
-          title.append(tool, dir, pin);
-        } else {
-          title.append(tool, dir);
-        }
+        title.append(tool, dir);
         const badge = document.createElement("span");
         badge.className = "st st-" + item.status_class;
         badge.textContent = item.status;
@@ -3206,7 +3213,25 @@ SIDEBAR_JS = r"""
           }
           link.append(arts);
         }
-        return link;
+        const pin = document.createElement("button");
+        pin.type = "button";
+        pin.className = "side-pin" + (item.pinned ? " pinned" : "");
+        pin.textContent = item.pinned ? "📌" : "📍";
+        pin.title = pin.ariaLabel = item.pinned ? "ピン留めを解除" : "ピン留め";
+        pin.addEventListener("click", async event => {
+          event.preventDefault(); event.stopPropagation(); pin.disabled = true;
+          try {
+            const body = new URLSearchParams({pinned: item.pinned ? "0" : "1"});
+            const response = await fetch(
+              "/api/sessions/" + encodeURIComponent(item.name) + "/pin",
+              {method: "POST", headers: {"Content-Type": "application/x-www-form-urlencoded"}, body}
+            );
+            if (!response.ok) throw new Error("ピン留めを変更できませんでした");
+            await refreshSidebar();
+          } catch (error) { pin.title = error.message; pin.disabled = false; }
+        });
+        card.append(link, pin);
+        return card;
       }));
     } catch (error) { /* サイドバーは更新失敗しても本体に影響させない */ }
   }
@@ -3385,9 +3410,10 @@ TERMINAL_PAGE = r"""<!doctype html>
   #back-link {{ display: none; flex: 0 0 auto; padding: 7px 10px;
     border: 1px solid #484f58; border-radius: 8px; }}
   .terminal {{ min-width: 0; flex: 1; display: flex; flex-direction: column; }}
-  #review-pane {{ width: min(46vw, 760px); min-width: 420px; display: flex;
-    flex-direction: column; border-left: 1px solid #30363d; background: #0d1117; }}
-  body.review-closed #review-pane {{ display: none; }}
+  #review-pane {{ flex: 1; min-height: 0; display: none;
+    flex-direction: column; background: #0d1117; }}
+  body.review-open #review-pane {{ display: flex; }}
+  body.review-open #chat, body.review-open #screen, body.review-open #artifacts {{ display: none; }}
   .review-head {{ flex-shrink: 0; padding: 10px 12px; border-bottom: 1px solid #30363d;
     background: #161b22; }}
   .review-title-row {{ display: flex; align-items: center; gap: 8px; }}
@@ -3427,9 +3453,17 @@ TERMINAL_PAGE = r"""<!doctype html>
     border-bottom: 1px solid #30363d; background: #161b22; flex-shrink: 0; z-index: 2; }}
   header a {{ color: #8ab4f8; text-decoration: none; font-size: 1rem; }}
   header button {{ flex: 0 0 auto; padding: 7px 10px; }}
-  /* 操作ボタン群: PCは従来どおり横並び（contentsで包みを消す）、SPはハンバーガーに畳む */
-  header .actions {{ display: contents; }}
-  #menu-toggle {{ display: none; }}
+  /* セッション操作は画面幅にかかわらずハンバーガーメニューにまとめる。 */
+  #menu-toggle {{ display: block; flex: 0 0 auto; }}
+  header .actions {{ display: none; }}
+  header .actions.open {{ display: flex; flex-direction: column; align-items: stretch; gap: 8px;
+    position: absolute; top: calc(100% + 6px); right: 10px; z-index: 60;
+    min-width: 210px; padding: 10px; background: #161b22;
+    border: 1px solid #484f58; border-radius: 12px; box-shadow: 0 10px 28px #000c; }}
+  header .actions.open .menu-label {{ display: inline; }}
+  header .actions.open .label, header .actions.open .icon {{ display: none; }}
+  header .actions.open button, header .actions.open a {{ text-align: left; padding: 11px 14px;
+    font-size: .95rem; }}
   header button.warn {{ border-color: #d63545; color: #ff9c9c; }}
   header button.note-button {{ color: #d29922; }}
   header div {{ min-width: 0; flex: 1; }}
@@ -3543,10 +3577,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     aside {{ display: none; }}
     #back-link {{ display: block; }}
     .terminal {{ width: 100%; }}
-    #review-pane {{ display: none; width: 100%; min-width: 0; border-left: 0; }}
-    body.review-open .terminal {{ display: none; }}
-    body.review-open #review-pane {{ display: flex; }}
-    body.review-closed #review-pane {{ display: none; }}
+    #review-pane {{ width: 100%; min-width: 0; }}
     #review-files {{ max-height: 34%; }}
     /* 狭い画面ではボタンを記号だけにして、ツール名とモデルを読める幅を残す。 */
     header {{ gap: 7px; padding: 9px 10px; }}
@@ -3556,52 +3587,24 @@ TERMINAL_PAGE = r"""<!doctype html>
     header .icon {{ display: inline; }}
     header strong {{ font-size: .98rem; }}
     header small {{ font-size: .8rem; }}
-    /* 低頻度の操作（再起動・handoff・バイパス・WezTermへ・メモ）はハンバーガーに畳み、
-       頻繁に使うターミナル切替だけヘッダーに残す。誤タップ防止も兼ねる。 */
-    #menu-toggle {{ display: block; }}
-    header .actions {{ display: none; }}
-    header .actions.open {{ display: flex; flex-direction: column; align-items: stretch; gap: 8px;
-      position: absolute; top: calc(100% + 6px); right: 10px; z-index: 60;
-      min-width: 190px; padding: 10px; background: #161b22;
-      border: 1px solid #484f58; border-radius: 12px; box-shadow: 0 10px 28px #000c; }}
-    header .actions.open .menu-label {{ display: inline; }}
-    header .actions.open .icon {{ display: none; }}
-    header .actions.open button, header .actions.open a {{ text-align: left; padding: 11px 14px;
-      font-size: .95rem; }}
-  }}
-  /* サイドバー・会話・差分の3ペインを並べる余裕がない幅では会話を優先する。 */
-  @media (max-width: 1099px) {{
-    #review-toggle, #review-pane {{ display: none !important; }}
-    body.review-open .terminal {{ display: flex; }}
   }}
 </style></head><body{body_class}>
 <div class="app"><aside><h2>セッション</h2>{sessions_sidebar}</aside><main class="terminal">
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
-<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{pin_button}{restart_button}{note_button}</div>
+<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
 <button type="button" id="review-toggle" title="PR差分"><span class="label">差分</span><span class="icon">±</span></button>
 <button type="button" id="menu-toggle" aria-label="メニュー">☰</button></header>
 <div id="artifacts">{artifacts_html}</div>
 <div id="chat"><div class="chat-empty">会話を読み込み中...</div></div>
 <pre id="screen" hidden>接続中...</pre>
-<div class="controls">
-  <textarea id="input" placeholder="メッセージを入力（! でコマンド実行、画像ペースト・ファイルD&amp;D可）"></textarea>
-  <div class="buttons">
-    <button type="button" data-key="Escape">Esc</button>
-    <button type="button" data-key="C-c">Ctrl+C</button>
-    <button type="button" id="enter">Enter</button>
-    <button type="button" class="primary" id="send">送信</button>
-    <button type="button" class="danger" id="kill">終了</button>
-  </div>
-  <div id="status"></div>
-</div>
-</main><section id="review-pane" aria-label="PR差分">
+<section id="review-pane" aria-label="PR差分">
   <div class="review-head">
     <div class="review-title-row"><strong id="review-title">PR差分</strong>
       <a id="review-link" target="_blank" rel="noopener" hidden>GitHub ↗</a>
       <button type="button" id="review-unlink" title="PRの紐づけを解除" hidden>解除</button>
       <button type="button" id="review-refresh" title="再読み込み">↻</button>
-      <button type="button" id="review-close" title="差分を閉じる">×</button>
+      <button type="button" id="review-close" title="チャットに戻る">×</button>
     </div>
     <div class="review-meta" id="review-meta">現在のブランチからPRを探します</div>
     <form class="review-picker" id="review-picker">
@@ -3614,7 +3617,19 @@ TERMINAL_PAGE = r"""<!doctype html>
     <div id="review-files" hidden></div>
     <div id="review-diff" hidden></div>
   </div>
-</section></div>
+</section>
+<div class="controls">
+  <textarea id="input" placeholder="メッセージを入力（! でコマンド実行、画像ペースト・ファイルD&amp;D可）"></textarea>
+  <div class="buttons">
+    <button type="button" data-key="Escape">Esc</button>
+    <button type="button" data-key="C-c">Ctrl+C</button>
+    <button type="button" id="enter">Enter</button>
+    <button type="button" class="primary" id="send">送信</button>
+    <button type="button" class="danger" id="kill">終了</button>
+  </div>
+  <div id="status"></div>
+</div>
+</main></div>
 <div id="lightbox" hidden><img alt="添付画像"></div>
 <div class="modal" id="confirm-modal" hidden><div class="modal-card" role="dialog" aria-modal="true">
   <p id="confirm-message">このセッションを終了しますか？</p><div class="modal-actions"><button type="button" id="confirm-cancel">キャンセル</button><button type="button" class="danger" id="confirm-ok">実行する</button></div>
@@ -3649,7 +3664,6 @@ TERMINAL_PAGE = r"""<!doctype html>
   const noteButton = document.getElementById("note");
   const noteModal = document.getElementById("note-modal");
   const noteInput = document.getElementById("note-input");
-  const pinButton = document.getElementById("pin");
   const reviewPane = document.getElementById("review-pane");
   const reviewTitle = document.getElementById("review-title");
   const reviewMeta = document.getElementById("review-meta");
@@ -3659,7 +3673,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   const reviewDiff = document.getElementById("review-diff");
   const reviewPr = document.getElementById("review-pr");
   const reviewUnlink = document.getElementById("review-unlink");
-  const narrowReviewViewport = matchMedia("(max-width: 1099px)");
+  const reviewToggle = document.getElementById("review-toggle");
   const reviewKey = "reviewPr:" + session;
   const reviewOpenMode = {pr_diff_open_json};
   let linkedPullRequest = {pr_selector_json};
@@ -3750,8 +3764,11 @@ TERMINAL_PAGE = r"""<!doctype html>
     else {{ reviewDiff.textContent = "変更ファイルはありません"; }}
   }}
   function openReview() {{
+    document.body.classList.add("review-open");
     document.body.classList.remove("review-closed");
-    if (narrowReviewViewport.matches) return;
+    reviewToggle.querySelector(".label").textContent = "チャット";
+    reviewToggle.querySelector(".icon").textContent = "💬";
+    reviewToggle.title = "チャットに戻る";
   }}
   async function loadPullRequest(selector = reviewSelector, userInitiated = false) {{
     reviewSelector = selector.trim(); reviewPr.value = reviewSelector;
@@ -3771,11 +3788,8 @@ TERMINAL_PAGE = r"""<!doctype html>
         localStorage.setItem(reviewKey, reviewSelector);
       }}
       renderPullRequest(data);
-      // 狭い画面では会話を優先し、設定や明示操作にかかわらず差分を表示しない。
       if (userInitiated) openReview();
-      else if (reviewOpenMode !== "never" && !narrowReviewViewport.matches) {{
-        openReview();
-      }}
+      else if (reviewOpenMode !== "never") openReview();
     }} catch (error) {{
       reviewMeta.textContent = "PR番号またはURLを指定できます";
       reviewMessage.textContent = error.message;
@@ -3798,37 +3812,28 @@ TERMINAL_PAGE = r"""<!doctype html>
     reviewManuallyOpened = false;
     document.body.classList.remove("review-open");
     document.body.classList.add("review-closed");
+    showingHistory = true;
+    screen.hidden = true; chat.hidden = false;
+    reviewToggle.querySelector(".label").textContent = "差分";
+    reviewToggle.querySelector(".icon").textContent = "±";
+    reviewToggle.title = "PR差分";
+    const historyButton = document.getElementById("history");
+    historyButton.querySelector(".label").textContent = "ターミナル";
+    historyButton.querySelector(".icon").textContent = "▤";
+    loadChat();
   }}
   document.getElementById("review-close").addEventListener("click", closeReview);
-  document.getElementById("review-toggle").addEventListener("click", () => {{
-    if (narrowReviewViewport.matches) return;
-    const opening = document.body.classList.contains("review-closed");
+  reviewToggle.addEventListener("click", () => {{
+    const opening = !document.body.classList.contains("review-open");
     if (opening) {{
       reviewManuallyOpened = true;
       openReview();
       if (!reviewData) loadPullRequest(reviewSelector, true);
     }} else closeReview();
   }});
+  if (document.body.classList.contains("review-open")) openReview();
   if (reviewOpenMode !== "never") loadPullRequest();
   else reviewMessage.textContent = "差分ボタンからPRを読み込めます";
-  function renderPinButton() {{
-    if (!pinButton) return;
-    pinButton.classList.toggle("pinned", sessionPinned);
-    pinButton.title = sessionPinned ? "ピン留めを解除" : "ピン留め";
-    pinButton.querySelector(".label").textContent = sessionPinned ? "ピン解除" : "ピン留め";
-    pinButton.querySelector(".icon").textContent = sessionPinned ? "📌" : "📍";
-    pinButton.querySelector(".menu-label").textContent = sessionPinned ? "📌 ピン留めを解除" : "📍 ピン留め";
-  }}
-  renderPinButton();
-  if (pinButton) pinButton.addEventListener("click", async () => {{
-    try {{
-      const data = await post("/api/sessions/" + encodeURIComponent(session) + "/pin",
-        {{pinned: sessionPinned ? "0" : "1"}});
-      sessionPinned = !!data.pinned;
-      renderPinButton();
-      await refreshSidebar();
-    }} catch (error) {{ status.textContent = error.message; }}
-  }});
   if (noteButton) noteButton.addEventListener("click", () => {{
     noteInput.value = sessionNote;
     noteModal.hidden = false;
@@ -4428,12 +4433,25 @@ TERMINAL_PAGE = r"""<!doctype html>
   }});
   document.getElementById("history").addEventListener("click", async event => {{
     const historyButton = event.currentTarget;
-    if (showingHistory) {{
-      showingHistory = false; historyButton.textContent = "チャット";
+    if (document.body.classList.contains("review-open")) {{
+      document.body.classList.remove("review-open");
+      document.body.classList.add("review-closed");
+      reviewToggle.querySelector(".label").textContent = "差分";
+      reviewToggle.querySelector(".icon").textContent = "±";
+      reviewToggle.title = "PR差分";
+      showingHistory = false; historyButton.querySelector(".label").textContent = "チャット";
+      historyButton.querySelector(".icon").textContent = "💬";
       chat.hidden = true; screen.hidden = false;
       lastOutput = ""; await refresh(); return;
     }}
-    showingHistory = true; historyButton.textContent = "ターミナル";
+    if (showingHistory) {{
+      showingHistory = false; historyButton.querySelector(".label").textContent = "チャット";
+      historyButton.querySelector(".icon").textContent = "💬";
+      chat.hidden = true; screen.hidden = false;
+      lastOutput = ""; await refresh(); return;
+    }}
+    showingHistory = true; historyButton.querySelector(".label").textContent = "ターミナル";
+    historyButton.querySelector(".icon").textContent = "▤";
     screen.hidden = true; chat.hidden = false; await loadChat();
   }});
   async function sendText(sent) {{
@@ -4827,7 +4845,7 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     body_class=(
                         ' class="readonly review-closed"'
-                        if PR_DIFF_OPEN != "always" else ' class="readonly"'
+                        if PR_DIFF_OPEN != "always" else ' class="readonly review-open"'
                     ),
                     artifacts_html=artifact_links(
                         session_artifacts(info["log_path"], info["tool"])
@@ -4864,10 +4882,7 @@ class Handler(BaseHTTPRequestHandler):
                 upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
                 note_json=json.dumps(item.get("note", "")),
                 pinned_json=json.dumps(bool(item.get("pinned"))),
-                pin_button=(
-                    '<button type="button" id="pin"><span class="label">ピン留め</span>'
-                    '<span class="icon">📍</span><span class="menu-label">📍 ピン留め</span></button>'
-                ),
+                pin_button="",
                 note_button=(
                     '<button type="button" class="note-button" id="note" title="'
                     f'{html.escape(item.get("note") or "メモを追加")}">'
@@ -4902,7 +4917,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 ),
                 body_class=(
-                    ' class="review-closed"' if PR_DIFF_OPEN != "always" else ""
+                    ' class="review-closed"' if PR_DIFF_OPEN != "always" else ' class="review-open"'
                 ),
                 artifacts_html=artifact_links(item.get("artifacts", [])),
             ))

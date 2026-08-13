@@ -166,9 +166,9 @@ Web UI から起動したセッションは、WezTerm と Web UI の両方から
 `~/.config/agent-deck/config.json`（`AGENT_DECK_CONFIG` 環境変数で変更可）。
 全項目とコメントは [config.example.json](config.example.json) を参照してください。
 
-PR差分ペインの初期表示は `pr_diff_open` で選べます。`auto`（既定）はPRが
-見つかった場合だけ開き、`always` は常に開き、`never` は常に閉じて開始します。
-ウィンドウ幅が1100px未満の場合は、設定にかかわらず差分ペインと差分ボタンを表示しません。
+PR差分モードの初期表示は `pr_diff_open` で選べます。`never`（既定）は常に閉じ、
+`auto` はPRが見つかった場合だけ開き、`always` は常に開いて開始します。
+差分モードでも画面下部の入力欄から、そのままセッションへ指示を送信できます。
 
 ポートは優先順に `--port` フラグ > `AGENT_DECK_PORT` 環境変数 > 設定ファイルの
 `port` > 既定値 8787 で決まります。設定ファイルを分ければ同じマシンで

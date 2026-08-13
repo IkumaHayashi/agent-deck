@@ -39,8 +39,8 @@
   "wezterm_bin": null,
   "gh_bin": null,
 
-  "_pr_diff_open": "PCのセッション画面でPR差分を初期表示する条件。auto=PRがある場合だけ、always=常に、never=常に閉じる。スマホは常に閉じて開始",
-  "pr_diff_open": "auto",
+  "_pr_diff_open": "セッション画面でPR差分モードを初期表示する条件。auto=PRがある場合だけ、always=常に、never=常に閉じる",
+  "pr_diff_open": "never",
 
   "_wait_classifier_model": "返事待ちセッションを「要対応・他者待ち・完了」に分類する Claude モデル（既定 haiku。精度を比較する場合は sonnet）",
   "wait_classifier_model": "haiku",
