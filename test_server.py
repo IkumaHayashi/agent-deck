@@ -14,6 +14,20 @@ server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(server)
 
 
+class FrontendTemplateTest(unittest.TestCase):
+    def test_new_page_uses_external_frontend_assets(self):
+        page = server.render(host="localhost:8787")
+
+        self.assertIn('/static/new.css?v=', page)
+        self.assertIn('/static/new.js?v=', page)
+        self.assertIn('data-panel="reviews-panel"', page)
+        self.assertNotIn("{static_version}", page)
+
+    def test_template_path_cannot_escape_template_directory(self):
+        with self.assertRaisesRegex(ValueError, "テンプレート名"):
+            server.load_template("../server.py")
+
+
 class CodexSessionTest(unittest.TestCase):
     def setUp(self):
         server.CODEX_HEAD_CACHE.clear()
@@ -306,6 +320,47 @@ class PullRequestDiffTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(LookupError, "現在のブランチ"):
                 server.pull_request_diff(cwd)
+
+    def test_normalizes_github_remote_urls(self):
+        self.assertEqual(
+            "example/repo", server.github_repo_name("git@github.com:Example/Repo.git")
+        )
+        self.assertEqual(
+            "example/repo", server.github_repo_name("https://github.com/Example/Repo.git")
+        )
+        self.assertEqual("", server.github_repo_name("https://gitlab.com/example/repo.git"))
+
+    def test_review_requests_include_matching_local_project(self):
+        payload = [{
+            "number": 7,
+            "title": "レビュー対象",
+            "url": "https://github.com/example/repo/pull/7",
+            "repository": {"nameWithOwner": "Example/Repo"},
+            "author": {"login": "octocat"},
+            "updatedAt": "2026-08-17T00:00:00Z",
+            "isDraft": False,
+        }]
+        completed = SimpleNamespace(
+            returncode=0, stdout=json.dumps(payload), stderr=""
+        )
+        with (
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/gh"),
+            mock.patch.object(server.subprocess, "run", return_value=completed) as run,
+            mock.patch.object(
+                server, "local_github_repositories",
+                return_value={"example/repo": "/tmp/repo"},
+            ),
+        ):
+            items = server.github_review_requests()
+
+        self.assertEqual("/tmp/repo", items[0]["cwd"])
+        self.assertEqual("Example/Repo", items[0]["repositoryName"])
+        self.assertEqual("--review-requested=@me", run.call_args.args[0][3])
+
+    def test_pull_request_target_requires_configured_local_repository(self):
+        with mock.patch.object(server, "local_github_repositories", return_value={}):
+            with self.assertRaisesRegex(LookupError, "Agent Deck"):
+                server.pull_request_target("https://github.com/example/repo/pull/12")
 
 
 class SessionPinTest(unittest.TestCase):

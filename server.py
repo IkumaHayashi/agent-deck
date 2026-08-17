@@ -32,6 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HOME = os.path.expanduser("~")
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
+TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "templates")
+STATIC_DIR = os.path.join(SCRIPT_DIR, "static")
 CONFIG_PATH = os.environ.get("AGENT_DECK_CONFIG") or f"{HOME}/.config/agent-deck/config.json"
 
 
@@ -50,6 +52,15 @@ def load_config(path=None):
             return json.load(f)
     except FileNotFoundError:
         return {}
+
+
+def load_template(name):
+    """リポジトリ内のHTMLテンプレートを読み込む。"""
+    path = os.path.realpath(os.path.join(TEMPLATE_DIR, name))
+    if not path.startswith(TEMPLATE_DIR + os.sep):
+        raise ValueError("テンプレート名が不正です")
+    with open(path, encoding="utf-8") as source:
+        return source.read()
 
 
 CONFIG = load_config()
@@ -1848,6 +1859,9 @@ def artifact_links(items):
 PR_SELECTOR_RE = re.compile(
     r"(?:https://github\.com/[\w.-]+/[\w.-]+/pull/)?(\d+)/?"
 )
+GITHUB_PR_URL_RE = re.compile(
+    r"https://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/pull/(?P<number>\d+)/?"
+)
 
 
 def normalize_pr_selector(value):
@@ -1895,6 +1909,93 @@ def pull_request_diff(cwd, selector=""):
         raise ValueError("差分が5MBを超えています。GitHubで確認してください")
     result["patch"] = diff.stdout
     return result
+
+
+def local_projects():
+    """起動対象として設定されているローカルプロジェクトを重複なしで返す。"""
+    paths = [path for _, path in PINNED]
+    paths.extend(path for _, path in list_other_projects())
+    return list(dict.fromkeys(path for path in paths if os.path.isdir(path)))
+
+
+def github_repo_name(remote):
+    """GitHub の remote URL を owner/repo 形式へ正規化する。"""
+    match = re.fullmatch(
+        r"(?:https?://github\.com/|ssh://git@github\.com/|git@github\.com:)"
+        r"([\w.-]+/[\w.-]+?)(?:\.git)?/?",
+        (remote or "").strip(),
+    )
+    return match.group(1).lower() if match else ""
+
+
+def local_github_repositories():
+    """設定済みプロジェクトの GitHub repository 名から cwd への対応を返す。"""
+    git = find_bin("git")
+    repositories = {}
+    for path in local_projects():
+        try:
+            result = subprocess.run(
+                [git, "remote", "get-url", "origin"], cwd=path,
+                capture_output=True, text=True, timeout=5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        name = github_repo_name(result.stdout) if result.returncode == 0 else ""
+        if name:
+            repositories.setdefault(name, path)
+    return repositories
+
+
+def github_review_requests():
+    """自分にレビュー依頼されている open PR と対応するローカル cwd を返す。"""
+    gh = find_bin("gh")
+    fields = "number,title,url,repository,author,updatedAt,isDraft"
+    result = subprocess.run(
+        [gh, "search", "prs", "--review-requested=@me", "--state=open",
+         "--limit=50", "--json", fields],
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "レビュー依頼を取得できませんでした")
+    try:
+        items = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHubから返されたレビュー依頼を読み取れませんでした") from exc
+    repositories = local_github_repositories()
+    for item in items:
+        repository = item.get("repository") or {}
+        name = repository.get("nameWithOwner", "") if isinstance(repository, dict) else ""
+        item["repositoryName"] = name
+        item["cwd"] = repositories.get(name.lower(), "")
+    return items
+
+
+def pull_request_target(selector):
+    """GitHub PR URLを検証し、ローカル cwd とレビュー開始情報を返す。"""
+    selector = normalize_pr_selector(selector)
+    match = GITHUB_PR_URL_RE.fullmatch(selector)
+    if not match:
+        raise ValueError("GitHubのPR URLを入力してください")
+    cwd = local_github_repositories().get(match.group("repo").lower(), "")
+    if not cwd:
+        raise LookupError("対象リポジトリがAgent Deckのプロジェクトに見つかりません")
+    gh = find_bin("gh")
+    fields = "number,title,url,state,baseRefName,headRefName"
+    result = subprocess.run(
+        [gh, "pr", "view", selector, "--json", fields], cwd=cwd,
+        capture_output=True, text=True, timeout=20,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    if result.returncode != 0:
+        raise LookupError(result.stderr.strip() or "PRが見つかりません")
+    try:
+        item = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GitHubから返されたPR情報を読み取れませんでした") from exc
+    item["cwd"] = cwd
+    item["repositoryName"] = match.group("repo")
+    return item
 
 
 def codex_session_head(path):
@@ -2765,256 +2866,7 @@ def recent_mentions(cache):
     return sorted(items, key=lambda x: int(x.get("send_time") or 0), reverse=True)[:10]
 
 
-PAGE = r"""<!doctype html>
-<html lang="ja"><head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<title>Agent Deck</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
-<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
-<style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font-family: -apple-system, sans-serif; max-width: 620px; margin: 0 auto; padding: 20px; font-size: 18px; }}
-  h1 {{ font-size: 1.65rem; }}
-  h2 {{ font-size: 1.3rem; margin-top: 30px; color: #999; }}
-  form.launch {{ margin: 0; }}
-  button.proj {{ display: block; width: 100%; padding: 14px; margin: 8px 0; font-size: 1rem;
-    border: 1px solid #8884; border-radius: 10px; background: #6c5ce71a; text-align: left; cursor: pointer; }}
-  button.proj:active {{ background: #6c5ce74d; }}
-  button.proj .resume-summary {{ display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
-  button.proj small {{ color: #888; }}
-  .msg {{ padding: 12px; border-radius: 10px; margin: 12px 0; }}
-  .ok {{ background: #00b8941a; border: 1px solid #00b894; }}
-  .err {{ background: #d635451a; border: 1px solid #d63545; }}
-  input[type=text] {{ width: 100%; padding: 10px; font-size: 1rem; border: 1px solid #8884;
-    border-radius: 8px; box-sizing: border-box; margin: 8px 0; }}
-  .models {{ display: flex; gap: 4px; margin: 8px 0 4px; }}
-  .models label {{ flex: 1; text-align: center; padding: 8px 2px; font-size: .85rem;
-    border: 1px solid #8884; border-radius: 8px; cursor: pointer; }}
-  .models input {{ display: none; }}
-  .models input:checked + span {{ font-weight: bold; }}
-  .models label:has(input:checked) {{ background: #6c5ce74d; border-color: #6c5ce7; }}
-  .bypass-modes label:has(input[value="bypass"]:checked) {{ background: #d635452e; border-color: #d63545; }}
-  select {{ width: 100%; padding: 12px; font-size: 1rem; border: 1px solid #8884;
-    border-radius: 8px; margin: 8px 0; -webkit-appearance: none; background: transparent; }}
-  textarea {{ width: 100%; padding: 10px; font-size: 1rem; border: 1px solid #8884;
-    border-radius: 8px; box-sizing: border-box; margin: 8px 0; font-family: inherit; resize: vertical; }}
-  .cw-head {{ display: flex; align-items: center; justify-content: space-between; }}
-  .cw-head h2 {{ margin-bottom: 8px; }}
-  .cw-refresh, .cw-room, .cw-set {{ padding: 8px 10px; border: 1px solid #8884;
-    border-radius: 8px; background: #6c5ce71a; cursor: pointer; }}
-  .cw-room {{ display: block; width: 100%; margin: 6px 0; text-align: left; }}
-  .cw-message {{ margin: 8px 0; padding: 10px; border: 1px solid #8883; border-radius: 8px; }}
-  .cw-meta {{ color: #888; font-size: .8rem; margin-bottom: 6px; }}
-  .cw-body {{ white-space: pre-wrap; overflow-wrap: anywhere; font-size: .9rem; }}
-  .cw-set {{ margin-top: 8px; }}
-  .cw-loading, .cw-empty {{ color: #888; font-size: .9rem; }}
-  .bookmarklet {{ display: inline-block; text-decoration: none; color: inherit; }}
-  .resume-more {{ display: none; }}
-  .resume-more.open {{ display: block; }}
-  nav {{ display: flex; gap: 8px; margin: 12px 0 20px; }}
-  nav a {{ flex: 1; padding: 11px; text-align: center; color: inherit; text-decoration: none;
-    border: 1px solid #8884; border-radius: 9px; }}
-</style></head><body>
-<h1>🚀 Agent Deck</h1>
-<nav><a href="/">‹ セッションへ</a></nav>
-{message}
-<h2>ツール</h2>
-<div class="models tools">
-  <label><input type="radio" name="tool" value="claude" checked><span>Claude Code</span></label>
-  <label><input type="radio" name="tool" value="codex"><span>Codex</span></label>
-</div>
-<h2>起動方法</h2>
-<div class="models launch-modes">
-  <label><input type="radio" name="launch-mode" value="web" checked><span>Web操作（tmux）</span></label>
-  <label><input type="radio" name="launch-mode" value="wezterm"><span>WezTermのみ</span></label>
-</div>
-<h2>権限</h2>
-<div class="models bypass-modes">
-  <label><input type="radio" name="bypass" value="normal" checked><span>通常（確認あり）</span></label>
-  <label><input type="radio" name="bypass" value="bypass"><span>⚠️ バイパス</span></label>
-</div>
-<h2>モデル</h2>
-<div class="models" id="models-claude">{models_claude}</div>
-<div class="models" id="models-codex" style="display:none">{models_codex}</div>
-<h2>最初のプロンプト（任意）</h2>
-<textarea id="prompt" rows="3" placeholder="起動時に渡す指示。空欄なら通常起動（画像もペースト可）"></textarea>
-<div id="prompt-status" class="cw-empty"></div>
-<h2>プロジェクトを選んで起動</h2>
-{buttons}
-<h2>その他のプロジェクト</h2>
-<form class="launch" method="post" action="/launch">
-  <select name="dir">{options}</select>
-  <button class="proj" type="submit">🚀 選択したプロジェクトで起動</button>
-</form>
-<h2>任意のディレクトリ</h2>
-<form class="launch" method="post" action="/launch">
-  <input type="text" name="dir" placeholder="~/projects/..." autocapitalize="off" autocorrect="off">
-  <button class="proj" type="submit">🚀 このディレクトリで起動</button>
-</form>
-<h2>最近の会話を再開</h2>
-<div class="cw-empty">タップすると同じ会話の続きから起動する。起動方法・権限の選択は適用され、モデル・プロンプトは無視される。</div>
-{resume_items}
-{chatwork_panel}
-<h2>ブックマークレット</h2>
-<div class="cw-empty">下のリンクをブックマークバーへドラッグすると登録できる。閲覧中のページ（GitHub issue / Chatwork 等）をこのランチャーに送る。アドレスバーへの貼り付けは javascript: が削られて動かないので不可。</div>
-<a class="cw-set bookmarklet" href="{bookmarklet}">📎 Agent Deckに送る</a>
-<script>
-  // ツール選択に応じてモデル選択肢を切り替える
-  function currentTool() {{
-    var t = document.querySelector(".tools input:checked");
-    return t ? t.value : "claude";
-  }}
-  function syncModels() {{
-    ["claude", "codex"].forEach(function (t) {{
-      document.getElementById("models-" + t).style.display = t === currentTool() ? "" : "none";
-    }});
-  }}
-  document.querySelectorAll(".tools input").forEach(function (r) {{
-    r.addEventListener("change", syncModels);
-  }});
-  syncModels();
-  // 選択中のツール・モデルを各起動フォームに hidden input として付与する。
-  // resume フォームはツールが会話側で決まるため、起動方法と権限だけを引き継ぐ。
-  document.querySelectorAll("form.launch").forEach(function (f) {{
-    f.addEventListener("submit", function () {{
-      var launchMode = document.querySelector('.launch-modes input:checked');
-      var bypass = document.querySelector('.bypass-modes input:checked');
-      var fields = [["launch_mode", launchMode ? launchMode.value : "web"],
-       ["bypass", bypass && bypass.value === "bypass" ? "1" : "0"]];
-      if (!f.dataset.resume) {{
-        var t = currentTool();
-        var m = document.querySelector("#models-" + t + " input:checked");
-        var p = document.getElementById("prompt").value;
-        fields.push(["model", m ? m.value : "default"], ["tool", t], ["prompt", p]);
-      }}
-      fields.forEach(function (kv) {{
-        var h = document.createElement("input");
-        h.type = "hidden"; h.name = kv[0]; h.value = kv[1];
-        f.appendChild(h);
-      }});
-    }});
-  }});
-  // 折りたたまれた9件目以降の再開候補の表示切り替え
-  var resumeToggle = document.getElementById("resume-toggle");
-  if (resumeToggle) {{
-    resumeToggle.addEventListener("click", function () {{
-      var open = document.getElementById("resume-more").classList.toggle("open");
-      resumeToggle.textContent = open ? "▴ 折りたたむ" : resumeToggle.dataset.label;
-    }});
-  }}
-  // 最初のプロンプト欄への画像ペースト。アップロードしてパスを本文に差し込む
-  var promptBox = document.getElementById("prompt");
-  var promptStatus = document.getElementById("prompt-status");
-  // ブックマークレット等からの ?prompt=... でプロンプト欄をプリフィルする
-  var prefill = new URLSearchParams(location.search).get("prompt");
-  if (prefill) {{
-    promptBox.value = prefill.slice(0, 8000);
-    promptBox.scrollIntoView({{behavior: "smooth", block: "center"}});
-    promptBox.focus();
-  }}
-  async function uploadLaunchImage(file) {{
-    if (file.size > 15 * 1024 * 1024) throw new Error("画像は15MBまでです");
-    promptStatus.textContent = "画像をアップロード中...";
-    var response = await fetch("/api/launch/image", {{
-      method: "POST",
-      headers: {{"Content-Type": file.type || "application/octet-stream"}},
-      body: file,
-    }});
-    var data = await response.json();
-    if (!response.ok) throw new Error(data.error || "画像のアップロードに失敗しました");
-    var prefix = promptBox.value && !promptBox.value.endsWith("\n") ? "\n" : "";
-    promptBox.value += prefix + "添付画像: " + data.path + "\n";
-    promptStatus.textContent = "画像を添付しました";
-  }}
-  promptBox.addEventListener("paste", async function (event) {{
-    var images = Array.from((event.clipboardData || {{}}).items || [])
-      .filter(function (item) {{ return item.kind === "file" && item.type.indexOf("image/") === 0; }})
-      .map(function (item) {{ return item.getAsFile(); }}).filter(Boolean);
-    if (!images.length) return;
-    event.preventDefault();
-    try {{
-      for (var i = 0; i < images.length; i++) await uploadLaunchImage(images[i]);
-    }} catch (error) {{ promptStatus.textContent = "❌ " + error.message; }}
-  }});
-  function cleanChatwork(body) {{
-    return (body || "")
-      .replace(/\[To:\d+\]/g, "")
-      .replace(/\[rp aid=\d+[^\]]*\]/g, "")
-      .replace(/\[picon:\d+\]/g, "")
-      .replace(/\[qtmeta[^\]]*\]/g, "")
-      .replace(/\[hr\]/g, "────────")
-      .replace(/\[(?:info|\/info|title|\/title|qt|\/qt|code|\/code)\]/g, "")
-      .trim();
-  }}
-  function cwMessage(item) {{
-    var box = document.createElement("div"); box.className = "cw-message";
-    var meta = document.createElement("div"); meta.className = "cw-meta";
-    var date = item.send_time ? new Date(item.send_time * 1000).toLocaleString("ja-JP") : "";
-    meta.textContent = item.room_name + " · " + item.sender + (date ? " · " + date : "");
-    var body = document.createElement("div"); body.className = "cw-body";
-    body.textContent = cleanChatwork(item.body);
-    var set = document.createElement("button"); set.type = "button"; set.className = "cw-set";
-    set.textContent = "📝 プロンプトにセット";
-    set.addEventListener("click", function () {{
-      var prompt = "以下の Chatwork メッセージに対応してください。\n" + item.url
-        + "\n（room_id: " + item.room_id + " / message_id: " + item.message_id
-        + "。本文は Chatwork MCP の get_room_message で取得してください）";
-      var textarea = document.getElementById("prompt"); textarea.value = prompt;
-      textarea.scrollIntoView({{behavior: "smooth", block: "center"}}); textarea.focus();
-    }});
-    box.append(meta, body, set); return box;
-  }}
-  function showError(target, error) {{
-    target.className = "msg err"; target.textContent = "❌ " + error;
-  }}
-  async function loadMentions(force) {{
-    var target = document.getElementById("cw-mentions");
-    target.className = "cw-loading"; target.textContent = "読み込み中...";
-    try {{
-      var response = await fetch("/api/mentions" + (force ? "?refresh=1" : ""));
-      var data = await response.json(); if (!response.ok) throw new Error(data.error || "取得に失敗しました");
-      target.className = ""; target.replaceChildren();
-      if (!data.items.length) {{ target.className = "cw-empty"; target.textContent = "メンションはありません"; }}
-      data.items.forEach(function (item) {{ target.appendChild(cwMessage(item)); }});
-    }} catch (error) {{ showError(target, error.message); }}
-  }}
-  async function loadRooms(force) {{
-    var target = document.getElementById("cw-rooms");
-    target.className = "cw-loading"; target.textContent = "読み込み中...";
-    try {{
-      var response = await fetch("/api/rooms" + (force ? "?refresh=1" : ""));
-      var data = await response.json(); if (!response.ok) throw new Error(data.error || "取得に失敗しました");
-      target.className = ""; target.replaceChildren();
-      data.items.forEach(function (room) {{
-        var button = document.createElement("button"); button.type = "button"; button.className = "cw-room";
-        button.textContent = room.name; button.addEventListener("click", function () {{ loadRoom(room.room_id, room.name); }});
-        target.appendChild(button);
-      }});
-    }} catch (error) {{ showError(target, error.message); }}
-  }}
-  async function loadRoom(roomId, roomName) {{
-    var target = document.getElementById("cw-room-messages");
-    target.className = "cw-loading"; target.textContent = "「" + roomName + "」を読み込み中...";
-    try {{
-      var response = await fetch("/api/rooms/" + encodeURIComponent(roomId) + "/messages");
-      var data = await response.json(); if (!response.ok) throw new Error(data.error || "取得に失敗しました");
-      target.className = ""; target.replaceChildren();
-      var heading = document.createElement("h2"); heading.textContent = roomName + " の直近メッセージ"; target.appendChild(heading);
-      if (!data.items.length) {{ var empty = document.createElement("div"); empty.className = "cw-empty"; empty.textContent = "メッセージはありません"; target.appendChild(empty); }}
-      data.items.forEach(function (item) {{ target.appendChild(cwMessage(item)); }});
-      target.scrollIntoView({{behavior: "smooth", block: "start"}});
-    }} catch (error) {{ showError(target, error.message); }}
-  }}
-  // Chatwork 連携が無効な場合はパネルごと描画されない
-  var cwRefresh = document.getElementById("cw-refresh");
-  if (cwRefresh) {{
-    cwRefresh.addEventListener("click", function () {{ loadMentions(true); loadRooms(false); }});
-    loadMentions(false); loadRooms(false);
-  }}
-</script>
-</body></html>"""
+NEW_PAGE_TEMPLATE = "new.html"
 
 
 # セッション一覧サイドバーのCSS。一覧ページ（LIST_PAGE）と2ペイン表示
@@ -3443,12 +3295,20 @@ TERMINAL_PAGE = r"""<!doctype html>
     background: #161b22; border-bottom: 1px solid #30363d; font-weight: 700; }}
   .diff-row {{ display: flex; min-width: max-content; white-space: pre; }}
   .diff-row:hover {{ filter: brightness(1.2); }}
+  .diff-row.selectable {{ cursor: pointer; }}
+  .diff-row.selected {{ background: #1f6feb66; box-shadow: inset 3px 0 #58a6ff; }}
   .diff-no {{ position: sticky; left: 0; width: 48px; flex: 0 0 48px; padding: 0 6px;
     text-align: right; color: #6e7681; background: inherit; user-select: none; }}
   .diff-code {{ padding-right: 16px; }}
   .diff-add {{ background: #2ea04326; }} .diff-del {{ background: #f8514926; }}
   .diff-hunk {{ color: #8ab4f8; background: #1f6feb20; }}
   .diff-note {{ color: #8b949e; }}
+  #review-selection {{ flex-shrink: 0; display: flex; align-items: center; gap: 7px;
+    padding: 7px 11px; border-bottom: 1px solid #30363d; background: #1f6feb1f;
+    color: #8ab4f8; font-size: .8rem; }}
+  #review-selection[hidden] {{ display: none; }}
+  #review-selection span {{ min-width: 0; flex: 1; }}
+  #review-selection button {{ flex: 0 0 auto; width: auto; padding: 5px 9px; font-size: .78rem; }}
   header {{ position: relative; padding: 10px 12px; display: flex; align-items: center; gap: 10px;
     border-bottom: 1px solid #30363d; background: #161b22; flex-shrink: 0; z-index: 2; }}
   header a {{ color: #8ab4f8; text-decoration: none; font-size: 1rem; }}
@@ -3614,6 +3474,8 @@ TERMINAL_PAGE = r"""<!doctype html>
   </div>
   <div id="review-content">
     <div id="review-message">PR差分を読み込み中...</div>
+    <div id="review-selection" hidden><span id="review-selection-count"></span>
+      <button type="button" id="review-selection-clear">解除</button></div>
     <div id="review-files" hidden></div>
     <div id="review-diff" hidden></div>
   </div>
@@ -3674,12 +3536,53 @@ TERMINAL_PAGE = r"""<!doctype html>
   const reviewPr = document.getElementById("review-pr");
   const reviewUnlink = document.getElementById("review-unlink");
   const reviewToggle = document.getElementById("review-toggle");
+  const reviewSelection = document.getElementById("review-selection");
+  const reviewSelectionCount = document.getElementById("review-selection-count");
   const reviewKey = "reviewPr:" + session;
   const reviewOpenMode = {pr_diff_open_json};
   let linkedPullRequest = {pr_selector_json};
   let reviewSelector = linkedPullRequest || localStorage.getItem(reviewKey) || "";
   let reviewData = null;
   let reviewManuallyOpened = false;
+  const selectedDiffLines = new Map();
+  let lastSelectedLine = null;
+  let insertedDiffSelection = "";
+  function diffSelectionText() {{
+    if (!selectedDiffLines.size) return "";
+    const groups = new Map();
+    for (const item of selectedDiffLines.values()) {{
+      if (!groups.has(item.path)) groups.set(item.path, []);
+      groups.get(item.path).push(item);
+    }}
+    const parts = ["以下の選択行について確認してください。"];
+    for (const [path, items] of groups) {{
+      items.sort((a, b) => a.index - b.index);
+      const numbers = items.map(item => item.line).join(", ");
+      parts.push("\n" + path + ":" + numbers, "```diff", ...items.map(item => item.text), "```");
+    }}
+    return parts.join("\n") + "\n";
+  }}
+  function syncDiffSelectionToInput() {{
+    if (insertedDiffSelection) input.value = input.value.replace(insertedDiffSelection, "");
+    insertedDiffSelection = diffSelectionText();
+    if (insertedDiffSelection) {{
+      const prefix = input.value && !input.value.endsWith("\n") ? "\n" : "";
+      insertedDiffSelection = prefix + insertedDiffSelection;
+      input.value += insertedDiffSelection;
+    }}
+    syncInput();
+  }}
+  function updateDiffSelection() {{
+    reviewSelection.hidden = selectedDiffLines.size === 0;
+    reviewSelectionCount.textContent = selectedDiffLines.size + "行を選択中 · 入力欄に反映済み";
+    reviewDiff.querySelectorAll(".diff-row[data-line-key]").forEach(row => {{
+      row.classList.toggle("selected", selectedDiffLines.has(row.dataset.lineKey));
+    }});
+    syncDiffSelectionToInput();
+  }}
+  function clearDiffSelection() {{
+    selectedDiffLines.clear(); lastSelectedLine = null; updateDiffSelection();
+  }}
   function splitPatch(patch) {{
     const sections = new Map();
     let current = null;
@@ -3708,7 +3611,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     heading.className = "diff-file-title"; heading.textContent = file.path;
     reviewDiff.append(heading);
     let oldLine = null, newLine = null;
-    for (const line of lines || []) {{
+    for (const [index, line] of (lines || []).entries()) {{
       const row = document.createElement("div"); row.className = "diff-row";
       let shownLine = "", lineClass = "diff-note";
       const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
@@ -3726,15 +3629,32 @@ TERMINAL_PAGE = r"""<!doctype html>
       const code = document.createElement("span"); code.className = "diff-code"; code.textContent = line;
       row.append(no, code);
       if (shownLine && !document.body.classList.contains("readonly")) {{
-        row.title = "クリックして入力欄へ位置を追加";
-        row.addEventListener("click", () => {{
-          const prefix = input.value && !input.value.endsWith("\n") ? "\n" : "";
-          input.value += prefix + "確認対象: " + file.path + ":" + shownLine + "\n";
-          syncInput(); input.focus();
+        const key = file.path + "\u0000" + index;
+        const item = {{key, path: file.path, line: shownLine, text: line, index}};
+        row.classList.add("selectable"); row.dataset.lineKey = key;
+        row.title = "クリックして選択（Shiftで範囲選択）";
+        row.addEventListener("click", event => {{
+          if (event.shiftKey && lastSelectedLine && lastSelectedLine.path === file.path) {{
+            const start = Math.min(lastSelectedLine.index, index);
+            const end = Math.max(lastSelectedLine.index, index);
+            reviewDiff.querySelectorAll(".diff-row[data-line-key]").forEach(candidate => {{
+              const candidateIndex = Number(candidate.dataset.lineIndex);
+              if (candidateIndex < start || candidateIndex > end) return;
+              const candidateItem = candidate._diffItem;
+              if (candidateItem) selectedDiffLines.set(candidateItem.key, candidateItem);
+            }});
+          }} else if (selectedDiffLines.has(key)) {{
+            selectedDiffLines.delete(key);
+          }} else {{
+            selectedDiffLines.set(key, item);
+          }}
+          lastSelectedLine = item; updateDiffSelection();
         }});
+        row.dataset.lineIndex = String(index); row._diffItem = item;
       }}
       reviewDiff.append(row);
     }}
+    updateDiffSelection();
     reviewDiff.hidden = false;
   }}
   function renderPullRequest(data) {{
@@ -3771,6 +3691,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     reviewToggle.title = "チャットに戻る";
   }}
   async function loadPullRequest(selector = reviewSelector, userInitiated = false) {{
+    clearDiffSelection();
     reviewSelector = selector.trim(); reviewPr.value = reviewSelector;
     reviewMessage.hidden = false; reviewMessage.textContent = "PR差分を読み込み中...";
     reviewFiles.hidden = true; reviewDiff.hidden = true; reviewLink.hidden = true;
@@ -3797,8 +3718,10 @@ TERMINAL_PAGE = r"""<!doctype html>
     }}
   }}
   document.getElementById("review-picker").addEventListener("submit", event => {{
-    event.preventDefault(); reviewManuallyOpened = true; loadPullRequest(reviewPr.value, true);
+    event.preventDefault(); reviewManuallyOpened = true; clearDiffSelection();
+    loadPullRequest(reviewPr.value, true);
   }});
+  document.getElementById("review-selection-clear").addEventListener("click", clearDiffSelection);
   document.getElementById("review-refresh").addEventListener("click", () => loadPullRequest(reviewSelector, true));
   reviewUnlink.addEventListener("click", async () => {{
     try {{
@@ -4645,12 +4568,13 @@ def bookmarklet_js(origin):
 
 
 # Chatwork 連携が有効なときだけ /new に差し込む受信箱パネル
-CHATWORK_PANEL = """<div class="cw-head"><h2>Chatwork 受信箱</h2><button class="cw-refresh" id="cw-refresh" type="button">🔄 更新</button></div>
+CHATWORK_PANEL = """<section class="launcher-panel" id="inbox-panel">
+<div class="cw-head"><h2>Chatwork 受信箱</h2><button class="cw-refresh" id="cw-refresh" type="button">🔄 更新</button></div>
 <h2>自分宛てメンション</h2>
-<div id="cw-mentions" class="cw-loading">読み込み中...</div>
+<div id="cw-mentions" class="cw-empty">タブを開くと読み込みます</div>
 <h2>ルームから探す</h2>
-<div id="cw-rooms" class="cw-loading">読み込み中...</div>
-<div id="cw-room-messages"></div>"""
+<div id="cw-rooms" class="cw-empty">タブを開くと読み込みます</div>
+<div id="cw-room-messages"></div></section>"""
 
 
 def render(message="", view="new", host=None):
@@ -4695,12 +4619,17 @@ def render(message="", view="new", host=None):
             f'<button class="cw-set" id="resume-toggle" type="button"'
             f' data-label="{more_label}">{more_label}</button>'
         )
-    return PAGE.format(
+    return load_template(NEW_PAGE_TEMPLATE).format(
         favicon_version=urllib.parse.quote(VERSION),
+        static_version=urllib.parse.quote(BOOT_ID),
         message=message, buttons=buttons, options=options, resume_items=resume_items,
         models_claude=model_radios("claude"), models_codex=model_radios("codex"),
         bookmarklet=html.escape(bookmarklet_js(origin)),
         chatwork_panel=CHATWORK_PANEL if CW_ENABLED else "",
+        chatwork_tab=(
+            '<button type="button" data-panel="inbox-panel">受信箱</button>'
+            if CW_ENABLED else ""
+        ),
     )
 
 
@@ -4750,6 +4679,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _static_file(self, name):
+        """許可した拡張子のフロントエンド資産を配信する。"""
+        path = os.path.realpath(os.path.join(STATIC_DIR, name))
+        extension = os.path.splitext(path)[1].lower()
+        content_types = {
+            ".css": "text/css; charset=utf-8",
+            ".js": "text/javascript; charset=utf-8",
+        }
+        if not path.startswith(STATIC_DIR + os.sep) or extension not in content_types:
+            return self._json({"error": "静的ファイルが見つかりません"}, 404)
+        try:
+            with open(path, "rb") as source:
+                data = source.read()
+        except OSError:
+            return self._json({"error": "静的ファイルが見つかりません"}, 404)
+        self.send_response(200)
+        self.send_header("Content-Type", content_types[extension])
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def _redirect(self, location):
         self.send_response(303)
         self.send_header("Location", location)
@@ -4770,6 +4721,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path in {"/favicon.svg", "/favicon.ico"}:
             return self._icon()
+        static_match = re.fullmatch(r"/static/([A-Za-z0-9_.-]+)", parsed.path)
+        if static_match:
+            return self._static_file(static_match.group(1))
         icon_match = re.fullmatch(r"/tool-icon/([a-z]+)\.png", parsed.path)
         if icon_match:
             return self._tool_icon(icon_match.group(1))
@@ -4815,7 +4769,9 @@ class Handler(BaseHTTPRequestHandler):
                 tool=html.escape(agent["tool"]), pane_id=pane_id, options=options,
             ))
         if parsed.path == "/terminal":
-            session = urllib.parse.parse_qs(parsed.query).get("session", [""])[0]
+            terminal_qs = urllib.parse.parse_qs(parsed.query)
+            session = terminal_qs.get("session", [""])[0]
+            pr_diff_open = "always" if terminal_qs.get("review") == ["1"] else PR_DIFF_OPEN
             # WezTermタブで動いているCLIは読み取り専用の擬似セッション
             # （wez-<pane_id>）として同じ2ペイン表示で閲覧できる。
             wez_match = re.fullmatch(r"wez-(\d+)", session or "")
@@ -4833,7 +4789,7 @@ class Handler(BaseHTTPRequestHandler):
                     context_badge=context_badge_html(info.get("context")),
                     model_choices="",
                     session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
-                    pr_diff_open_json=json.dumps(PR_DIFF_OPEN),
+                    pr_diff_open_json=json.dumps(pr_diff_open),
                     pr_selector_json=json.dumps(""),
                     note_json=json.dumps(""), note_button="", pinned_json="false", pin_button="",
                     sessions_sidebar=build_sidebar(session),
@@ -4845,7 +4801,7 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                     body_class=(
                         ' class="readonly review-closed"'
-                        if PR_DIFF_OPEN != "always" else ' class="readonly review-open"'
+                        if pr_diff_open != "always" else ' class="readonly review-open"'
                     ),
                     artifacts_html=artifact_links(
                         session_artifacts(info["log_path"], info["tool"])
@@ -4877,7 +4833,7 @@ class Handler(BaseHTTPRequestHandler):
                     if value in choices
                 ),
                 session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
-                pr_diff_open_json=json.dumps(PR_DIFF_OPEN),
+                pr_diff_open_json=json.dumps(pr_diff_open),
                 pr_selector_json=json.dumps(item.get("pull_request", "")),
                 upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
                 note_json=json.dumps(item.get("note", "")),
@@ -4917,12 +4873,35 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 ),
                 body_class=(
-                    ' class="review-closed"' if PR_DIFF_OPEN != "always" else ' class="review-open"'
+                    ' class="review-closed"' if pr_diff_open != "always" else ' class="review-open"'
                 ),
                 artifacts_html=artifact_links(item.get("artifacts", [])),
             ))
         if parsed.path == "/api/usage":
             return self._json(usage_data() or {"providers": []})
+        if parsed.path == "/api/review-requests":
+            try:
+                return self._json({"items": github_review_requests()})
+            except FileNotFoundError:
+                return self._json({"error": "gh CLIが見つかりません"}, 503)
+            except subprocess.TimeoutExpired:
+                return self._json({"error": "GitHubからの取得がタイムアウトしました"}, 504)
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 500)
+        if parsed.path == "/api/pull-request":
+            selector = urllib.parse.parse_qs(parsed.query).get("pr", [""])[0]
+            try:
+                return self._json(pull_request_target(selector))
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+            except LookupError as exc:
+                return self._json({"error": str(exc)}, 404)
+            except FileNotFoundError:
+                return self._json({"error": "gh CLIが見つかりません"}, 503)
+            except subprocess.TimeoutExpired:
+                return self._json({"error": "GitHubからの取得がタイムアウトしました"}, 504)
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 500)
         if parsed.path == "/api/version":
             return self._json(latest_release())
         if parsed.path == "/api/sidebar":
@@ -5097,6 +5076,7 @@ class Handler(BaseHTTPRequestHandler):
                     qs.get("launch_mode", ["web"])[0],
                     qs.get("bypass", ["0"])[0],
                     qs.get("resume", [""])[0],
+                    qs.get("pull_request", [""])[0],
                 )
             return self._page(render(view="new"), 200)
         self._page(render(view="sessions"))
@@ -5319,6 +5299,7 @@ class Handler(BaseHTTPRequestHandler):
                 qs.get("launch_mode", ["web"])[0],
                 qs.get("bypass", ["0"])[0],
                 qs.get("resume", [""])[0],
+                qs.get("pull_request", [""])[0],
             )
         if self.path == "/migrate":
             return self._migrate(
@@ -5503,7 +5484,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _launch(self, raw_dir: str, model: str = "default", tool: str = "claude",
                 prompt: str = "", launch_mode: str = "web", bypass: str = "0",
-                resume: str = ""):
+                resume: str = "", pull_request: str = ""):
         path, err = validate_dir(raw_dir)
         if err:
             return self._page(render(f'<div class="msg err">❌ {html.escape(err)}</div>', "new"))
@@ -5523,6 +5504,10 @@ class Handler(BaseHTTPRequestHandler):
             if not resume_log:
                 return self._page(render('<div class="msg err">❌ 再開する会話が見つかりません</div>', "new"))
         skip_permissions = bypass == "1"
+        try:
+            pull_request = normalize_pr_selector(pull_request)
+        except ValueError as exc:
+            return self._page(render(f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"))
         prompt = prompt.strip()
         if len(prompt) > 8000:
             return self._page(render('<div class="msg err">❌ プロンプトが長すぎます（8000文字まで）</div>', "new"))
@@ -5558,14 +5543,21 @@ class Handler(BaseHTTPRequestHandler):
             if resume:
                 # 再開時は会話IDが分かっているので探索せず、元の要約を引き継ぐ
                 summary = log_meta(resume_log, tool).get("summary", "")
-                set_session_metadata(session_name, summary, resume, skip_permissions)
+                set_session_metadata(
+                    session_name, summary, resume, skip_permissions,
+                    pull_request=pull_request,
+                )
             else:
                 session_id = wait_for_new_session_id(tool, path, started_at)
-                set_session_metadata(session_name, prompt, session_id, skip_permissions)
+                set_session_metadata(
+                    session_name, prompt, session_id, skip_permissions,
+                    pull_request=pull_request,
+                )
             if session_name:
                 invalidate_session_cache()
                 return self._redirect(
                     "/terminal?session=" + urllib.parse.quote(session_name)
+                    + ("&review=1" if pull_request else "")
                 )
             detail = "起動したセッション名を取得できませんでした"
         else:

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ja"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Agent Deck</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
+<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
+<link rel="stylesheet" href="/static/new.css?v={static_version}"></head><body>
+<h1>🚀 Agent Deck</h1>
+<nav><a href="/">‹ セッションへ</a></nav>
+{message}
+<div class="launch-settings">
+  <div class="settings-row">
+    <div><span class="setting-label">ツール</span><div class="models tools">
+      <label><input type="radio" name="tool" value="claude" checked><span>Claude Code</span></label>
+      <label><input type="radio" name="tool" value="codex"><span>Codex</span></label>
+    </div></div>
+    <div><span class="setting-label">モデル</span>
+      <div class="models" id="models-claude">{models_claude}</div>
+      <div class="models" id="models-codex" style="display:none">{models_codex}</div>
+    </div>
+  </div>
+  <details><summary>起動オプション（Web操作・通常権限）</summary>
+    <div class="settings-row">
+      <div><span class="setting-label">起動方法</span><div class="models launch-modes">
+        <label><input type="radio" name="launch-mode" value="web" checked><span>Web操作</span></label>
+        <label><input type="radio" name="launch-mode" value="wezterm"><span>WezTerm</span></label>
+      </div></div>
+      <div><span class="setting-label">権限</span><div class="models bypass-modes">
+        <label><input type="radio" name="bypass" value="normal" checked><span>通常</span></label>
+        <label><input type="radio" name="bypass" value="bypass"><span>⚠️ バイパス</span></label>
+      </div></div>
+    </div>
+  </details>
+  <details id="prompt-details"><summary>最初のプロンプト（任意）</summary>
+    <textarea id="prompt" rows="3" placeholder="起動時に渡す指示。画像もペーストできます"></textarea>
+    <div id="prompt-status" class="cw-empty"></div>
+  </details>
+</div>
+<div class="launcher-tabs" role="tablist">
+  <button type="button" class="active" data-panel="projects-panel">プロジェクト</button>
+  <button type="button" data-panel="reviews-panel">GitHubレビュー</button>
+  <button type="button" data-panel="resume-panel">会話を再開</button>
+  {chatwork_tab}
+</div>
+<section class="launcher-panel active" id="projects-panel">
+<h2>プロジェクトから起動</h2>
+<div class="project-grid">{buttons}</div>
+<details class="subsection"><summary>その他のプロジェクト・任意のディレクトリ</summary>
+<form class="launch" method="post" action="/launch">
+  <select name="dir">{options}</select>
+  <button class="proj" type="submit">🚀 選択したプロジェクトで起動</button>
+</form>
+<form class="launch" method="post" action="/launch">
+  <input type="text" name="dir" placeholder="任意のディレクトリ ~/projects/..." autocapitalize="off" autocorrect="off">
+  <button class="proj" type="submit">🚀 このディレクトリで起動</button>
+</form></details>
+</section>
+<section class="launcher-panel" id="reviews-panel">
+<div class="cw-head"><h2>GitHubレビュー</h2><button class="cw-refresh" id="reviews-refresh" type="button">🔄 更新</button></div>
+<p class="panel-intro">レビュー依頼を選ぶか、Pull RequestのURLを指定してDiffを開きます。</p>
+<form id="specific-review"><input type="text" id="specific-pr" placeholder="GitHub PR URL" autocapitalize="off" autocorrect="off">
+  <button class="cw-set" type="submit">PRを指定してAIとレビュー</button></form>
+<div id="review-requests" class="cw-empty">タブを開くと読み込みます</div>
+</section>
+<section class="launcher-panel" id="resume-panel">
+<h2>最近の会話を再開</h2>
+<p class="panel-intro">同じ会話の続きから起動します。起動方法・権限のみ適用されます。</p>
+<div class="resume-grid">{resume_items}</div>
+</section>
+{chatwork_panel}
+<details class="subsection"><summary>その他</summary>
+  <p class="panel-intro">閲覧中のページを起動時のプロンプトとして送れます。</p>
+  <a class="cw-set bookmarklet" href="{bookmarklet}">📎 Agent Deckに送る</a>
+</details>
+<script src="/static/new.js?v={static_version}" defer></script>
+</body></html>

@@ -20,6 +20,7 @@ AI コーディング CLI（Claude Code / Codex）を Mac の WezTerm 上で起�
 - **スマホから操作**: 端末出力のリアルタイム表示、メッセージ送信、Enter / Esc / Ctrl+C、画像・ファイル添付
 - **sandbox 外でコマンド実行**: shell コードブロックから WezTerm に新しいシェルを開いて実行
 - **セッション一覧**: 実行中/待機中の判定、会話の最初のプロンプト表示、コンテキスト使用率、作成した PR/issue のチップ表示
+- **GitHub レビュー**: 自分へのレビュー依頼または指定したPRから、Diffを開いたAIセッションを開始
 - **会話の再開**: 最近の会話を `--resume` 付きでワンタップ再起動。モデル切り替えも resume 方式で安全に行う
 - **Web ⇔ WezTerm の移行**: 既存の WezTerm セッションを Web 操作へ、逆に Web セッションを素の TUI へ移行できる
 - **Claude ⇔ Codex の引き継ぎ**: 会話履歴を引き継ぎ資料として保存し、同じ作業ディレクトリで反対側の CLI に交代させる
@@ -169,6 +170,9 @@ Web UI から起動したセッションは、WezTerm と Web UI の両方から
 PR差分モードの初期表示は `pr_diff_open` で選べます。`never`（既定）は常に閉じ、
 `auto` はPRが見つかった場合だけ開き、`always` は常に開いて開始します。
 差分モードでも画面下部の入力欄から、そのままセッションへ指示を送信できます。
+起動ページの「GitHub レビュー」から開始したセッションでは、この設定にかかわらず
+対象PRを紐づけて差分モードを最初から開きます。レビュー依頼とPR URLの対象リポジトリは、
+`pinned`、`project_bases`、`extra_projects` に登録されたプロジェクトの `origin` remoteから特定します。
 
 ポートは優先順に `--port` フラグ > `AGENT_DECK_PORT` 環境変数 > 設定ファイルの
 `port` > 既定値 8787 で決まります。設定ファイルを分ければ同じマシンで
@@ -179,9 +183,16 @@ PR差分モードの初期表示は `pr_diff_open` で選べます。`never`（�
 
 ## 開発
 
+新規起動ページのフロントエンドは、役割ごとに次のファイルへ分けています。
+
+- `templates/new.html`: HTML構造とPythonから差し込むプレースホルダー
+- `static/new.css`: レイアウトとレスポンシブ表示
+- `static/new.js`: タブ切り替え、フォーム、GitHubレビュー・Chatwork連携
+
 ```sh
 ruff check server.py
 python3 -m unittest test_server
+node --check static/new.js
 ```
 
 ### リリース
