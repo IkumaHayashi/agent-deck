@@ -1,13 +1,11 @@
 #!/bin/zsh
-# deck — Mac 上の wezterm GUI に新しいタブを開いてエージェント CLI を起動する（Agent Deck）
+# deck — tmux セッションでエージェント CLI を起動する（Agent Deck）
 #
 # 使い方:
 #   deck <ディレクトリ> [CLIへの追加引数...]
 #   deck ~/projects/my-app
 #   deck ~/projects/my-app --resume
 #
-# ssh 経由で実行しても、起動された CLI の親プロセスは wezterm GUI なので
-# ssh セッションが切れても CLI は生き続ける。
 # 起動する CLI は TAB_BIN で差し替えられる（既定は claude）。
 
 set -eu
@@ -22,7 +20,7 @@ if [[ ! -d "$DIR" ]]; then
   exit 1
 fi
 
-# wezterm / tmux の場所は PATH → 標準的なインストール先の順で解決する
+# tmux の場所は PATH → 標準的なインストール先の順で解決する
 find_bin() {
   command -v "$1" 2>/dev/null && return
   for p in /opt/homebrew/bin /usr/local/bin /usr/bin; do
@@ -30,27 +28,7 @@ find_bin() {
   done
   echo "$1"
 }
-WEZTERM="${WEZTERM_BIN:-$(find_bin wezterm)}"
 TMUX="${TMUX_BIN:-$(find_bin tmux)}"
-
-if [[ "${CLAUDE_TAB_HEADLESS:-0}" != "1" ]]; then
-  # 生きている wezterm GUI の socket を探す（stale socket をスキップ）
-  RUNTIME_DIR="$HOME/.local/share/wezterm"
-  SOCK=""
-  for s in $(ls -t "$RUNTIME_DIR"/gui-sock-* 2>/dev/null); do
-    pid="${s##*gui-sock-}"
-    if kill -0 "$pid" 2>/dev/null; then
-      SOCK="$s"
-      break
-    fi
-  done
-
-  if [[ -z "$SOCK" ]]; then
-    echo "エラー: 起動中の wezterm GUI が見つかりません。Mac 上で WezTerm を起動してください。" >&2
-    exit 1
-  fi
-  export WEZTERM_UNIX_SOCKET="$SOCK"
-fi
 
 # 起動するCLI（TAB_BIN で差し替え可能。パス名でなければ PATH 等から解決する）
 BIN="${TAB_BIN:-claude}"
@@ -60,7 +38,7 @@ fi
 
 # Claudeの標準TUIはalternate screenを使うためtmux履歴が残らない。
 # Web操作用セッションではフラット表示にしてスクロールバックへ出力する。
-if [[ "${CLAUDE_TAB_HEADLESS:-0}" == "1" && "${BIN:t}" == "claude" ]]; then
+if [[ "${BIN:t}" == "claude" ]]; then
   HAS_AX_SCREEN_READER=0
   for arg in "$@"; do
     [[ "$arg" == "--ax-screen-reader" ]] && HAS_AX_SCREEN_READER=1
@@ -76,15 +54,7 @@ if (( $# > 0 )); then
   ARGS=" ${(j: :)${(@q)@}}"
 fi
 
-if [[ "${CLAUDE_TAB_NO_TMUX:-0}" == "1" ]]; then
-  PANE_ID=$("$WEZTERM" cli spawn --cwd "$DIR" -- "$BIN" "$@")
-  "$WEZTERM" cli set-tab-title --pane-id "$PANE_ID" "${BIN:t}: ${DIR:t}"
-  echo "OK: ${DIR} で ${BIN:t} を起動しました (pane ${PANE_ID})"
-  exit 0
-fi
-
 # Web UI からも操作できるよう、エージェントを tmux 内で起動する。
-# WezTerm は同じ tmux セッションへ接続するため、どちらから操作しても状態が同期される。
 SESSION="agent-$(date +%Y%m%d-%H%M%S)-$$"
 
 # CLAUDE_TAB_LABEL: 自動起動セッションの識別札。同じ札の古いセッションを起動前に片付ける。
@@ -119,10 +89,4 @@ if [[ "${CLAUDE_TAB_EPHEMERAL:-0}" != "1" ]]; then
   "$TMUX" set-option -t "$SESSION" remain-on-exit on
 fi
 
-if [[ "${CLAUDE_TAB_HEADLESS:-0}" == "1" ]]; then
-  echo "OK: ${DIR} で ${BIN:t} を起動しました (session ${SESSION})"
-else
-  PANE_ID=$("$WEZTERM" cli spawn --cwd "$DIR" -- "$TMUX" attach-session -t "$SESSION")
-  "$WEZTERM" cli set-tab-title --pane-id "$PANE_ID" "${BIN:t}: ${DIR:t}"
-  echo "OK: ${DIR} で ${BIN:t} を起動しました (pane ${PANE_ID}, session ${SESSION})"
-fi
+echo "OK: ${DIR} で ${BIN:t} を起動しました (session ${SESSION})"

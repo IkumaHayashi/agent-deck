@@ -21,19 +21,15 @@
       <div class="models" id="models-codex" style="display:none">{models_codex}</div>
     </div>
   </div>
-  <details><summary>起動オプション（Web操作・通常権限）</summary>
+  <details><summary>起動オプション（通常権限）</summary>
     <div class="settings-row">
-      <div><span class="setting-label">起動方法</span><div class="models launch-modes">
-        <label><input type="radio" name="launch-mode" value="web" checked><span>Web操作</span></label>
-        <label><input type="radio" name="launch-mode" value="wezterm"><span>WezTerm</span></label>
-      </div></div>
       <div><span class="setting-label">権限</span><div class="models bypass-modes">
         <label><input type="radio" name="bypass" value="normal" checked><span>通常</span></label>
         <label><input type="radio" name="bypass" value="bypass"><span>⚠️ バイパス</span></label>
       </div></div>
     </div>
   </details>
-  <details id="prompt-details"><summary>最初のプロンプト（任意）</summary>
+  <details id="prompt-details" open><summary>最初のプロンプト（任意）</summary>
     <textarea id="prompt" rows="3" placeholder="起動時に渡す指示。画像もペーストできます"></textarea>
     <div id="prompt-status" class="cw-empty"></div>
   </details>
@@ -66,7 +62,7 @@
 </section>
 <section class="launcher-panel" id="resume-panel">
 <h2>最近の会話を再開</h2>
-<p class="panel-intro">同じ会話の続きから起動します。起動方法・権限のみ適用されます。</p>
+  <p class="panel-intro">同じ会話の続きから起動します。権限設定のみ適用されます。</p>
 <div class="resume-grid">{resume_items}</div>
 </section>
 {chatwork_panel}

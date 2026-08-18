@@ -32,13 +32,11 @@
     button.addEventListener("click", function () { activateLauncherPanel(button.dataset.panel); });
   });
   // 選択中のツール・モデルを各起動フォームに hidden input として付与する。
-  // resume フォームはツールが会話側で決まるため、起動方法と権限だけを引き継ぐ。
+  // resume フォームはツールが会話側で決まるため、権限だけを引き継ぐ。
   function wireLaunchForm(f) {
     f.addEventListener("submit", function () {
-      var launchMode = document.querySelector('.launch-modes input:checked');
       var bypass = document.querySelector('.bypass-modes input:checked');
-      var fields = [["launch_mode", launchMode ? launchMode.value : "web"],
-       ["bypass", bypass && bypass.value === "bypass" ? "1" : "0"]];
+      var fields = [["bypass", bypass && bypass.value === "bypass" ? "1" : "0"]];
       if (!f.dataset.resume) {
         var t = currentTool();
         var m = document.querySelector("#models-" + t + " input:checked");

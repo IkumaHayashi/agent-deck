@@ -6,7 +6,6 @@
 
 - `claude.png` — Claude Code のセッションに表示（claude.ai から取得）
 - `codex.png` — Codex のセッションに表示（developers.openai.com から取得）
-- `wezterm.png` — WezTerm タブのカードに表示（MIT ライセンスの公式リポジトリから取得）
 
 ## ライセンスについて
 

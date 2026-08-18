@@ -1,10 +1,10 @@
 # Agent Deck
 
-AI コーディング CLI（Claude Code / Codex）を Mac の WezTerm 上で起動し、
+AI コーディング CLI（Claude Code / Codex）を Mac の tmux 上で起動し、
 スマホや別 PC のブラウザから監視・操作する Web ランチャー & セッションマネージャです。
 
 > Agent Deck is a web launcher & session manager for AI coding CLIs
-> (Claude Code / Codex) running in WezTerm/tmux on macOS.
+> (Claude Code / Codex) running in tmux on macOS.
 > Launch sessions from your phone, watch progress, send messages, and
 > hand conversations off between CLIs. The UI is currently Japanese-only.
 
@@ -16,13 +16,12 @@ AI コーディング CLI（Claude Code / Codex）を Mac の WezTerm 上で起�
 
 ## できること
 
-- **ワンタップ起動**: プロジェクトのボタンを押すと WezTerm に新規タブが開き CLI が起動する
+- **ワンタップ起動**: プロジェクトのボタンを押すと tmux セッションで CLI が起動する
 - **スマホから操作**: 端末出力のリアルタイム表示、メッセージ送信、Enter / Esc / Ctrl+C、画像・ファイル添付
-- **sandbox 外でコマンド実行**: shell コードブロックから WezTerm に新しいシェルを開いて実行
+- **sandbox 外でコマンド実行**: shell コードブロックから新しいWebシェルを開いて実行
 - **セッション一覧**: 実行中/待機中の判定、会話の最初のプロンプト表示、コンテキスト使用率、作成した PR/issue のチップ表示
 - **GitHub レビュー**: 自分へのレビュー依頼または指定したPRから、Diffを開いたAIセッションを開始
 - **会話の再開**: 最近の会話を `--resume` 付きでワンタップ再起動。モデル切り替えも resume 方式で安全に行う
-- **Web ⇔ WezTerm の移行**: 既存の WezTerm セッションを Web 操作へ、逆に Web セッションを素の TUI へ移行できる
 - **Claude ⇔ Codex の引き継ぎ**: 会話履歴を引き継ぎ資料として保存し、同じ作業ディレクトリで反対側の CLI に交代させる
 - **ブックマークレット**: 閲覧中のページ（GitHub issue 等）をプロンプトにプリフィルして起動
 - **Chatwork 受信箱**（任意）: メンションを一覧し、そのままプロンプトにセットして起動
@@ -34,7 +33,7 @@ AI コーディング CLI（Claude Code / Codex）を Mac の WezTerm 上で起�
 
 ## 動作要件
 
-- macOS + [WezTerm](https://wezterm.org/)（GUI が起動していること）
+- macOS
 - tmux
 - Python 3.12 以上（標準ライブラリのみ。追加パッケージ不要）
 - [Claude Code](https://claude.com/claude-code) および/または Codex CLI
@@ -72,7 +71,6 @@ launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.agent-deck.web.plist
 ある場合は更新ボタンが現れ、作業ツリーにローカル変更がなければ対象Releaseへ
 fast-forwardして自動再起動します。
 
-再起動後も動かすには WezTerm をログイン項目に追加してください。
 FileVault が有効な場合は再起動後に一度 Mac 本体でログインが必要です。
 
 ## ⚠️ セキュリティ上の注意
@@ -118,8 +116,7 @@ deck ~/projects/my-app --model haiku
 TAB_BIN=codex deck ~/projects/my-app
 ```
 
-ssh 経由で実行しても CLI の親プロセスは WezTerm GUI になるため、
-ssh が切れてもセッションは生き続けます。
+CLI は tmux セッション内で動くため、ssh が切れてもセッションは生き続けます。
 
 環境変数:
 
@@ -128,25 +125,19 @@ ssh が切れてもセッションは生き続けます。
 | `TAB_BIN=<コマンド>` | 起動する CLI を差し替える（既定は claude） |
 | `CLAUDE_TAB_EPHEMERAL=1` | CLI の終了と同時に tmux セッションごと破棄する（自動実行ジョブ向け） |
 | `CLAUDE_TAB_LABEL=<名前>` | セッションに識別札を付け、起動時に同じ札の古いセッションを片付ける |
-| `CLAUDE_TAB_HEADLESS=1` | WezTerm タブを開かず tmux セッションだけ作る（Web UI 用） |
-| `CLAUDE_TAB_NO_TMUX=1` | tmux を使わず WezTerm ペインで直接起動する |
 
 起動したセッションには `CLAUDE_TAB_SESSION`（別名 `DECK_SESSION`）が渡されるので、
 CLI 自身が `tmux kill-session -t "$CLAUDE_TAB_SESSION"` で自分を終了できます。
 
 ### Web からセッションを操作する
 
-Web UI から起動したセッションは、WezTerm と Web UI の両方から同じ tmux
-セッションを操作できます。セッション一覧から開くと、端末出力のリアルタイム
+Web UI から起動した tmux セッションは、セッション一覧から開くと端末出力のリアルタイム
 表示・メッセージ送信・Enter / Esc / Ctrl+C・セッション終了ができます。
 
 会話内の `sh` / `bash` / `zsh` コードブロックにある「シェルで実行」を押すと、
-確認後に同じ作業ディレクトリで新しい WezTerm シェルを開き、コマンドを実行します。
-コマンドは AI CLI を経由しないため Codex の sandbox 対象外です。実行したシェルは
-セッション一覧の WezTerm カードから出力を確認できます。
-
-既存の WezTerm タブのセッションも「Web操作へ移行」から取り込めます
-（現在の CLI を通常終了し、同じ会話を tmux 内で再開します）。
+確認後に同じ作業ディレクトリで新しい tmux セッションを開き、コマンドを実行します。
+コマンドは AI CLI を経由しないため Codex の sandbox 対象外です。実行後は
+そのWebシェルへ移動し、出力を確認できます。
 
 ### Claude ⇔ Codex の引き継ぎ
 

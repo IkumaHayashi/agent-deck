@@ -2,8 +2,8 @@
 """Agent Deck — AI コーディング CLI（Claude Code / Codex）の Web ランチャー & セッションマネージャ
 
 信頼できるネットワーク（既定では Tailscale 網内と localhost）からのみアクセス可能。
-プロジェクトのボタンをタップすると Mac 上の wezterm に新規タブを開いて
-エージェント CLI を起動する（同梱の deck スクリプト経由）。
+プロジェクトのボタンをタップすると tmux セッションでエージェント CLI を
+起動する（同梱の deck スクリプト経由）。
 
 設定は ~/.config/agent-deck/config.json から読む（AGENT_DECK_CONFIG で変更可）。
 設定ファイルが無くてもすべて既定値で動く。
@@ -164,7 +164,6 @@ PORT = int(os.environ.get("AGENT_DECK_PORT") or CONFIG.get("port", 8787))
 BOOT_ID = uuid.uuid4().hex
 DATA_DIR = _expand(CONFIG.get("data_dir", "~/.local/share/agent-deck"))
 TMUX = find_bin("tmux", CONFIG.get("tmux_bin"))
-WEZTERM = find_bin("wezterm", CONFIG.get("wezterm_bin"))
 # Chatwork 受信箱（任意機能）: account_id を設定し token ファイルがあるときだけ有効
 CW_CONF = CONFIG.get("chatwork") or {}
 CW_API = "https://api.chatwork.com/v2"
@@ -209,10 +208,6 @@ CODEX_HEAD_CACHE = {}
 # claudeログの cwd も書き換わらないのでパス単位で保持する。
 CLAUDE_CWD_LOCK = threading.Lock()
 CLAUDE_CWD_CACHE = {}
-# WezTerm pane → 会話ログの解決は ps + glob を伴うので、1秒ポーリングに備えて短くキャッシュする。
-WEZ_VIEW_LOCK = threading.Lock()
-WEZ_VIEW_CACHE = {}
-WEZ_VIEW_TTL = 5
 # 返事待ちセッションの「誰のアクション待ちか」分類。haiku 呼び出しは数秒かかるので
 # バックグラウンドで実行し、(mtime, size) キーで結果をメモ化する。
 WAIT_CLASS_LOCK = threading.Lock()
@@ -298,7 +293,7 @@ ICON_DIR = os.path.join(SCRIPT_DIR, "icons")
 
 def load_tool_icons():
     icons = {}
-    for tool in ("claude", "codex", "wezterm"):
+    for tool in ("claude", "codex"):
         try:
             with open(os.path.join(ICON_DIR, f"{tool}.png"), "rb") as fp:
                 icons[tool] = fp.read()
@@ -346,51 +341,8 @@ def list_other_projects():
     return items
 
 
-def find_wezterm_sock():
-    """生きている wezterm GUI の socket を返す（なければ None）"""
-    runtime = f"{HOME}/.local/share/wezterm"
-    try:
-        socks = sorted(
-            (f for f in os.listdir(runtime) if f.startswith("gui-sock-")),
-            key=lambda f: os.path.getmtime(os.path.join(runtime, f)),
-            reverse=True,
-        )
-    except FileNotFoundError:
-        return None
-    for s in socks:
-        pid = s.replace("gui-sock-", "")
-        try:
-            os.kill(int(pid), 0)
-            return os.path.join(runtime, s)
-        except (ProcessLookupError, ValueError, PermissionError):
-            continue
-    return None
-
-
-def wezterm_cli(*args, timeout=10, input_text=None):
-    sock = find_wezterm_sock()
-    if not sock:
-        return None
-    env = dict(os.environ, WEZTERM_UNIX_SOCKET=sock)
-    return subprocess.run(
-        [WEZTERM, "cli", *args],
-        input=input_text, capture_output=True, text=True, timeout=timeout, env=env,
-    )
-
-
-def wezterm_panes():
-    """WezTerm pane の詳細情報を返す。"""
-    try:
-        out = wezterm_cli("list", "--format", "json")
-        if out is None or out.returncode != 0:
-            return []
-        return json.loads(out.stdout or "[]")
-    except (json.JSONDecodeError, OSError, subprocess.SubprocessError):
-        return []
-
-
 def launch_shell_command(cwd, command):
-    """WezTerm にログインシェルを開き、Codex/Claude を介さずコマンドを実行する。"""
+    """管理対象の tmux セッションでコマンドを実行し、セッション名を返す。"""
     if not command or not command.strip():
         raise ValueError("実行するコマンドが空です")
     if len(command) > 20000:
@@ -398,22 +350,19 @@ def launch_shell_command(cwd, command):
     cwd, error = validate_dir(cwd)
     if error:
         raise ValueError(error)
-    spawned = wezterm_cli("spawn", "--cwd", cwd, "--", "/bin/zsh", "-l")
-    if spawned is None:
-        raise RuntimeError("WezTermが起動していません")
-    if spawned.returncode != 0:
-        raise RuntimeError(spawned.stderr.strip() or "シェルを起動できませんでした")
-    pane = (spawned.stdout or "").strip()
-    if not pane.isdigit():
-        raise RuntimeError("起動したWezTerm paneを取得できませんでした")
-    sent = wezterm_cli(
-        "send-text", "--pane-id", pane, "--no-paste", input_text=command + "\n"
+    session = f"agent-shell-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
+    result = tmux_run(
+        "new-session", "-d", "-s", session, "-c", cwd, "--",
+        "/bin/zsh", "-lic",
+        f"{{\n{command}\n}}\nprintf '\\n[コマンドが終了しました]\\n'\nexec /bin/zsh -l",
     )
-    if sent is None or sent.returncode != 0:
-        detail = sent.stderr.strip() if sent is not None else ""
-        wezterm_cli("kill-pane", "--pane-id", pane)
-        raise RuntimeError(detail or "シェルへコマンドを送信できませんでした")
-    return pane
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "シェルを起動できませんでした")
+    tmux_run("set-option", "-t", session, "@launcher_tool", "shell")
+    tmux_run("set-option", "-t", session, "@launcher_summary", command[:200])
+    tmux_run("set-option", "-t", session, "remain-on-exit", "on")
+    invalidate_session_cache()
+    return session
 
 
 def argv_model(argv):
@@ -489,77 +438,6 @@ def pane_agent(pane):
             "explicit_id": explicit_id, "model": argv_model(argv),
         }
     return None
-
-
-def pane_for_id(pane_id):
-    return next((p for p in wezterm_panes() if str(p.get("pane_id")) == str(pane_id)), None)
-
-
-def process_start_time(pid):
-    """プロセスの起動時刻を epoch 秒で返す。取れなければ 0。"""
-    try:
-        out = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=5,
-        ).stdout.strip()
-        return time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y"))
-    except (OSError, subprocess.SubprocessError, ValueError, OverflowError):
-        return 0.0
-
-
-def wez_capture(pane_id):
-    """WezTerm pane の画面をスクロールバック込みで返す。"""
-    result = wezterm_cli("get-text", "--pane-id", str(pane_id), "--start-line", "-500")
-    if result is None or result.returncode != 0:
-        raise RuntimeError("WezTermの画面を取得できませんでした")
-    return result.stdout
-
-
-def wez_view_session(pane_id):
-    """WezTerm pane を読み取り専用の擬似セッションとして解決する。
-
-    claude は会話ログを開きっぱなしにしないため lsof では特定できない。
-    argv の resume ID → プロセス起動時刻とログ作成時刻の突合 → 最新 mtime
-    の順で対応する JSONL を推定する。
-    """
-    now = time.time()
-    with WEZ_VIEW_LOCK:
-        cached = WEZ_VIEW_CACHE.get(str(pane_id))
-        if cached and cached[0] > now:
-            return cached[1]
-    pane = pane_for_id(pane_id)
-    agent = pane_agent(pane) if pane else None
-    info = None
-    if pane and agent:
-        cwd = urllib.parse.urlparse(pane.get("cwd", "")).path
-        candidates = [
-            item for item in resume_candidates(agent["tool"], cwd, agent["explicit_id"])
-            if item["path"]
-        ]
-        entry = None
-        if agent["explicit_id"]:
-            entry = next((item for item in candidates if item["exact"]), None)
-        if entry is None and candidates:
-            started = process_start_time(agent["pid"])
-            if started:
-                nearest = min(candidates, key=lambda item: abs(item["created"] - started))
-                if abs(nearest["created"] - started) <= 300:
-                    entry = nearest
-            if entry is None:
-                entry = candidates[0]
-        if entry:
-            info = {
-                "pane_id": str(pane.get("pane_id")), "tool": agent["tool"], "cwd": cwd,
-                "log_path": entry["path"],
-                "model": agent["model"] or entry.get("model", ""),
-                "context": entry.get("context"),
-                "label": entry.get("last_message") or entry.get("summary") or "",
-            }
-    with WEZ_VIEW_LOCK:
-        WEZ_VIEW_CACHE[str(pane_id)] = (now + WEZ_VIEW_TTL, info)
-        for old in list(WEZ_VIEW_CACHE)[: len(WEZ_VIEW_CACHE) - 40]:
-            WEZ_VIEW_CACHE.pop(old, None)
-    return info
 
 
 def read_json_lines(path, limit=80):
@@ -2128,8 +2006,7 @@ def recent_conversations(limit=24):
     """全プロジェクト横断で最近の会話を新しい順に返す（起動ページのresume用）。
 
     stat だけで新しい順に並べ、ログ本文を読むのは表示する件数分に留める。
-    実行中の tmux セッション・WezTerm タブに紐付いた会話は、二重起動を防ぐため
-    除外する（前者はサイドバーから、後者は移行導線から操作できる）。
+    実行中の tmux セッションに紐付いた会話は、二重起動を防ぐため除外する。
     """
     active_ids = {
         item["session_id"] for item in managed_sessions() if item["session_id"]
@@ -2137,10 +2014,6 @@ def recent_conversations(limit=24):
     active_paths = {
         item["log_path"] for item in managed_sessions() if item.get("log_path")
     }
-    for pane in wezterm_panes():
-        info = wez_view_session(pane.get("pane_id"))
-        if info and info.get("log_path"):
-            active_paths.add(info["log_path"])
     entries = []
     for path in glob.glob(f"{HOME}/.claude/projects/*/*.jsonl"):
         session_id = os.path.basename(path).removesuffix(".jsonl")
@@ -2476,34 +2349,6 @@ def build_sidebar(active):
             f'{"📌" if other.get("pinned") else "📍"}</button></div>'
         )
     sidebar += "</div>"
-    # WezTermタブで動いているCLIも一覧に出す。tmux管理外なので操作は
-    # できないが、会話ログを特定できれば読み取り専用ページへリンクする。
-    for pane in wezterm_panes():
-        agent = pane_agent(pane)
-        if not agent:
-            continue
-        pane_id = str(pane.get("pane_id"))
-        info = wez_view_session(pane_id)
-        if info:
-            name = f"wez-{pane_id}"
-            label_html = f'<small>{html.escape(info["label"])}</small>' if info["label"] else ""
-            label_html += artifact_chips(session_artifacts(info["log_path"], info["tool"]))
-            sidebar += (
-                f'<a class="wez{" active" if name == active else ""}" '
-                f'href="/terminal?session={name}">'
-                f'<strong>{tool_label(info["tool"])}'
-                f'<span class="dir">{html.escape(dir_label(info["cwd"]))}</span>'
-                f'<span class="wez-badge">WezTerm</span>'
-                f'{context_chip(info.get("context"))}</strong>'
-                f'{label_html}</a>'
-            )
-        else:
-            cwd = urllib.parse.urlparse(pane.get("cwd", "")).path
-            sidebar += (
-                f'<div class="wez"><strong>{tool_label(agent["tool"])}'
-                f'<span class="dir">{html.escape(dir_label(cwd))}</span>'
-                f'<span class="wez-badge">WezTerm</span></strong></div>'
-            )
     # バージョンとAI使用量は一覧が短いときもサイドバー最下部へ置く。
     sidebar += (
         '<div id="sidebar-footer"><div id="app-meta">'
@@ -2908,11 +2753,6 @@ SIDEBAR_CSS = r"""
   aside .new-link { text-align: center; color: #8ab4f8; border-style: dashed; }
   aside .wez { margin: 7px 0; padding: 10px; border: 1px dashed #30363d; border-radius: 8px;
     overflow-wrap: anywhere; opacity: .75; }
-  aside a.wez.active { opacity: 1; }
-  aside .wez strong { display: flex; align-items: center; gap: 7px; min-width: 0; }
-  aside .wez strong .dir { margin-left: 0; }
-  .wez-badge { flex: 0 0 auto; padding: 1px 6px; font-size: .68rem; border: 1px solid #8b949e;
-    border-radius: 6px; color: #8b949e; font-weight: 600; }
   .st { margin-left: 8px; padding: 1px 8px; font-size: .68rem; font-weight: 600;
     border-radius: 999px; border: 1px solid currentColor; }
   /* コンテキスト使用率。70%からオレンジ、90%から赤で圧迫を知らせる */
@@ -3230,12 +3070,6 @@ TERMINAL_PAGE = r"""<!doctype html>
     background: #0d1117; color: #e6edf3; font-family: -apple-system, sans-serif; font-size: 18px; }}
   .app {{ height: 100%; display: flex; }}
 {sidebar_css}
-  header a.wez-migrate {{ flex: 0 0 auto; padding: 7px 10px; font-size: .9rem;
-    border: 1px solid #484f58; border-radius: 8px; }}
-  /* WezTermセッションの閲覧は読み取り専用: 入力欄と操作系を出さない */
-  body.readonly .controls {{ display: none; }}
-  body.readonly .message.user .bubble {{ cursor: default; }}
-  body.readonly .message.user .bubble:hover {{ border-color: #3d444d; }}
   header .ctx {{ font-size: .72rem; padding: 2px 7px; }}
   #artifacts {{ display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px;
     border-bottom: 1px solid #30363d; background: #161b22; flex-shrink: 0; }}
@@ -4103,7 +3937,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     if (serialized === lastMessages) return;
     const firstLoad = !lastMessages;
     lastMessages = serialized; chat.replaceChildren();
-    if (!messages.length && !activity) {{
+    if (!messages.length && !activity && !question && !auth) {{
       const empty = document.createElement("div"); empty.className = "chat-empty";
       empty.textContent = "まだ会話はありません"; chat.append(empty); return;
     }}
@@ -4415,13 +4249,12 @@ TERMINAL_PAGE = r"""<!doctype html>
     catch (error) {{ input.value = sent; syncInput(); status.textContent = error.message; }}
   }});
   async function runCommand(command) {{
-    if (!await askConfirm("WezTermの新しいシェルで実行しますか？\n\n" + command)) return;
+    if (!await askConfirm("新しいWebシェルで実行しますか？\n\n" + command)) return;
     try {{
       const data = await post(
         "/api/sessions/" + encodeURIComponent(session) + "/shell", {{command}}
       );
-      status.textContent = "WezTerm pane " + data.pane + " で実行しました";
-      statusMessageUntil = Date.now() + 8000;
+      location.href = "/terminal?session=" + encodeURIComponent(data.session);
     }}
     catch (error) {{ status.textContent = error.message; }}
   }}
@@ -4467,15 +4300,6 @@ TERMINAL_PAGE = r"""<!doctype html>
       location.href = "/terminal?session=" + encodeURIComponent(data.session);
     }} catch (error) {{ status.textContent = error.message; }}
   }});
-  const toTerminal = document.getElementById("to-terminal");
-  if (toTerminal) toTerminal.addEventListener("click", async () => {{
-    if (!await askConfirm("実行中の処理を終了し、WezTermタブで同じ会話をresumeしますか？")) return;
-    status.textContent = "WezTermタブへ移行中...";
-    try {{
-      const data = await post("/api/sessions/" + encodeURIComponent(session) + "/terminal", {{}});
-      location.href = data.pane ? "/terminal?session=wez-" + data.pane : "/";
-    }} catch (error) {{ status.textContent = error.message; }}
-  }});
   input.addEventListener("keydown", event => {{
     if (event.key === "Escape" && !event.isComposing) {{
       event.preventDefault();
@@ -4502,54 +4326,6 @@ TERMINAL_PAGE = r"""<!doctype html>
   loadChat(); setInterval(() => showingHistory ? loadChat() : refresh(), 1000);
   if (!document.body.classList.contains("readonly")) input.focus();
 </script></body></html>"""
-
-
-MIGRATE_PAGE = r"""<!doctype html>
-<html lang="ja"><head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Web操作へ移行</title>
-<link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
-<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
-<style>
-  :root {{ color-scheme: light dark; }}
-  body {{ font-family: -apple-system, sans-serif; max-width: 620px; margin: 0 auto; padding: 20px; font-size: 18px; }}
-  h1 {{ font-size: 1.65rem; }}
-  a {{ color: #6c5ce7; }}
-  .card {{ padding: 14px; margin: 14px 0; border: 1px solid #8884; border-radius: 10px; }}
-  small {{ color: #888; overflow-wrap: anywhere; }}
-  select {{ width: 100%; padding: 14px; margin: 12px 0; font-size: 1.05rem; border-radius: 8px; }}
-  button {{ width: 100%; padding: 15px; font-size: 1.05rem; border: 1px solid #6c5ce7;
-    border-radius: 8px; background: #6c5ce72a; cursor: pointer; }}
-  .warn {{ padding: 12px; background: #f39c121a; border: 1px solid #f39c12; border-radius: 8px; }}
-  .modal {{ position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: #000a; }}
-  .modal[hidden] {{ display: none; }}
-  .modal-card {{ width: min(100%, 440px); padding: 22px; border: 1px solid #8885; border-radius: 14px; background: Canvas; }}
-  .modal-card p {{ margin: 0 0 20px; font-size: 1.1rem; line-height: 1.5; }}
-  .modal-actions {{ display: flex; gap: 10px; }}
-  .modal-actions button {{ flex: 1; }}
-  .danger {{ color: #fff; background: #d63545; border-color: #d63545; }}
-</style></head><body>
-<p><a href="/">‹ 戻る</a></p>
-<h1>Web操作へ移行</h1>
-<div class="card"><strong>{title}</strong><br><small>{cwd}</small><br><small>{tool} / pane {pane_id}</small></div>
-<p class="warn">移行すると現在のCLIを終了し、選択した会話をtmux内で再開します。実行中の処理と入力途中の文字は失われるため、応答待ちではない状態で実行してください。</p>
-<form id="migrate-form" method="post" action="/migrate">
-  <input type="hidden" name="pane_id" value="{pane_id}">
-  <label for="session_id">再開する会話</label>
-  <select id="session_id" name="session_id" required>{options}</select>
-  <button type="submit">Web操作へ移行する</button>
-</form>
-<div class="modal" id="confirm-modal" hidden><div class="modal-card" role="dialog" aria-modal="true">
-  <p>現在のCLIを終了してWeb操作へ移行しますか？</p>
-  <div class="modal-actions"><button type="button" id="confirm-cancel">キャンセル</button><button type="button" class="danger" id="confirm-ok">移行する</button></div>
-</div></div>
-<script>
-  const form = document.getElementById("migrate-form"); const modal = document.getElementById("confirm-modal");
-  form.addEventListener("submit", event => {{ event.preventDefault(); modal.hidden = false; }});
-  document.getElementById("confirm-cancel").addEventListener("click", () => {{ modal.hidden = true; }});
-  document.getElementById("confirm-ok").addEventListener("click", () => {{ modal.hidden = true; form.submit(); }});
-</script>
-</body></html>"""
 
 
 # 閲覧中ページの URL・タイトル・選択テキストを /new のプロンプト欄に送る。
@@ -4731,13 +4507,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._page(render(view="new", host=self.headers.get("Host")))
         if parsed.path in {"/", "/sessions"}:
             # デフォルトはセッション一覧。PCは右ペインで選択か新規起動を促し、
-            # SPは一覧のみを全画面表示する。見せるものが何も無ければランチャーへ。
-            has_sessions = bool(managed_sessions()) or any(
-                wez_view_session(str(pane.get("pane_id")))
-                for pane in wezterm_panes()
-            )
-            if not has_sessions:
-                return self._redirect("/new")
+            # SPは一覧のみを全画面表示する。0件でもランチャーへ自動遷移しない。
             return self._page(LIST_PAGE.format(
                 favicon_version=urllib.parse.quote(VERSION),
                 sessions_sidebar=build_sidebar(None),
@@ -4745,68 +4515,10 @@ class Handler(BaseHTTPRequestHandler):
                 sidebar_css=SIDEBAR_CSS,
                 sidebar_js=SIDEBAR_JS,
             ))
-        if parsed.path == "/migrate":
-            pane_id = urllib.parse.parse_qs(parsed.query).get("pane_id", [""])[0]
-            if not pane_id.isdigit():
-                return self._page(render('<div class="msg err">❌ 不正なpane IDです</div>'), 400)
-            pane = pane_for_id(pane_id)
-            agent = pane_agent(pane) if pane else None
-            if not pane or not agent:
-                return self._page(render('<div class="msg err">❌ 移行できるCLIが見つかりません</div>'), 404)
-            cwd = urllib.parse.urlparse(pane.get("cwd", "")).path
-            candidates = resume_candidates(agent["tool"], cwd, agent["explicit_id"])
-            if not candidates:
-                return self._page(render('<div class="msg err">❌ 再開できる会話が見つかりません</div>'), 404)
-            options = "".join(
-                f'<option value="{html.escape(item["id"])}">'
-                f'{"現在の会話 · " if item["exact"] else ""}{html.escape(item["label"])} · '
-                f'{html.escape(item["summary"] or item["id"])}</option>'
-                for item in candidates
-            )
-            return self._page(MIGRATE_PAGE.format(
-                favicon_version=urllib.parse.quote(VERSION),
-                title=html.escape(pane.get("title") or "(無題)"), cwd=html.escape(cwd),
-                tool=html.escape(agent["tool"]), pane_id=pane_id, options=options,
-            ))
         if parsed.path == "/terminal":
             terminal_qs = urllib.parse.parse_qs(parsed.query)
             session = terminal_qs.get("session", [""])[0]
             pr_diff_open = "always" if terminal_qs.get("review") == ["1"] else PR_DIFF_OPEN
-            # WezTermタブで動いているCLIは読み取り専用の擬似セッション
-            # （wez-<pane_id>）として同じ2ペイン表示で閲覧できる。
-            wez_match = re.fullmatch(r"wez-(\d+)", session or "")
-            if wez_match:
-                info = wez_view_session(wez_match.group(1))
-                if not info:
-                    return self._page(render('<div class="msg err">❌ セッションが見つかりません</div>'), 404)
-                model = model_label(info["model"], info["tool"])
-                return self._page(TERMINAL_PAGE.format(
-                    favicon_version=urllib.parse.quote(VERSION),
-                    title=html.escape(f'{info["tool"]} - WezTerm'),
-                    tool_html=tool_label(info["tool"]),
-                    cwd=html.escape(short_path(info["cwd"])), cwd_full=html.escape(info["cwd"]),
-                    model_badge=f'<span class="model">{html.escape(model)}</span>' if model else "",
-                    context_badge=context_badge_html(info.get("context")),
-                    model_choices="",
-                    session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
-                    pr_diff_open_json=json.dumps(pr_diff_open),
-                    pr_selector_json=json.dumps(""),
-                    note_json=json.dumps(""), note_button="", pinned_json="false", pin_button="",
-                    sessions_sidebar=build_sidebar(session),
-                    sidebar_css=SIDEBAR_CSS, sidebar_js=SIDEBAR_JS,
-                    upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
-                    restart_button=(
-                        f'<a class="wez-migrate" href="/migrate?pane_id={info["pane_id"]}">'
-                        f'Web操作へ移行</a>'
-                    ),
-                    body_class=(
-                        ' class="readonly review-closed"'
-                        if pr_diff_open != "always" else ' class="readonly review-open"'
-                    ),
-                    artifacts_html=artifact_links(
-                        session_artifacts(info["log_path"], info["tool"])
-                    ),
-                ))
             if not valid_session(session):
                 return self._page(render('<div class="msg err">❌ セッションが見つかりません</div>'), 404)
             item = next(item for item in managed_sessions() if item["name"] == session)
@@ -4854,21 +4566,19 @@ class Handler(BaseHTTPRequestHandler):
                         '<span class="menu-label">↻ セッションを再起動</span></button>'
                         if item["session_id"] else ""
                     )
-                    +
-                    f'<button type="button" id="handoff" data-target="'
-                    f'{"Codex" if item["tool"] == "claude" else "Claude"}">'
-                    f'<span class="label">→ {"Codex" if item["tool"] == "claude" else "Claude"}</span>'
-                    '<span class="icon">⇄</span>'
-                    f'<span class="menu-label">⇄ {"Codex" if item["tool"] == "claude" else "Claude"}'
-                    'へ切り替え</span></button>'
+                    + (
+                        f'<button type="button" id="handoff" data-target="'
+                        f'{"Codex" if item["tool"] == "claude" else "Claude"}">'
+                        f'<span class="label">→ {"Codex" if item["tool"] == "claude" else "Claude"}</span>'
+                        '<span class="icon">⇄</span>'
+                        f'<span class="menu-label">⇄ {"Codex" if item["tool"] == "claude" else "Claude"}'
+                        'へ切り替え</span></button>'
+                        if item["tool"] in TOOLS else ""
+                    )
                     + (
                         '<button type="button" class="warn" data-restart="bypass">'
                         '<span class="label">⚠️ バイパス</span><span class="icon">⚠️</span>'
                         '<span class="menu-label">⚠️ バイパスで再起動</span></button>'
-                        '<button type="button" id="to-terminal">'
-                        '<span class="label">WezTermへ</span>'
-                        '<img class="icon" src="/tool-icon/wezterm.png" alt="WezTerm">'
-                        '<span class="menu-label">WezTermターミナルへ移行</span></button>'
                         if item["session_id"] else ""
                     )
                 ),
@@ -4925,21 +4635,16 @@ class Handler(BaseHTTPRequestHandler):
                 })
             return self._json({"items": items, "boot": BOOT_ID})
         pr_match = re.fullmatch(
-            r"/api/sessions/(agent-[A-Za-z0-9_.-]+|wez-\d+)/pull-request",
-            parsed.path,
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/pull-request", parsed.path
         )
         if pr_match:
             session = pr_match.group(1)
             linked_selector = ""
-            if session.startswith("wez-"):
-                info = wez_view_session(session[4:])
-                cwd = info.get("cwd", "") if info else ""
-            else:
-                item = next(
-                    (entry for entry in managed_sessions() if entry["name"] == session), None
-                )
-                cwd = item.get("cwd", "") if item else ""
-                linked_selector = item.get("pull_request", "") if item else ""
+            item = next(
+                (entry for entry in managed_sessions() if entry["name"] == session), None
+            )
+            cwd = item.get("cwd", "") if item else ""
+            linked_selector = item.get("pull_request", "") if item else ""
             if not cwd:
                 return self._json({"error": "セッションが見つかりません"}, 404)
             selector = urllib.parse.parse_qs(parsed.query).get("pr", [linked_selector])[0]
@@ -4958,34 +4663,10 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/uploads/"):
             return self._upload_file(parsed.path)
         match = re.fullmatch(
-            r"/api/sessions/(agent-[A-Za-z0-9_.-]+|wez-\d+)/(screen|transcript)", parsed.path
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(screen|transcript)", parsed.path
         )
         if match:
             session, view = match.groups()
-            if session.startswith("wez-"):
-                info = wez_view_session(session[4:])
-                if not info:
-                    return self._json({"error": "WezTermセッションが見つかりません"}, 404)
-                try:
-                    screen_text = wez_capture(info["pane_id"])
-                    if view == "screen":
-                        return self._json({"output": screen_text})
-                    return self._json({
-                        "messages": session_messages(info["log_path"], info["tool"]),
-                        "queued": queued_inputs(info["log_path"]),
-                        "question": None,
-                        "boot": BOOT_ID,
-                        "model": model_label(info["model"], info["tool"]),
-                        "context": info.get("context"),
-                        "activity": (
-                            log_activity(info["log_path"], info["tool"])
-                            if screen_is_running(screen_text, info["tool"]) else ""
-                        ),
-                        "output": session_transcript(info["log_path"], info["tool"]),
-                        "artifacts": session_artifacts(info["log_path"], info["tool"]),
-                    })
-                except Exception as exc:
-                    return self._json({"error": str(exc)}, 500)
             item = next(
                 (entry for entry in managed_sessions() if entry["name"] == session), None
             )
@@ -5073,7 +4754,6 @@ class Handler(BaseHTTPRequestHandler):
                     qs.get("model", ["default"])[0],
                     qs.get("tool", ["claude"])[0],
                     qs.get("prompt", [""])[0],
-                    qs.get("launch_mode", ["web"])[0],
                     qs.get("bypass", ["0"])[0],
                     qs.get("resume", [""])[0],
                     qs.get("pull_request", [""])[0],
@@ -5151,7 +4831,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
         match = re.fullmatch(
-            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(input|key|kill|restart|handoff|answer|model|terminal|shell|note|pin|pull-request)",
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(input|key|kill|restart|handoff|answer|model|shell|note|pin|pull-request)",
             self.path,
         )
         if match:
@@ -5169,8 +4849,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": True, "message": message})
                 elif action == "shell":
                     item = next(item for item in managed_sessions() if item["name"] == session)
-                    pane = launch_shell_command(item["cwd"], qs.get("command", [""])[0])
-                    return self._json({"ok": True, "pane": pane})
+                    shell_session = launch_shell_command(
+                        item["cwd"], qs.get("command", [""])[0]
+                    )
+                    return self._json({"ok": True, "session": shell_session})
                 elif action == "note":
                     value = qs.get("note", [""])[0].strip()
                     if len(value) > 1000:
@@ -5269,12 +4951,6 @@ class Handler(BaseHTTPRequestHandler):
                     if result.returncode != 0:
                         raise RuntimeError(result.stderr.strip() or "終了できませんでした")
                     invalidate_session_cache()
-                elif action == "terminal":
-                    item = next(item for item in managed_sessions() if item["name"] == session)
-                    if not item["session_id"] or item["tool"] not in TOOLS:
-                        return self._json({"error": "resumeできる会話IDが見つかりません"}, 400)
-                    pane = self._to_terminal_pane(session, item)
-                    return self._json({"ok": True, "pane": pane})
                 elif action == "handoff":
                     item = next(item for item in managed_sessions() if item["name"] == session)
                     new_session = self._handoff_session(session, item)
@@ -5296,14 +4972,9 @@ class Handler(BaseHTTPRequestHandler):
                 qs.get("model", ["default"])[0],
                 qs.get("tool", ["claude"])[0],
                 qs.get("prompt", [""])[0],
-                qs.get("launch_mode", ["web"])[0],
                 qs.get("bypass", ["0"])[0],
                 qs.get("resume", [""])[0],
                 qs.get("pull_request", [""])[0],
-            )
-        if self.path == "/migrate":
-            return self._migrate(
-                qs.get("pane_id", [""])[0], qs.get("session_id", [""])[0]
             )
         self._page(render(), 404)
 
@@ -5344,76 +5015,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _migrate(self, raw_pane_id, session_id):
-        if not raw_pane_id.isdigit() or not re.fullmatch(r"[0-9a-f-]{36}", session_id):
-            return self._page(render('<div class="msg err">❌ 移行指定が不正です</div>'), 400)
-        pane = pane_for_id(raw_pane_id)
-        agent = pane_agent(pane) if pane else None
-        if not pane or not agent:
-            return self._page(render('<div class="msg err">❌ 対象CLIは既に終了しています</div>'), 404)
-        cwd = urllib.parse.urlparse(pane.get("cwd", "")).path
-        candidates = resume_candidates(agent["tool"], cwd, agent["explicit_id"])
-        selected = next((item for item in candidates if item["id"] == session_id), None)
-        if not selected:
-            return self._page(render('<div class="msg err">❌ 選択した会話を確認できません</div>'), 400)
-
-        # 保存を完了させてからresumeするため、現在のTUIを通常終了させる。
-        wezterm_cli("send-text", "--pane-id", raw_pane_id, "--no-paste", "\x03")
-        time.sleep(0.3)
-        wezterm_cli("send-text", "--pane-id", raw_pane_id, "--no-paste", "/exit\r")
-        deadline = time.time() + 8
-        while time.time() < deadline and pane_agent(pane):
-            time.sleep(0.25)
-        if pane_agent(pane):
-            return self._page(render(
-                '<div class="msg err">❌ CLIを終了できませんでした。処理が停止してから再試行してください</div>'
-            ), 409)
-
-        cmd = [*TOOLS[agent["tool"]], cwd]
-        cmd += ["--resume", session_id] if agent["tool"] == "claude" else ["resume", session_id]
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=20,
-                env={**os.environ, "CLAUDE_TAB_HEADLESS": "1"},
-            )
-        except subprocess.TimeoutExpired:
-            return self._page(render('<div class="msg err">❌ 再開処理がタイムアウトしました</div>'), 500)
-        if result.returncode != 0:
-            detail = html.escape((result.stderr or result.stdout or "").strip())
-            return self._page(render(f'<div class="msg err">❌ 再開に失敗しました: {detail}</div>'), 500)
-        set_session_metadata(
-            launcher_session_name(result.stdout), selected["summary"], session_id
-        )
-        wezterm_cli("kill-pane", "--pane-id", raw_pane_id)
-        return self._redirect("/")
-
-    def _to_terminal_pane(self, session, item):
-        """セッションを終了し、同じ会話を WezTerm タブ（tmux なし）で resume する。
-
-        プラグインのインストール等、素の TUI で操作したい場合の Web → ターミナル移行。
-        起動後の pane はサイドバーの WezTerm カードから読み取り専用で追える。
-        """
-        tmux_run("send-keys", "-t", session, "C-c")
-        time.sleep(0.2)
-        result = tmux_run("kill-session", "-t", session)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or "終了できませんでした")
-        cmd = [*TOOLS[item["tool"]], item["cwd"]]
-        cmd += (["--resume", item["session_id"]] if item["tool"] == "claude"
-                else ["resume", item["session_id"]])
-        if item.get("bypass"):
-            cmd += BYPASS_FLAGS[item["tool"]]
-        spawned = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=20,
-            env={**os.environ, "CLAUDE_TAB_NO_TMUX": "1"},
-        )
-        if spawned.returncode != 0:
-            detail = (spawned.stderr or spawned.stdout or "").strip()
-            raise RuntimeError(detail or "WezTermタブでの再開に失敗しました")
-        invalidate_session_cache()
-        match = re.search(r"\bpane (\d+)", spawned.stdout or "")
-        return match.group(1) if match else ""
-
     def _restart_session(self, session, item, bypass, extra_args=()):
         """セッションを終了し、同じ会話を resume で立ち上げ直して新セッション名を返す。"""
         tmux_run("send-keys", "-t", session, "C-c")
@@ -5429,7 +5030,7 @@ class Handler(BaseHTTPRequestHandler):
             cmd += BYPASS_FLAGS[item["tool"]]
         resumed = subprocess.run(
             cmd, capture_output=True, text=True, timeout=20,
-            env={**os.environ, "CLAUDE_TAB_HEADLESS": "1"},
+            env={**os.environ},
         )
         if resumed.returncode != 0:
             detail = (resumed.stderr or resumed.stdout or "").strip()
@@ -5461,7 +5062,7 @@ class Handler(BaseHTTPRequestHandler):
         started_at = time.time()
         launched = subprocess.run(
             cmd, capture_output=True, text=True, timeout=20,
-            env={**os.environ, "CLAUDE_TAB_HEADLESS": "1"},
+            env={**os.environ},
         )
         if launched.returncode != 0:
             detail = (launched.stderr or launched.stdout or "").strip()
@@ -5483,7 +5084,7 @@ class Handler(BaseHTTPRequestHandler):
         return new_session
 
     def _launch(self, raw_dir: str, model: str = "default", tool: str = "claude",
-                prompt: str = "", launch_mode: str = "web", bypass: str = "0",
+                prompt: str = "", bypass: str = "0",
                 resume: str = "", pull_request: str = ""):
         path, err = validate_dir(raw_dir)
         if err:
@@ -5492,8 +5093,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._page(render('<div class="msg err">❌ 不正なツール指定です</div>', "new"))
         if model not in {v for v, _ in MODELS_BY_TOOL[tool]}:
             return self._page(render('<div class="msg err">❌ 不正なモデル指定です</div>', "new"))
-        if launch_mode not in {"web", "wezterm"}:
-            return self._page(render('<div class="msg err">❌ 不正な起動方法です</div>', "new"))
         if bypass not in {"0", "1"}:
             return self._page(render('<div class="msg err">❌ 不正な権限指定です</div>', "new"))
         resume_log = ""
@@ -5522,23 +5121,13 @@ class Handler(BaseHTTPRequestHandler):
             cmd.append(prompt)
         started_at = time.time()
         try:
-            launcher_env = {**os.environ}
-            if launch_mode == "web":
-                launcher_env["CLAUDE_TAB_HEADLESS"] = "1"
-            else:
-                launcher_env["CLAUDE_TAB_NO_TMUX"] = "1"
             r = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=20,
-                env=launcher_env,
+                env={**os.environ},
             )
         except subprocess.TimeoutExpired:
             return self._page(render('<div class="msg err">❌ タイムアウトしました</div>', "new"))
         if r.returncode == 0:
-            if launch_mode == "wezterm":
-                mode_note = "（バイパス）" if skip_permissions else ""
-                msg = (f'<div class="msg ok">✅ WezTermタブで起動しました{mode_note}: '
-                       f'{html.escape(path)}</div>')
-                return self._page(render(msg, "new"))
             session_name = launcher_session_name(r.stdout)
             if resume:
                 # 再開時は会話IDが分かっているので探索せず、元の要約を引き継ぐ

@@ -21,11 +21,33 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('/static/new.css?v=', page)
         self.assertIn('/static/new.js?v=', page)
         self.assertIn('data-panel="reviews-panel"', page)
+        self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
 
     def test_template_path_cannot_escape_template_directory(self):
         with self.assertRaisesRegex(ValueError, "テンプレート名"):
             server.load_template("../server.py")
+
+    def test_empty_session_list_stays_on_list_page(self):
+        handler = object.__new__(server.Handler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.path = "/"
+        handler.headers = {}
+        with (
+            mock.patch.object(server, "managed_sessions", return_value=[]),
+            mock.patch.object(handler, "_page") as page,
+            mock.patch.object(handler, "_redirect") as redirect,
+        ):
+            handler.do_GET()
+
+        redirect.assert_not_called()
+        self.assertIn("セッション一覧 - Agent Deck", page.call_args.args[0])
+
+    def test_startup_question_is_not_hidden_by_empty_conversation(self):
+        self.assertIn(
+            "if (!messages.length && !activity && !question && !auth)",
+            server.TERMINAL_PAGE,
+        )
 
 
 class CodexSessionTest(unittest.TestCase):
@@ -208,48 +230,31 @@ class CodexSessionTest(unittest.TestCase):
 
 
 class ShellCommandTest(unittest.TestCase):
-    def test_launches_login_shell_and_sends_multiline_command(self):
-        results = [
-            SimpleNamespace(returncode=0, stdout="123\n", stderr=""),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-        ]
+    def test_launches_managed_tmux_shell_with_multiline_command(self):
+        result = SimpleNamespace(returncode=0, stdout="", stderr="")
         with (
             tempfile.TemporaryDirectory() as cwd,
             mock.patch.object(server, "HOME", os.path.realpath(cwd)),
-            mock.patch.object(server, "wezterm_cli", side_effect=results) as wezterm,
+            mock.patch.object(server, "tmux_run", return_value=result) as tmux,
+            mock.patch.object(server, "invalidate_session_cache"),
         ):
-            pane = server.launch_shell_command(cwd, "npm install\nnpm test")
+            session = server.launch_shell_command(cwd, "npm install\nnpm test")
 
-        self.assertEqual("123", pane)
-        self.assertEqual(
-            mock.call("spawn", "--cwd", os.path.realpath(cwd), "--", "/bin/zsh", "-l"),
-            wezterm.call_args_list[0],
-        )
-        self.assertEqual(
-            mock.call(
-                "send-text", "--pane-id", "123", "--no-paste",
-                input_text="npm install\nnpm test\n",
-            ),
-            wezterm.call_args_list[1],
-        )
+        self.assertRegex(session, r"^agent-shell-\d{8}-\d{6}-[0-9a-f]{8}$")
+        launch = tmux.call_args_list[0].args
+        self.assertEqual("new-session", launch[0])
+        self.assertEqual(os.path.realpath(cwd), launch[launch.index("-c") + 1])
+        self.assertIn("npm install\nnpm test", launch[-1])
 
-    def test_kills_new_pane_when_sending_command_fails(self):
-        results = [
-            SimpleNamespace(returncode=0, stdout="123\n", stderr=""),
-            SimpleNamespace(returncode=1, stdout="", stderr="send failed"),
-            SimpleNamespace(returncode=0, stdout="", stderr=""),
-        ]
+    def test_reports_tmux_shell_launch_failure(self):
+        result = SimpleNamespace(returncode=1, stdout="", stderr="start failed")
         with (
             tempfile.TemporaryDirectory() as cwd,
             mock.patch.object(server, "HOME", os.path.realpath(cwd)),
-            mock.patch.object(server, "wezterm_cli", side_effect=results) as wezterm,
+            mock.patch.object(server, "tmux_run", return_value=result),
         ):
-            with self.assertRaisesRegex(RuntimeError, "send failed"):
+            with self.assertRaisesRegex(RuntimeError, "start failed"):
                 server.launch_shell_command(cwd, "npm install")
-
-        self.assertEqual(
-            mock.call("kill-pane", "--pane-id", "123"), wezterm.call_args_list[-1]
-        )
 
 
 class SessionArtifactTest(unittest.TestCase):
@@ -370,10 +375,7 @@ class SessionPinTest(unittest.TestCase):
             self._session("agent-active", pinned=False),
             self._session("agent-other", pinned=False),
         ]
-        with (
-            mock.patch.object(server, "managed_sessions", return_value=sessions),
-            mock.patch.object(server, "wezterm_panes", return_value=[]),
-        ):
+        with mock.patch.object(server, "managed_sessions", return_value=sessions):
             sidebar = server.build_sidebar("agent-active")
 
         self.assertLess(
@@ -387,10 +389,7 @@ class SessionPinTest(unittest.TestCase):
             self._session("agent-active"),
             self._session("agent-older"),
         ]
-        with (
-            mock.patch.object(server, "managed_sessions", return_value=sessions),
-            mock.patch.object(server, "wezterm_panes", return_value=[]),
-        ):
+        with mock.patch.object(server, "managed_sessions", return_value=sessions):
             sidebar = server.build_sidebar("agent-active")
 
         self.assertLess(

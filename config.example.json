@@ -36,7 +36,6 @@
   "claude_bin": null,
   "codex_bin": null,
   "tmux_bin": null,
-  "wezterm_bin": null,
   "gh_bin": null,
 
   "_pr_diff_open": "セッション画面でPR差分モードを初期表示する条件。auto=PRがある場合だけ、always=常に、never=常に閉じる",
