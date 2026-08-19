@@ -54,6 +54,8 @@
   .launch-settings summary, .subsection summary { color: #8ab4f8; cursor: pointer;
     font-size: .88rem; }
   .launch-settings textarea { min-height: 72px; margin-bottom: 0; }
+  .prompt-actions { display: flex; align-items: center; gap: 9px; margin-top: 8px; }
+  .prompt-actions .cw-set { flex: 0 0 auto; margin: 0; }
   .launcher-tabs { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 5px;
     margin: 18px 0 12px; }
   .launcher-tabs button { min-width: 0; padding: 10px 4px; border: 1px solid #8884;
@@ -72,11 +74,10 @@
     border-radius: 10px; }
   .subsection[open] summary { margin-bottom: 9px; }
   .panel-intro { margin: 0 0 10px; color: #888; font-size: .84rem; }
-  .resume-more { display: none; }
-  .resume-more.open, .resume-more.filtering { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 7px; }
-  .resume-more.open form, .resume-more.filtering form { min-width: 0; }
-  #resume-more, #resume-toggle { grid-column: 1 / -1; }
+  .resume-group { margin: 9px 0; padding: 9px 10px; border: 1px solid #8883; border-radius: 10px; }
+  .resume-group summary { cursor: pointer; color: #8ab4f8; overflow-wrap: anywhere; }
+  .resume-group summary small { color: #888; }
+  .resume-group[open] summary { margin-bottom: 8px; }
   nav { display: flex; gap: 8px; margin: 12px 0 20px; }
   nav a { flex: 1; padding: 11px; text-align: center; color: inherit; text-decoration: none;
     border: 1px solid #8884; border-radius: 9px; }
@@ -86,7 +87,6 @@
     .project-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .project-grid button.proj { padding: 11px 8px; font-size: .88rem; }
     .launcher-tabs { grid-template-columns: 1fr 1fr; }
-    .resume-more.open, .resume-more.filtering { grid-template-columns: 1fr; }
   }
   @media (min-width: 561px) and (max-width: 799px) {
     .project-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

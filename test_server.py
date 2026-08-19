@@ -32,12 +32,65 @@ class FrontendTemplateTest(unittest.TestCase):
             "summary": "絞り込み対象の会話",
             "label": "08/19 12:34",
         }
-        with mock.patch.object(server, "recent_conversations", return_value=[conversation]):
+        with (
+            mock.patch.object(server, "recent_conversations", return_value=[conversation]),
+            mock.patch.object(server, "resume_group_dir", return_value=conversation["cwd"]),
+        ):
             page = server.render(host="localhost:8787")
 
         self.assertIn('id="resume-id-filter"', page)
         self.assertIn(f'data-resume-id="{conversation["id"]}"', page)
         self.assertIn(f'ID: {conversation["id"]}', page)
+        self.assertIn('class="resume-group"', page)
+
+    def test_worktree_conversations_are_grouped_by_common_git_directory(self):
+        result = SimpleNamespace(
+            returncode=0,
+            stdout="/Users/demo/project/.git\n",
+            stderr="",
+        )
+        with mock.patch.object(server.subprocess, "run", return_value=result):
+            group = server.resume_group_dir("/Users/demo/project-wt-feature")
+
+        self.assertEqual("/Users/demo/project", group)
+
+    def test_inbox_is_a_prompt_helper(self):
+        with (
+            mock.patch.object(server, "CW_ENABLED", True),
+            mock.patch.object(server, "PINNED", [("demo", "/Users/demo/project")]),
+        ):
+            page = server.render(host="localhost:8787")
+
+        self.assertEqual(1, page.count('id="inbox-open"'))
+        self.assertIn('class="prompt-actions"', page)
+        self.assertIn('📥 受信箱から選ぶ', page)
+        self.assertNotIn('id="inbox-project-select"', page)
+        self.assertNotIn('data-panel="inbox-panel"', page)
+
+    def test_github_review_does_not_use_initial_prompt(self):
+        script_path = os.path.join(os.path.dirname(__file__), "static", "new.js")
+        with open(script_path, encoding="utf-8") as source:
+            script = source.read()
+
+        self.assertIn('if (!f.elements.namedItem("pull_request"))', script)
+
+    def test_github_review_ignores_prompt_on_server(self):
+        handler = object.__new__(server.Handler)
+        result = SimpleNamespace(returncode=0, stdout="Started session agent-review\n", stderr="")
+        with (
+            mock.patch.object(server, "validate_dir", return_value=("/tmp/project", "")),
+            mock.patch.object(server.subprocess, "run", return_value=result) as run,
+            mock.patch.object(server, "wait_for_new_session_id", return_value="session-id"),
+            mock.patch.object(server, "set_session_metadata"),
+            mock.patch.object(server, "invalidate_session_cache"),
+            mock.patch.object(handler, "_redirect"),
+        ):
+            handler._launch(
+                "/tmp/project", prompt="通常起動用の指示",
+                pull_request="https://github.com/example/repo/pull/42",
+            )
+
+        self.assertNotIn("通常起動用の指示", run.call_args.args[0])
 
     def test_template_path_cannot_escape_template_directory(self):
         with self.assertRaisesRegex(ValueError, "テンプレート名"):

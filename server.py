@@ -2066,6 +2066,26 @@ def recent_conversations(limit=24):
     return items
 
 
+def resume_group_dir(cwd):
+    """会話再開一覧でまとめる基準ディレクトリを返す。
+
+    Git worktree は common git dir の親（通常は元リポジトリ）へまとめる。
+    Git管理外や取得に失敗したディレクトリは cwd 自体を使う。
+    """
+    try:
+        result = subprocess.run(
+            ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return cwd
+    common_dir = result.stdout.strip() if result.returncode == 0 else ""
+    if not common_dir:
+        return cwd
+    common_dir = os.path.realpath(common_dir)
+    return os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git" else cwd
+
+
 def conversation_log_path(tool, cwd, session_id):
     """cwd の会話ログから session_id のファイルを探す。見つからなければ空文字。"""
     if tool == "claude":
@@ -4345,7 +4365,8 @@ def bookmarklet_js(origin):
 
 # Chatwork 連携が有効なときだけ /new に差し込む受信箱パネル
 CHATWORK_PANEL = """<section class="launcher-panel" id="inbox-panel">
-<div class="cw-head"><h2>Chatwork 受信箱</h2><button class="cw-refresh" id="cw-refresh" type="button">🔄 更新</button></div>
+<div class="cw-head"><button class="cw-set" id="inbox-back" type="button">‹ プロンプトへ戻る</button><button class="cw-refresh" id="cw-refresh" type="button">🔄 更新</button></div>
+<h2>Chatwork 受信箱</h2>
 <h2>自分宛てメンション</h2>
 <div id="cw-mentions" class="cw-empty">タブを開くと読み込みます</div>
 <h2>ルームから探す</h2>
@@ -4363,9 +4384,14 @@ def render(message="", view="new", host=None):
         f'<button class="proj" type="submit">🚀 {html.escape(name)}</button></form>'
         for name, path in PINNED
     )
+    other_projects = list_other_projects()
     options = "\n".join(
         f'<option value="{html.escape(path)}">{html.escape(name)}</option>'
-        for name, path in list_other_projects()
+        for name, path in other_projects
+    )
+    inbox_prompt_button = (
+        '<button class="cw-set" id="inbox-open" type="button">📥 受信箱から選ぶ</button>'
+        if CW_ENABLED else ""
     )
     def model_radios(tool):
         return "\n".join(
@@ -4373,42 +4399,42 @@ def render(message="", view="new", host=None):
             f'{" checked" if v == "default" else ""}><span>{label}</span></label>'
             for v, label in MODELS_BY_TOOL[tool]
         )
-    resume_forms = [
-        f'<form class="launch" method="post" action="/launch" data-resume="1"'
-        f' data-resume-id="{html.escape(item["id"])}">'
-        f'<input type="hidden" name="dir" value="{html.escape(item["cwd"])}">'
-        f'<input type="hidden" name="tool" value="{item["tool"]}">'
-        f'<input type="hidden" name="resume" value="{item["id"]}">'
-        f'<button class="proj" type="submit">'
-        f'<span class="resume-summary">🕘 {html.escape(item["summary"])}</span>'
-        f'<small>{html.escape(short_path(item["cwd"]))} · {item["tool"]}'
-        f' · {item["label"]}</small>'
-        f'<small class="resume-id">ID: {html.escape(item["id"])}</small>'
-        f'</button></form>'
-        for item in recent_conversations()
-    ]
-    # 最初の8件だけ見せて残りは折りたたみ、ページが縦に伸びすぎないようにする
-    resume_items = "\n".join(resume_forms[:8]) \
-        or '<div class="cw-empty">再開できる会話が見つかりません</div>'
-    if len(resume_forms) > 8:
-        more_label = f"▾ さらに{len(resume_forms) - 8}件表示"
-        resume_items += (
-            '<div class="resume-more" id="resume-more">'
-            + "\n".join(resume_forms[8:]) + "</div>"
-            f'<button class="cw-set" id="resume-toggle" type="button"'
-            f' data-label="{more_label}">{more_label}</button>'
+    resume_groups = {}
+    for item in recent_conversations():
+        resume_groups.setdefault(resume_group_dir(item["cwd"]), []).append(item)
+    rendered_groups = []
+    for index, (group_dir, items) in enumerate(resume_groups.items()):
+        forms = []
+        for item in items:
+            forms.append(
+                f'<form class="launch" method="post" action="/launch" data-resume="1"'
+                f' data-resume-id="{html.escape(item["id"])}">'
+                f'<input type="hidden" name="dir" value="{html.escape(item["cwd"])}">'
+                f'<input type="hidden" name="tool" value="{item["tool"]}">'
+                f'<input type="hidden" name="resume" value="{item["id"]}">'
+                f'<button class="proj" type="submit">'
+                f'<span class="resume-summary">🕘 {html.escape(item["summary"])}</span>'
+                f'<small>{html.escape(short_path(item["cwd"]))} · {item["tool"]}'
+                f' · {item["label"]}</small>'
+                f'<small class="resume-id">ID: {html.escape(item["id"])}</small>'
+                f'</button></form>'
+            )
+        rendered_groups.append(
+            f'<details class="resume-group"{" open" if index == 0 else ""}>'
+            f'<summary>📁 {html.escape(short_path(group_dir))} '
+            f'<small>({len(items)}件)</small></summary>'
+            f'<div class="resume-grid">{"".join(forms)}</div></details>'
         )
+    resume_items = "\n".join(rendered_groups) \
+        or '<div class="cw-empty">再開できる会話が見つかりません</div>'
     return load_template(NEW_PAGE_TEMPLATE).format(
         favicon_version=urllib.parse.quote(VERSION),
         static_version=urllib.parse.quote(BOOT_ID),
         message=message, buttons=buttons, options=options, resume_items=resume_items,
         models_claude=model_radios("claude"), models_codex=model_radios("codex"),
         bookmarklet=html.escape(bookmarklet_js(origin)),
+        inbox_prompt_button=inbox_prompt_button,
         chatwork_panel=CHATWORK_PANEL if CW_ENABLED else "",
-        chatwork_tab=(
-            '<button type="button" data-panel="inbox-panel">受信箱</button>'
-            if CW_ENABLED else ""
-        ),
     )
 
 
@@ -5110,6 +5136,9 @@ class Handler(BaseHTTPRequestHandler):
             pull_request = normalize_pr_selector(pull_request)
         except ValueError as exc:
             return self._page(render(f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"))
+        if pull_request:
+            # レビュー起動ではPR差分が対象なので、通常起動用の入力欄は引き継がない。
+            prompt = ""
         prompt = prompt.strip()
         if len(prompt) > 8000:
             return self._page(render('<div class="msg err">❌ プロンプトが長すぎます（8000文字まで）</div>', "new"))

@@ -40,8 +40,11 @@
       if (!f.dataset.resume) {
         var t = currentTool();
         var m = document.querySelector("#models-" + t + " input:checked");
-        var p = document.getElementById("prompt").value;
-        fields.push(["model", m ? m.value : "default"], ["tool", t], ["prompt", p]);
+        fields.push(["model", m ? m.value : "default"], ["tool", t]);
+        // PRレビューは入力欄の内容を初期プロンプトとして送らず、差分だけを開く。
+        if (!f.elements.namedItem("pull_request")) {
+          fields.push(["prompt", document.getElementById("prompt").value]);
+        }
       }
       fields.forEach(function (kv) {
         if (f.elements.namedItem(kv[0])) return;
@@ -52,15 +55,17 @@
     });
   }
   document.querySelectorAll("form.launch").forEach(wireLaunchForm);
-  // 折りたたまれた9件目以降の再開候補の表示切り替え
-  var resumeToggle = document.getElementById("resume-toggle");
-  if (resumeToggle) {
-    resumeToggle.addEventListener("click", function () {
-      var open = document.getElementById("resume-more").classList.toggle("open");
-      resumeToggle.textContent = open ? "▴ 折りたたむ" : resumeToggle.dataset.label;
+  var inboxOpen = document.getElementById("inbox-open");
+  if (inboxOpen) {
+    inboxOpen.addEventListener("click", function () {
+      activateLauncherPanel("inbox-panel");
     });
   }
-  // resume IDの一部を入力すると、折りたたみ内を含む候補を絞り込む。
+  var inboxBack = document.getElementById("inbox-back");
+  if (inboxBack) inboxBack.addEventListener("click", function () {
+    activateLauncherPanel("projects-panel");
+  });
+  // resume IDの一部を入力すると、全グループの候補を絞り込む。
   var resumeIdFilter = document.getElementById("resume-id-filter");
   if (resumeIdFilter) {
     resumeIdFilter.addEventListener("input", function () {
@@ -72,9 +77,11 @@
         form.hidden = !matched;
         if (matched) matches += 1;
       });
-      var more = document.getElementById("resume-more");
-      if (more) more.classList.toggle("filtering", Boolean(query));
-      if (resumeToggle) resumeToggle.hidden = Boolean(query);
+      document.querySelectorAll(".resume-group").forEach(function (group) {
+        group.hidden = !Array.from(group.querySelectorAll("form[data-resume-id]"))
+          .some(function (form) { return !form.hidden; });
+        if (query && !group.hidden) group.open = true;
+      });
       var empty = document.getElementById("resume-filter-empty");
       if (empty) empty.hidden = !query || matches > 0;
     });
@@ -133,12 +140,13 @@
     body.textContent = cleanChatwork(item.body);
     var set = document.createElement("button"); set.type = "button"; set.className = "cw-set";
     set.textContent = "📝 プロンプトにセット";
+    var prompt = "以下の Chatwork メッセージに対応してください。\n" + item.url
+      + "\n（room_id: " + item.room_id + " / message_id: " + item.message_id
+      + "。本文は Chatwork MCP の get_room_message で取得してください）";
     set.addEventListener("click", function () {
-      var prompt = "以下の Chatwork メッセージに対応してください。\n" + item.url
-        + "\n（room_id: " + item.room_id + " / message_id: " + item.message_id
-        + "。本文は Chatwork MCP の get_room_message で取得してください）";
-      var textarea = document.getElementById("prompt"); textarea.value = prompt;
-      textarea.scrollIntoView({behavior: "smooth", block: "center"}); textarea.focus();
+      promptBox.value = prompt;
+      activateLauncherPanel("projects-panel");
+      promptBox.scrollIntoView({behavior: "smooth", block: "center"}); promptBox.focus();
     });
     box.append(meta, body, set); return box;
   }

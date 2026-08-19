@@ -31,14 +31,13 @@
   </details>
   <details id="prompt-details" open><summary>最初のプロンプト（任意）</summary>
     <textarea id="prompt" rows="3" placeholder="起動時に渡す指示。画像もペーストできます"></textarea>
-    <div id="prompt-status" class="cw-empty"></div>
+    <div class="prompt-actions">{inbox_prompt_button}<div id="prompt-status" class="cw-empty"></div></div>
   </details>
 </div>
 <div class="launcher-tabs" role="tablist">
   <button type="button" class="active" data-panel="projects-panel">プロジェクト</button>
   <button type="button" data-panel="reviews-panel">GitHubレビュー</button>
   <button type="button" data-panel="resume-panel">会話を再開</button>
-  {chatwork_tab}
 </div>
 <section class="launcher-panel active" id="projects-panel">
 <h2>プロジェクトから起動</h2>
@@ -49,7 +48,7 @@
   <button class="proj" type="submit">🚀 選択したプロジェクトで起動</button>
 </form>
 <form class="launch" method="post" action="/launch">
-  <input type="text" name="dir" placeholder="任意のディレクトリ ~/projects/..." autocapitalize="off" autocorrect="off">
+  <input type="text" name="dir" placeholder="任意のディレクトリ ~/projects/..." autocapitalize="off" autocorrect="off" required>
   <button class="proj" type="submit">🚀 このディレクトリで起動</button>
 </form></details>
 </section>
@@ -64,7 +63,7 @@
 <h2>最近の会話を再開</h2>
   <p class="panel-intro">同じ会話の続きから起動します。権限設定のみ適用されます。</p>
 <input type="text" id="resume-id-filter" placeholder="resume IDで絞り込み" aria-label="resume IDで絞り込み" autocapitalize="off" autocorrect="off" spellcheck="false">
-<div class="resume-grid">{resume_items}</div>
+<div id="resume-groups">{resume_items}</div>
 <div class="cw-empty" id="resume-filter-empty" hidden>一致する会話が見つかりません</div>
 </section>
 {chatwork_panel}
