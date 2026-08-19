@@ -24,6 +24,21 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
 
+    def test_resume_conversation_can_be_filtered_by_id(self):
+        conversation = {
+            "cwd": "/Users/demo/project",
+            "tool": "codex",
+            "id": "019fd08a-e352-7a22-9aa5-0b5d0de94eba",
+            "summary": "絞り込み対象の会話",
+            "label": "08/19 12:34",
+        }
+        with mock.patch.object(server, "recent_conversations", return_value=[conversation]):
+            page = server.render(host="localhost:8787")
+
+        self.assertIn('id="resume-id-filter"', page)
+        self.assertIn(f'data-resume-id="{conversation["id"]}"', page)
+        self.assertIn(f'ID: {conversation["id"]}', page)
+
     def test_template_path_cannot_escape_template_directory(self):
         with self.assertRaisesRegex(ValueError, "テンプレート名"):
             server.load_template("../server.py")

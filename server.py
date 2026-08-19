@@ -4374,14 +4374,17 @@ def render(message="", view="new", host=None):
             for v, label in MODELS_BY_TOOL[tool]
         )
     resume_forms = [
-        f'<form class="launch" method="post" action="/launch" data-resume="1">'
+        f'<form class="launch" method="post" action="/launch" data-resume="1"'
+        f' data-resume-id="{html.escape(item["id"])}">'
         f'<input type="hidden" name="dir" value="{html.escape(item["cwd"])}">'
         f'<input type="hidden" name="tool" value="{item["tool"]}">'
         f'<input type="hidden" name="resume" value="{item["id"]}">'
         f'<button class="proj" type="submit">'
         f'<span class="resume-summary">🕘 {html.escape(item["summary"])}</span>'
         f'<small>{html.escape(short_path(item["cwd"]))} · {item["tool"]}'
-        f' · {item["label"]}</small></button></form>'
+        f' · {item["label"]}</small>'
+        f'<small class="resume-id">ID: {html.escape(item["id"])}</small>'
+        f'</button></form>'
         for item in recent_conversations()
     ]
     # 最初の8件だけ見せて残りは折りたたみ、ページが縦に伸びすぎないようにする

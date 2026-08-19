@@ -60,6 +60,25 @@
       resumeToggle.textContent = open ? "▴ 折りたたむ" : resumeToggle.dataset.label;
     });
   }
+  // resume IDの一部を入力すると、折りたたみ内を含む候補を絞り込む。
+  var resumeIdFilter = document.getElementById("resume-id-filter");
+  if (resumeIdFilter) {
+    resumeIdFilter.addEventListener("input", function () {
+      var query = resumeIdFilter.value.trim().toLowerCase();
+      var forms = document.querySelectorAll("form[data-resume-id]");
+      var matches = 0;
+      forms.forEach(function (form) {
+        var matched = !query || form.dataset.resumeId.toLowerCase().includes(query);
+        form.hidden = !matched;
+        if (matched) matches += 1;
+      });
+      var more = document.getElementById("resume-more");
+      if (more) more.classList.toggle("filtering", Boolean(query));
+      if (resumeToggle) resumeToggle.hidden = Boolean(query);
+      var empty = document.getElementById("resume-filter-empty");
+      if (empty) empty.hidden = !query || matches > 0;
+    });
+  }
   // 最初のプロンプト欄への画像ペースト。アップロードしてパスを本文に差し込む
   var promptBox = document.getElementById("prompt");
   var promptStatus = document.getElementById("prompt-status");

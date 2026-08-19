@@ -63,7 +63,9 @@
 <section class="launcher-panel" id="resume-panel">
 <h2>最近の会話を再開</h2>
   <p class="panel-intro">同じ会話の続きから起動します。権限設定のみ適用されます。</p>
+<input type="text" id="resume-id-filter" placeholder="resume IDで絞り込み" aria-label="resume IDで絞り込み" autocapitalize="off" autocorrect="off" spellcheck="false">
 <div class="resume-grid">{resume_items}</div>
+<div class="cw-empty" id="resume-filter-empty" hidden>一致する会話が見つかりません</div>
 </section>
 {chatwork_panel}
 <details class="subsection"><summary>その他</summary>

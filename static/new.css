@@ -8,6 +8,8 @@
   button.proj:active { background: #6c5ce74d; }
   button.proj .resume-summary { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   button.proj small { color: #888; }
+  button.proj .resume-id { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .68rem; }
   .msg { padding: 12px; border-radius: 10px; margin: 12px 0; }
   .ok { background: #00b8941a; border: 1px solid #00b894; }
   .err { background: #d635451a; border: 1px solid #d63545; }
@@ -71,9 +73,9 @@
   .subsection[open] summary { margin-bottom: 9px; }
   .panel-intro { margin: 0 0 10px; color: #888; font-size: .84rem; }
   .resume-more { display: none; }
-  .resume-more.open { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  .resume-more.open, .resume-more.filtering { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 7px; }
-  .resume-more.open form { min-width: 0; }
+  .resume-more.open form, .resume-more.filtering form { min-width: 0; }
   #resume-more, #resume-toggle { grid-column: 1 / -1; }
   nav { display: flex; gap: 8px; margin: 12px 0 20px; }
   nav a { flex: 1; padding: 11px; text-align: center; color: inherit; text-decoration: none;
@@ -84,7 +86,7 @@
     .project-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .project-grid button.proj { padding: 11px 8px; font-size: .88rem; }
     .launcher-tabs { grid-template-columns: 1fr 1fr; }
-    .resume-more.open { grid-template-columns: 1fr; }
+    .resume-more.open, .resume-more.filtering { grid-template-columns: 1fr; }
   }
   @media (min-width: 561px) and (max-width: 799px) {
     .project-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
