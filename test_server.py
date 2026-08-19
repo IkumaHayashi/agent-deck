@@ -92,6 +92,19 @@ class FrontendTemplateTest(unittest.TestCase):
 
         self.assertNotIn("通常起動用の指示", run.call_args.args[0])
 
+    def test_review_context_is_seeded_into_input_without_sending(self):
+        # レビュー対象PRは入力欄への書き出しプリセットでAIへ伝える（自動送信はしない）
+        self.assertIn("seedReviewContext(data)", server.TERMINAL_PAGE)
+        self.assertIn("をレビューしています。", server.TERMINAL_PAGE)
+        self.assertIn(
+            'localStorage.getItem(reviewSeedKey) === data.url', server.TERMINAL_PAGE
+        )
+
+    def test_diff_selection_quote_names_the_pull_request(self):
+        self.assertIn(
+            'prLabel + "以下の選択行について確認してください。"', server.TERMINAL_PAGE
+        )
+
     def test_template_path_cannot_escape_template_directory(self):
         with self.assertRaisesRegex(ValueError, "テンプレート名"):
             server.load_template("../server.py")

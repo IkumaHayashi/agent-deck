@@ -3413,7 +3413,8 @@ TERMINAL_PAGE = r"""<!doctype html>
       if (!groups.has(item.path)) groups.set(item.path, []);
       groups.get(item.path).push(item);
     }}
-    const parts = ["以下の選択行について確認してください。"];
+    const prLabel = reviewData ? "PR " + reviewData.url + " の" : "";
+    const parts = [prLabel + "以下の選択行について確認してください。"];
     for (const [path, items] of groups) {{
       items.sort((a, b) => a.index - b.index);
       const numbers = items.map(item => item.line).join(", ");
@@ -3441,6 +3442,18 @@ TERMINAL_PAGE = r"""<!doctype html>
   }}
   function clearDiffSelection() {{
     selectedDiffLines.clear(); lastSelectedLine = null; updateDiffSelection();
+  }}
+  const reviewSeedKey = "reviewSeed:" + session;
+  // 端末内のAIはPRの紐づけを知らないため、レビュー対象を伝える書き出しを
+  // 入力欄へ一度だけプリセットする。送信するかどうかはユーザーに任せる
+  function seedReviewContext(data) {{
+    if (!linkedPullRequest || document.body.classList.contains("readonly")) return;
+    if (localStorage.getItem(reviewSeedKey) === data.url) return;
+    localStorage.setItem(reviewSeedKey, data.url);
+    if (input.value.includes(data.url)) return;
+    input.value = "PR " + data.url + "（" + data.baseRefName + " ← " + data.headRefName
+      + "）をレビューしています。\n" + input.value;
+    syncInput();
   }}
   function splitPatch(patch) {{
     const sections = new Map();
@@ -3557,7 +3570,11 @@ TERMINAL_PAGE = r"""<!doctype html>
     reviewTitle.textContent = "PR差分";
     try {{
       const query = reviewSelector ? "?pr=" + encodeURIComponent(reviewSelector) : "";
-      const response = await fetch("/api/sessions/" + encodeURIComponent(session) + "/pull-request" + query);
+      // サーバ側のgh呼び出しは最長50秒（20+30）。それを超えて待ち続けないよう
+      // クライアント側でも打ち切り、↻で再試行できるようにする
+      const response = await fetch(
+        "/api/sessions/" + encodeURIComponent(session) + "/pull-request" + query,
+        {{signal: AbortSignal.timeout(55000)}});
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "PR差分を取得できませんでした");
       if (userInitiated && !document.body.classList.contains("readonly")) {{
@@ -3568,11 +3585,14 @@ TERMINAL_PAGE = r"""<!doctype html>
         localStorage.setItem(reviewKey, reviewSelector);
       }}
       renderPullRequest(data);
+      seedReviewContext(data);
       if (userInitiated) openReview();
       else if (reviewOpenMode !== "never") openReview();
     }} catch (error) {{
       reviewMeta.textContent = "PR番号またはURLを指定できます";
-      reviewMessage.textContent = error.message;
+      reviewMessage.textContent = error.name === "TimeoutError"
+        ? "PR差分の取得がタイムアウトしました。↻で再試行してください"
+        : error.message;
       if (!userInitiated && !reviewManuallyOpened && reviewOpenMode === "auto") closeReview();
     }}
   }}
@@ -3586,7 +3606,8 @@ TERMINAL_PAGE = r"""<!doctype html>
     try {{
       await post("/api/sessions/" + encodeURIComponent(session) + "/pull-request", {{pr: ""}});
       linkedPullRequest = ""; reviewSelector = ""; reviewUnlink.hidden = true;
-      localStorage.removeItem(reviewKey); reviewPr.value = "";
+      localStorage.removeItem(reviewKey); localStorage.removeItem(reviewSeedKey);
+      reviewPr.value = "";
       await loadPullRequest("", false);
     }} catch (error) {{ reviewMessage.hidden = false; reviewMessage.textContent = error.message; }}
   }});
@@ -4771,6 +4792,7 @@ class Handler(BaseHTTPRequestHandler):
             if not cwd:
                 return self._json({"error": "セッションが見つかりません"}, 404)
             selector = urllib.parse.parse_qs(parsed.query).get("pr", [linked_selector])[0]
+            started = time.monotonic()
             try:
                 return self._json(pull_request_diff(cwd, selector))
             except ValueError as exc:
@@ -4783,6 +4805,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "GitHubからの取得がタイムアウトしました"}, 504)
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
+            finally:
+                elapsed = time.monotonic() - started
+                if elapsed > 10:
+                    # 無限スピナー問題の追跡用。通常は数秒で返るので遅い時だけ残す
+                    print(
+                        f"[pull-request] {session} {selector or '(branch)'} "
+                        f"took {elapsed:.1f}s", file=sys.stderr, flush=True,
+                    )
         if parsed.path.startswith("/uploads/"):
             return self._upload_file(parsed.path)
         match = re.fullmatch(
