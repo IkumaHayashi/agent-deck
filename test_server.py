@@ -117,6 +117,28 @@ class FrontendTemplateTest(unittest.TestCase):
             server.TERMINAL_PAGE,
         )
 
+    def test_assistant_message_can_be_quoted_into_input(self):
+        self.assertIn('id="selection-quote" hidden', server.TERMINAL_PAGE)
+        self.assertIn(
+            'chat.querySelectorAll(".message.assistant .bubble")',
+            server.TERMINAL_PAGE,
+        )
+        self.assertIn("appendQuoteToInput(selectionQuoteText)", server.TERMINAL_PAGE)
+        self.assertIn('document.addEventListener("selectionchange"', server.TERMINAL_PAGE)
+        self.assertNotIn("selectedQuoteText || item.text", server.TERMINAL_PAGE)
+        self.assertIn('line ? "> " + line : ">"', server.TERMINAL_PAGE)
+
+    def test_new_messages_keep_scroll_position_while_reading_history(self):
+        self.assertIn(
+            "if (current < lastChatScrollTop - 2) followChat = false",
+            server.TERMINAL_PAGE,
+        )
+        self.assertIn("const savedScrollTop = chat.scrollTop", server.TERMINAL_PAGE)
+        self.assertIn(
+            "chat.scrollTop = shouldFollow ? chat.scrollHeight : savedScrollTop",
+            server.TERMINAL_PAGE,
+        )
+
 
 class CodexSessionTest(unittest.TestCase):
     def setUp(self):

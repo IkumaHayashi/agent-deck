@@ -3278,6 +3278,10 @@ TERMINAL_PAGE = r"""<!doctype html>
     border: 1px solid #484f58; border-radius: 8px; font-size: 1rem; }}
   button.primary {{ background: #238636; border-color: #2ea043; font-weight: 600; }}
   button.danger {{ color: #ff7b72; }}
+  #selection-quote {{ position: fixed; z-index: 90; flex: none; width: auto; padding: 7px 11px;
+    border-color: #58a6ff; background: #1f6feb; color: #fff; border-radius: 8px;
+    box-shadow: 0 6px 18px #000a; font-size: .82rem; white-space: nowrap; cursor: pointer; }}
+  #selection-quote[hidden] {{ display: none; }}
   #status {{ min-height: 20px; color: #8b949e; font-size: .9rem; margin-top: 6px; }}
   .modal {{ position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: #000b; }}
   .modal[hidden] {{ display: none; }}
@@ -3334,6 +3338,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     <div id="review-diff" hidden></div>
   </div>
 </section>
+<button type="button" id="selection-quote" hidden>↩ 選択部分を引用</button>
 <div class="controls">
   <textarea id="input" placeholder="メッセージを入力（! でコマンド実行、画像ペースト・ファイルD&amp;D可）"></textarea>
   <div class="buttons">
@@ -3660,6 +3665,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   let lastMessages = "";
   let followOutput = true;
   let followChat = true;
+  let lastChatScrollTop = chat.scrollTop;
   let showingHistory = true;
   let statusMessageUntil = 0;
   let serverMessages = [];
@@ -3683,8 +3689,12 @@ TERMINAL_PAGE = r"""<!doctype html>
     followOutput = distanceFromBottom < 80;
   }});
   chat.addEventListener("scroll", () => {{
+    const current = chat.scrollTop;
     const distanceFromBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight;
-    followChat = distanceFromBottom < 100;
+    // 少しでも上へ戻ったら即座に新着への追従を止める。最下部へ戻したときだけ再開する。
+    if (current < lastChatScrollTop - 2) followChat = false;
+    else if (distanceFromBottom < 30) followChat = true;
+    lastChatScrollTop = current;
   }});
   function appendInlineMarkdown(target, text) {{
     // 素の URL は RFC 3986 の ASCII 文字だけで止める。直後に続く全角の
@@ -3951,12 +3961,93 @@ TERMINAL_PAGE = r"""<!doctype html>
   function stopPendingTimer() {{
     if (pendingTimer) {{ clearInterval(pendingTimer); pendingTimer = null; }}
   }}
+  function selectedTextWithin(element) {{
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.anchorNode || !selection.focusNode) return "";
+    if (!element.contains(selection.anchorNode) || !element.contains(selection.focusNode)) return "";
+    return selection.toString().trim();
+  }}
+  function appendQuoteToInput(text) {{
+    const source = text.replace(/\r\n/g, "\n").trim();
+    if (!source) return;
+    const quoted = source.split("\n").map(line => line ? "> " + line : ">").join("\n");
+    let separator = "";
+    if (input.value) separator = input.value.endsWith("\n\n") ? "" : (input.value.endsWith("\n") ? "\n" : "\n\n");
+    input.value += separator + quoted + "\n\n";
+    input.setSelectionRange(input.value.length, input.value.length);
+    syncInput(); input.focus();
+    status.textContent = "選択部分を入力欄に引用しました";
+    statusMessageUntil = Date.now() + 5000;
+  }}
+  const selectionQuote = document.getElementById("selection-quote");
+  let selectionQuoteText = "";
+  let selectionQuoteTimer = null;
+  let selectionPointerDown = false;
+  function hideSelectionQuote() {{
+    selectionQuote.hidden = true;
+    selectionQuoteText = "";
+  }}
+  function updateSelectionQuote() {{
+    if (document.body.classList.contains("readonly")) return hideSelectionQuote();
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || !selection.rangeCount) return hideSelectionQuote();
+    const bubble = Array.from(chat.querySelectorAll(".message.assistant .bubble")).find(
+      item => item.contains(selection.anchorNode) && item.contains(selection.focusNode)
+    );
+    if (!bubble) return hideSelectionQuote();
+    const text = selectedTextWithin(bubble);
+    const range = selection.getRangeAt(0);
+    const rects = range.getClientRects();
+    const rect = rects.length ? rects[rects.length - 1] : range.getBoundingClientRect();
+    if (!text || (!rect.width && !rect.height)) return hideSelectionQuote();
+    selectionQuoteText = text;
+    selectionQuote.hidden = false;
+    const gap = 8;
+    const width = selectionQuote.offsetWidth;
+    const height = selectionQuote.offsetHeight;
+    const center = rect.left + rect.width / 2;
+    selectionQuote.style.left = Math.max(gap, Math.min(center - width / 2, innerWidth - width - gap)) + "px";
+    let top = rect.top - height - gap;
+    if (top < gap) top = Math.min(rect.bottom + gap, innerHeight - height - gap);
+    selectionQuote.style.top = top + "px";
+  }}
+  function scheduleSelectionQuote() {{
+    clearTimeout(selectionQuoteTimer);
+    selectionQuoteTimer = setTimeout(updateSelectionQuote, 80);
+  }}
+  document.addEventListener("selectionchange", () => {{
+    if (!selectionPointerDown) scheduleSelectionQuote();
+  }});
+  document.addEventListener("pointerup", event => {{
+    selectionPointerDown = false;
+    if (!selectionQuote.contains(event.target)) scheduleSelectionQuote();
+  }});
+  document.addEventListener("pointerdown", event => {{
+    if (!selectionQuote.contains(event.target)) {{
+      selectionPointerDown = true;
+      hideSelectionQuote();
+    }}
+  }});
+  document.addEventListener("pointercancel", () => {{ selectionPointerDown = false; }});
+  selectionQuote.addEventListener("pointerdown", event => event.preventDefault());
+  selectionQuote.addEventListener("click", () => {{
+    if (!selectionQuoteText) return;
+    appendQuoteToInput(selectionQuoteText);
+    window.getSelection()?.removeAllRanges();
+    hideSelectionQuote();
+  }});
+  chat.addEventListener("scroll", hideSelectionQuote);
+  window.addEventListener("resize", hideSelectionQuote);
   function renderMessages(messages, activity, question, auth) {{
     activity = activity || ""; question = question || null; auth = auth || "";
     const serialized = JSON.stringify([messages, activity, question, auth]);
     if (serialized === lastMessages) return;
     const firstLoad = !lastMessages;
-    lastMessages = serialized; chat.replaceChildren();
+    // 新着で全メッセージを再描画しても、上を読んでいる間は現在位置を維持する。
+    const shouldFollow = firstLoad || followChat;
+    const savedScrollTop = chat.scrollTop;
+    followChat = shouldFollow;
+    lastMessages = serialized; hideSelectionQuote(); chat.replaceChildren();
     if (!messages.length && !activity && !question && !auth) {{
       const empty = document.createElement("div"); empty.className = "chat-empty";
       empty.textContent = "まだ会話はありません"; chat.append(empty); return;
@@ -4036,7 +4127,10 @@ TERMINAL_PAGE = r"""<!doctype html>
       }}
       chat.append(panel);
     }}
-    if (firstLoad || followChat) requestAnimationFrame(() => {{ chat.scrollTop = chat.scrollHeight; }});
+    requestAnimationFrame(() => {{
+      chat.scrollTop = shouldFollow ? chat.scrollHeight : savedScrollTop;
+      lastChatScrollTop = chat.scrollTop;
+    }});
   }}
   async function answerQuestion(choice) {{
     if (!await askConfirm("「" + choice.label + "」を選択しますか？")) return;
