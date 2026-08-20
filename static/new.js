@@ -31,10 +31,42 @@
   document.querySelectorAll(".launcher-tabs button").forEach(function (button) {
     button.addEventListener("click", function () { activateLauncherPanel(button.dataset.panel); });
   });
+  // セッション起動（tmux + AIツールの起動）とページ遷移は数秒かかるため、
+  // 待ちの間はローディングオーバーレイを出す。画面を覆うので二重送信も防げる
+  var navLoading = document.createElement("div");
+  navLoading.id = "nav-loading";
+  navLoading.hidden = true;
+  var navLoadingBox = document.createElement("div");
+  navLoadingBox.className = "box";
+  var navLoadingSpinner = document.createElement("div");
+  navLoadingSpinner.className = "spinner";
+  var navLoadingLabel = document.createElement("span");
+  navLoadingBox.append(navLoadingSpinner, navLoadingLabel);
+  navLoading.appendChild(navLoadingBox);
+  document.body.appendChild(navLoading);
+  function showNavLoading(message) {
+    navLoadingLabel.textContent = message || "読み込み中...";
+    navLoading.hidden = false;
+  }
+  // bfcacheで戻ってきたときは前回のオーバーレイが残るので消す
+  window.addEventListener("pageshow", function (event) {
+    if (event.persisted) navLoading.hidden = true;
+  });
+  document.addEventListener("click", function (event) {
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    var link = event.target.closest("a[href]");
+    if (!link || link.target === "_blank" || link.hasAttribute("download")) return;
+    var href = link.getAttribute("href");
+    if (!href || href.indexOf("#") === 0 || href.indexOf("javascript:") === 0) return;
+    if (new URL(link.href, location.href).origin !== location.origin) return;
+    showNavLoading("セッション一覧を読み込み中...");
+  });
   // 選択中のツール・モデルを各起動フォームに hidden input として付与する。
   // resume フォームはツールが会話側で決まるため、権限だけを引き継ぐ。
   function wireLaunchForm(f) {
     f.addEventListener("submit", function () {
+      showNavLoading(f.dataset.resume ? "会話を再開しています..." : "セッションを起動中...");
       var bypass = document.querySelector('.bypass-modes input:checked');
       var fields = [["bypass", bypass && bypass.value === "bypass" ? "1" : "0"]];
       if (!f.dataset.resume) {

@@ -136,10 +136,33 @@ class FrontendTemplateTest(unittest.TestCase):
             'chat.querySelectorAll(".message.assistant .bubble")',
             server.TERMINAL_PAGE,
         )
-        self.assertIn("appendQuoteToInput(selectionQuoteText)", server.TERMINAL_PAGE)
+        self.assertIn("appendQuoteToInput(text)", server.TERMINAL_PAGE)
         self.assertIn('document.addEventListener("selectionchange"', server.TERMINAL_PAGE)
         self.assertNotIn("selectedQuoteText || item.text", server.TERMINAL_PAGE)
         self.assertIn('line ? "> " + line : ">"', server.TERMINAL_PAGE)
+
+    def test_quote_places_cursor_below_quoted_text(self):
+        # removeAllRanges を引用より後に呼ぶと入力欄のカーソルが先頭へ戻る（Chrome）
+        handler = server.TERMINAL_PAGE[
+            server.TERMINAL_PAGE.index('selectionQuote.addEventListener("click"'):
+        ]
+        self.assertLess(
+            handler.index("window.getSelection()?.removeAllRanges()"),
+            handler.index("appendQuoteToInput(text)"),
+        )
+        # 引用が入力欄の表示域より長くてもカーソル位置まで送る
+        self.assertIn("input.scrollTop = input.scrollHeight", server.TERMINAL_PAGE)
+
+    def test_page_navigation_shows_loading_overlay(self):
+        self.assertIn("#nav-loading", server.SIDEBAR_CSS)
+        self.assertIn("function showNavLoading", server.SIDEBAR_JS)
+        self.assertIn("function navigateTo", server.SIDEBAR_JS)
+        # リンククリック（セッション切替・/newへの移動）で表示する
+        self.assertIn("showNavLoading(navLoadingLabel(link.href))", server.SIDEBAR_JS)
+        # bfcacheで戻ってきたときは消す
+        self.assertIn('window.addEventListener("pageshow"', server.SIDEBAR_JS)
+        # JSからの遷移（再起動・モデル変更・引き継ぎ等）もオーバーレイ付きで行う
+        self.assertNotIn("location.href =", server.TERMINAL_PAGE)
 
     def test_new_messages_keep_scroll_position_while_reading_history(self):
         self.assertIn(

@@ -2825,12 +2825,64 @@ SIDEBAR_CSS = r"""
     white-space: nowrap; }
   aside #side-sessions .st { flex: 0 1 auto; min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
+  /* ページ遷移中のローディング。サーバー描画が重いページへの移動中に出す */
+  #nav-loading { position: fixed; inset: 0; z-index: 300; display: grid;
+    place-items: center; background: #0d1117cc; }
+  #nav-loading[hidden] { display: none; }
+  #nav-loading .box { display: flex; flex-direction: column; align-items: center;
+    gap: 14px; color: #8b949e; font-size: .95rem; }
+  #nav-loading .spinner { width: 34px; height: 34px; border: 3px solid #30363d;
+    border-top-color: #58a6ff; border-radius: 50%;
+    animation: nav-spin .8s linear infinite; }
+  @keyframes nav-spin { to { transform: rotate(360deg); } }
 """
 
 # サイドバーの定期更新と「要対応のみ表示」トグル。両ページ共通。
 # 呼び出し側のページで const session（一覧ページは null）と const bootId を
 # 先に宣言しておくこと。
 SIDEBAR_JS = r"""
+  // ページ遷移はサーバーで丸ごと再描画するため時間がかかる。リンククリックや
+  // JSからの遷移中はオーバーレイを出して待ちを可視化する
+  const navLoading = document.createElement("div");
+  navLoading.id = "nav-loading";
+  navLoading.hidden = true;
+  {
+    const box = document.createElement("div"); box.className = "box";
+    const spinner = document.createElement("div"); spinner.className = "spinner";
+    box.append(spinner, document.createElement("span"));
+    navLoading.appendChild(box);
+  }
+  document.body.appendChild(navLoading);
+  function showNavLoading(message) {
+    navLoading.querySelector("span").textContent = message || "読み込み中...";
+    navLoading.hidden = false;
+  }
+  function hideNavLoading() { navLoading.hidden = true; }
+  function navigateTo(url, message) {
+    showNavLoading(message);
+    location.href = url;
+  }
+  function navLoadingLabel(url) {
+    try {
+      const path = new URL(url, location.href).pathname;
+      if (path === "/new") return "起動ページを読み込み中...";
+      if (path === "/terminal") return "セッションを読み込み中...";
+      if (path === "/") return "セッション一覧を読み込み中...";
+    } catch (error) { /* 変則URLは既定文言にする */ }
+    return "読み込み中...";
+  }
+  document.addEventListener("click", event => {
+    if (event.defaultPrevented || event.button !== 0) return;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    const link = event.target.closest("a[href]");
+    if (!link || link.target === "_blank" || link.hasAttribute("download")) return;
+    const href = link.getAttribute("href");
+    if (!href || href.startsWith("#") || href.startsWith("javascript:")) return;
+    if (new URL(link.href, location.href).origin !== location.origin) return;
+    showNavLoading(navLoadingLabel(link.href));
+  });
+  // bfcacheで戻ってきたときは前回のオーバーレイが残るので消す
+  window.addEventListener("pageshow", event => { if (event.persisted) hideNavLoading(); });
   // 「要対応のみ表示」トグル。選択は端末ごとに覚える
   const filterNeed = document.getElementById("filter-need");
   if (filterNeed) {
@@ -2849,7 +2901,11 @@ SIDEBAR_JS = r"""
       const data = await response.json();
       if (!response.ok || !sideSessions) return;
       // サーバー再起動後は描画済みHTMLが古いので読み込み直す
-      if (data.boot && data.boot !== bootId) { location.reload(); return; }
+      if (data.boot && data.boot !== bootId) {
+        showNavLoading("再読み込み中...");
+        location.reload();
+        return;
+      }
       // ピン留めだけを最優先し、各グループ内ではAPIの順序を保つ。
       const items = data.items.slice().sort((a, b) =>
         Number(b.pinned) - Number(a.pinned));
@@ -3995,8 +4051,10 @@ TERMINAL_PAGE = r"""<!doctype html>
     let separator = "";
     if (input.value) separator = input.value.endsWith("\n\n") ? "" : (input.value.endsWith("\n") ? "\n" : "\n\n");
     input.value += separator + quoted + "\n\n";
-    input.setSelectionRange(input.value.length, input.value.length);
     syncInput(); input.focus();
+    // カーソルを引用の直下に置き、引用が入力欄より長くても見える位置まで送る
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.scrollTop = input.scrollHeight;
     status.textContent = "選択部分を入力欄に引用しました";
     statusMessageUntil = Date.now() + 5000;
   }}
@@ -4053,9 +4111,12 @@ TERMINAL_PAGE = r"""<!doctype html>
   selectionQuote.addEventListener("pointerdown", event => event.preventDefault());
   selectionQuote.addEventListener("click", () => {{
     if (!selectionQuoteText) return;
-    appendQuoteToInput(selectionQuoteText);
+    const text = selectionQuoteText;
+    // 選択解除は引用より先に行う。あとから removeAllRanges を呼ぶと
+    // 入力欄のカーソルが先頭へ戻ってしまう（Chrome）
     window.getSelection()?.removeAllRanges();
     hideSelectionQuote();
+    appendQuoteToInput(text);
   }});
   chat.addEventListener("scroll", hideSelectionQuote);
   window.addEventListener("resize", hideSelectionQuote);
@@ -4233,11 +4294,14 @@ TERMINAL_PAGE = r"""<!doctype html>
                               " に変えて同じ会話をresumeしますか？")) return;
         status.textContent = "モデルを変更して再起動中...";
         statusMessageUntil = Date.now() + 5000;
+        showNavLoading("モデルを変更して再起動中...");
         try {{
           const data = await post("/api/sessions/" + encodeURIComponent(session) + "/model",
                                   {{model: choice.dataset.model}});
-          location.href = "/terminal?session=" + encodeURIComponent(data.session);
+          navigateTo("/terminal?session=" + encodeURIComponent(data.session),
+                     "セッションを読み込み中...");
         }} catch (error) {{
+          hideNavLoading();
           status.textContent = error.message;
           statusMessageUntil = Date.now() + 5000;
         }}
@@ -4385,13 +4449,15 @@ TERMINAL_PAGE = r"""<!doctype html>
   }});
   async function runCommand(command) {{
     if (!await askConfirm("新しいWebシェルで実行しますか？\n\n" + command)) return;
+    showNavLoading("Webシェルを起動中...");
     try {{
       const data = await post(
         "/api/sessions/" + encodeURIComponent(session) + "/shell", {{command}}
       );
-      location.href = "/terminal?session=" + encodeURIComponent(data.session);
+      navigateTo("/terminal?session=" + encodeURIComponent(data.session),
+                 "セッションを読み込み中...");
     }}
-    catch (error) {{ status.textContent = error.message; }}
+    catch (error) {{ hideNavLoading(); status.textContent = error.message; }}
   }}
   const enterButton = document.getElementById("enter");
   // pointerdown の preventDefault でテキストボックスのフォーカスを奪わない。
@@ -4408,8 +4474,12 @@ TERMINAL_PAGE = r"""<!doctype html>
   document.querySelectorAll("[data-key]").forEach(button => button.addEventListener("click", () => post("/api/sessions/" + encodeURIComponent(session) + "/key", {{key: button.dataset.key}}).then(refresh).catch(e => status.textContent = e.message)));
   document.getElementById("kill").addEventListener("click", async () => {{
     if (!await askConfirm("このセッションを終了しますか？")) return;
-    try {{ await post("/api/sessions/" + encodeURIComponent(session) + "/kill", {{}}); location.href = "/"; }}
-    catch (error) {{ status.textContent = error.message; }}
+    showNavLoading("セッションを終了中...");
+    try {{
+      await post("/api/sessions/" + encodeURIComponent(session) + "/kill", {{}});
+      navigateTo("/", "セッション一覧を読み込み中...");
+    }}
+    catch (error) {{ hideNavLoading(); status.textContent = error.message; }}
   }});
   document.querySelectorAll("[data-restart]").forEach(button => button.addEventListener("click", async () => {{
     const bypass = button.dataset.restart === "bypass";
@@ -4417,23 +4487,27 @@ TERMINAL_PAGE = r"""<!doctype html>
       ? "実行中の処理を終了し、権限バイパスで同じ会話をresumeしますか？"
       : "実行中の処理を終了し、同じ会話をresumeしますか？")) return;
     status.textContent = "セッションを再起動中...";
+    showNavLoading("セッションを再起動中...");
     try {{
       const data = await post(
         "/api/sessions/" + encodeURIComponent(session) + "/restart",
         bypass ? {{bypass: "1"}} : {{}}
       );
-      location.href = "/terminal?session=" + encodeURIComponent(data.session);
-    }} catch (error) {{ status.textContent = error.message; }}
+      navigateTo("/terminal?session=" + encodeURIComponent(data.session),
+                 "セッションを読み込み中...");
+    }} catch (error) {{ hideNavLoading(); status.textContent = error.message; }}
   }}));
   const handoff = document.getElementById("handoff");
   if (handoff) handoff.addEventListener("click", async () => {{
     const target = handoff.dataset.target;
     if (!await askConfirm("この会話と作業状況を " + target + " に引き継ぎますか？")) return;
     status.textContent = target + " へ引き継ぎ中...";
+    showNavLoading(target + " へ引き継ぎ中...");
     try {{
       const data = await post("/api/sessions/" + encodeURIComponent(session) + "/handoff", {{}});
-      location.href = "/terminal?session=" + encodeURIComponent(data.session);
-    }} catch (error) {{ status.textContent = error.message; }}
+      navigateTo("/terminal?session=" + encodeURIComponent(data.session),
+                 "セッションを読み込み中...");
+    }} catch (error) {{ hideNavLoading(); status.textContent = error.message; }}
   }});
   input.addEventListener("keydown", event => {{
     if (event.key === "Escape" && !event.isComposing) {{
