@@ -105,6 +105,14 @@ class FrontendTemplateTest(unittest.TestCase):
             'prLabel + "以下の選択行について確認してください。"', server.TERMINAL_PAGE
         )
 
+    def test_review_autoload_starts_after_draft_storage_is_initialized(self):
+        page = server.TERMINAL_PAGE
+
+        self.assertLess(
+            page.index('const draftKey = "draft:" + session;'),
+            page.index('if (reviewOpenMode !== "never") loadPullRequest();'),
+        )
+
     def test_template_path_cannot_escape_template_directory(self):
         with self.assertRaisesRegex(ValueError, "テンプレート名"):
             server.load_template("../server.py")
@@ -698,6 +706,9 @@ class VersionUpdateTest(unittest.TestCase):
 
 
 class ClaudeProjectDirTest(unittest.TestCase):
+    def setUp(self):
+        server.CLAUDE_START_CACHE.clear()
+
     def test_non_ascii_and_punctuation_are_replaced(self):
         self.assertEqual(
             "-Users-xxx-Dropbox-----",
@@ -741,6 +752,32 @@ class ClaudeProjectDirTest(unittest.TestCase):
 
         self.assertEqual([session_id], [item["id"] for item in candidates])
         self.assertEqual(log_path, candidates[0]["path"])
+
+    def test_resume_candidates_uses_session_start_from_log(self):
+        session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+        cwd = "/Users/xxx/project"
+        started_at = "2026-08-20T08:03:21.000Z"
+        expected = server.parse_timestamp(started_at)
+        with tempfile.TemporaryDirectory() as home, (
+            mock.patch.object(server, "HOME", home)
+        ), mock.patch.object(server, "log_meta", return_value={}):
+            project = os.path.join(
+                home, ".claude", "projects", server.claude_project_dir(cwd)
+            )
+            os.makedirs(project)
+            log_path = os.path.join(project, f"{session_id}.jsonl")
+            with open(log_path, "w", encoding="utf-8") as output:
+                output.write(json.dumps({
+                    "type": "attachment",
+                    "timestamp": started_at,
+                    "sessionId": session_id,
+                }) + "\n")
+            delayed_file_time = expected + 180
+            os.utime(log_path, (delayed_file_time, delayed_file_time))
+
+            candidates = server.resume_candidates("claude", cwd)
+
+        self.assertEqual(expected, candidates[0]["created"])
 
 
 class ClaudeShellCommandTest(unittest.TestCase):

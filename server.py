@@ -208,6 +208,8 @@ CODEX_HEAD_CACHE = {}
 # claudeログの cwd も書き換わらないのでパス単位で保持する。
 CLAUDE_CWD_LOCK = threading.Lock()
 CLAUDE_CWD_CACHE = {}
+CLAUDE_START_LOCK = threading.Lock()
+CLAUDE_START_CACHE = {}
 # 返事待ちセッションの「誰のアクション待ちか」分類。haiku 呼び出しは数秒かかるので
 # バックグラウンドで実行し、(mtime, size) キーで結果をメモ化する。
 WAIT_CLASS_LOCK = threading.Lock()
@@ -1920,6 +1922,32 @@ def claude_session_cwd(path):
     return cwd
 
 
+def claude_session_started(path):
+    """Claudeログ内の最初のタイムスタンプをepoch秒で返す。"""
+    with CLAUDE_START_LOCK:
+        cached = CLAUDE_START_CACHE.get(path)
+    if cached is not None:
+        return cached
+    started = next(
+        (
+            timestamp
+            for item in read_json_lines(path, 40)
+            if (timestamp := parse_timestamp(item.get("timestamp", "")))
+        ),
+        0.0,
+    )
+    # 起動直後の空ファイルを永続キャッシュすると、後から書かれたSessionStartを
+    # 読めなくなるため、有効な時刻が取れた場合だけ保存する。
+    if started:
+        with CLAUDE_START_LOCK:
+            CLAUDE_START_CACHE[path] = started
+            for old in list(CLAUDE_START_CACHE)[:
+                len(CLAUDE_START_CACHE) - LOG_META_LIMIT
+            ]:
+                CLAUDE_START_CACHE.pop(old, None)
+    return started
+
+
 def stat_entry(path, session_id):
     try:
         stat = os.stat(path)
@@ -1991,6 +2019,13 @@ def resume_candidates(tool, cwd, explicit_id=""):
         entries.sort(key=lambda item: item["id"] != explicit_id)
     candidates = entries[:10]
     for item in candidates:
+        if tool == "claude":
+            # プロンプトなしで起動すると、JSONLファイル自体は最初の入力まで
+            # 作られないことがある。ファイル作成時刻ではなくログ内の
+            # SessionStart時刻を使い、tmuxセッションとの対応を復元する。
+            started = claude_session_started(item["path"])
+            if started:
+                item["created"] = started
         meta = log_meta(item["path"], tool) if item["path"] else {}
         item["summary"] = meta.get("summary", "")
         item["last_message"] = meta.get("last_message", "")
@@ -3782,8 +3817,6 @@ TERMINAL_PAGE = r"""<!doctype html>
     }} else closeReview();
   }});
   if (document.body.classList.contains("review-open")) openReview();
-  if (reviewOpenMode !== "never") loadPullRequest();
-  else reviewMessage.textContent = "差分ボタンからPRを読み込めます";
   if (noteButton) noteButton.addEventListener("click", () => {{
     noteInput.value = sessionNote;
     noteModal.hidden = false;
@@ -3829,6 +3862,10 @@ TERMINAL_PAGE = r"""<!doctype html>
     autoGrow();
   }}
   input.addEventListener("input", syncInput);
+  // loadPullRequest() は開始直後に clearDiffSelection() → syncInput() を呼ぶ。
+  // 下書き用の draftKey と syncInput の初期化後に自動読み込みを始める。
+  if (reviewOpenMode !== "never") loadPullRequest();
+  else reviewMessage.textContent = "差分ボタンからPRを読み込めます";
   let lastOutput = "";
   let lastMessages = "";
   let followOutput = true;
