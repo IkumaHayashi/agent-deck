@@ -16,7 +16,7 @@ SPEC.loader.exec_module(server)
 
 class FrontendTemplateTest(unittest.TestCase):
     def test_new_page_uses_external_frontend_assets(self):
-        page = server.render(host="localhost:8787")
+        page = server.render()
 
         self.assertIn('/static/new.css?v=', page)
         self.assertIn('/static/new.js?v=', page)
@@ -36,7 +36,7 @@ class FrontendTemplateTest(unittest.TestCase):
             mock.patch.object(server, "recent_conversations", return_value=[conversation]),
             mock.patch.object(server, "resume_group_dir", return_value=conversation["cwd"]),
         ):
-            page = server.render(host="localhost:8787")
+            page = server.render()
 
         self.assertIn('id="resume-id-filter"', page)
         self.assertIn(f'data-resume-id="{conversation["id"]}"', page)
@@ -59,7 +59,7 @@ class FrontendTemplateTest(unittest.TestCase):
             mock.patch.object(server, "CW_ENABLED", True),
             mock.patch.object(server, "PINNED", [("demo", "/Users/demo/project")]),
         ):
-            page = server.render(host="localhost:8787")
+            page = server.render()
 
         self.assertEqual(1, page.count('id="inbox-open"'))
         self.assertIn('class="prompt-actions"', page)
@@ -152,6 +152,14 @@ class FrontendTemplateTest(unittest.TestCase):
         )
         # 引用が入力欄の表示域より長くてもカーソル位置まで送る
         self.assertIn("input.scrollTop = input.scrollHeight", server.TERMINAL_PAGE)
+
+    def test_expanded_bubble_stays_open_when_new_messages_arrive(self):
+        # 履歴APIは末尾300件しか返さないので、展開キーに位置(index)を使うと
+        # 新着のたびにずれて「全文を表示」した吹き出しが畳み直されてしまう
+        self.assertNotIn('"|" + index + "|"', server.TERMINAL_PAGE)
+        self.assertIn(
+            'item.text.slice(0, 80) + item.text.slice(-80)', server.TERMINAL_PAGE
+        )
 
     def test_page_navigation_shows_loading_overlay(self):
         self.assertIn("#nav-loading", server.SIDEBAR_CSS)

@@ -43,7 +43,6 @@
   .review-request form { margin: 0; }
   .review-request button { width: 100%; padding: 9px; border: 1px solid #8884;
     border-radius: 8px; background: #6c5ce71a; cursor: pointer; }
-  .bookmarklet { display: inline-block; text-decoration: none; color: inherit; }
   .launch-settings { padding: 14px; border: 1px solid #8883; border-radius: 12px; }
   .settings-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .setting-label { display: block; margin-bottom: 5px; color: #999; font-size: .78rem;

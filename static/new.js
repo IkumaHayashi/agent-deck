@@ -121,7 +121,7 @@
   // 最初のプロンプト欄への画像ペースト。アップロードしてパスを本文に差し込む
   var promptBox = document.getElementById("prompt");
   var promptStatus = document.getElementById("prompt-status");
-  // ブックマークレット等からの ?prompt=... でプロンプト欄をプリフィルする
+  // 外部ツールからの ?prompt=... でプロンプト欄をプリフィルする
   var prefill = new URLSearchParams(location.search).get("prompt");
   if (prefill) {
     document.getElementById("prompt-details").open = true;

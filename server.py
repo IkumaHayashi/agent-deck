@@ -4136,7 +4136,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     }}
     const lastItem = messages[messages.length - 1];
     const collapsible = [];
-    for (const [index, item] of messages.entries()) {{
+    for (const item of messages) {{
       const row = document.createElement("div");
       row.className = "message " + item.role + (item.pending ? " pending" : "");
       const bubble = document.createElement("div"); bubble.className = "bubble";
@@ -4152,9 +4152,13 @@ TERMINAL_PAGE = r"""<!doctype html>
         }});
       }}
       row.append(bubble); chat.append(row);
-      // 最新の回答は読みに来た本文なので畳まない。それ以外の長文は折りたたみ候補
+      // 最新の回答は読みに来た本文なので畳まない。それ以外の長文は折りたたみ候補。
+      // キーは内容ベースにする。履歴APIは末尾300件だけ返すため、位置（index）を
+      // 使うと新着のたびにずれて、展開した吹き出しが畳み直されてしまう
       if (!(item === lastItem && item.role === "assistant") && !bubble.querySelector(".pdf-card")) {{
-        collapsible.push({{row, bubble, key: item.role + "|" + index + "|" + item.text.length}});
+        const key = item.role + "|" + item.text.length + "|"
+          + item.text.slice(0, 80) + item.text.slice(-80);
+        collapsible.push({{row, bubble, key}});
       }}
     }}
     // スキル展開や長い貼り付けで縦に伸びすぎないよう、高さ超過分だけ畳む
@@ -4537,21 +4541,6 @@ TERMINAL_PAGE = r"""<!doctype html>
 </script></body></html>"""
 
 
-# 閲覧中ページの URL・タイトル・選択テキストを /new のプロンプト欄に送る。
-# bookmarklet.js と同一内容。アドレスバー貼り付けでは javascript: が削られるため、
-# /new ページからブックマークバーへドラッグして登録させる。
-def bookmarklet_js(origin):
-    """閲覧中ページを /new に送るブックマークレット。origin はリクエストの Host から決める。"""
-    return (
-        'javascript:(function(){var s=String(getSelection()||"").trim();'
-        'var p="以下のページを確認して対応してください。\\n"+location.href'
-        '+"\\nタイトル: "+document.title;'
-        'if(s){p+="\\n\\n選択テキスト:\\n"+s.slice(0,6000);}'
-        f'window.open("{origin}/new?prompt="'
-        '+encodeURIComponent(p),"_blank");})();'
-    )
-
-
 # Chatwork 連携が有効なときだけ /new に差し込む受信箱パネル
 CHATWORK_PANEL = """<section class="launcher-panel" id="inbox-panel">
 <div class="cw-head"><button class="cw-set" id="inbox-back" type="button">‹ プロンプトへ戻る</button><button class="cw-refresh" id="cw-refresh" type="button">🔄 更新</button></div>
@@ -4563,10 +4552,9 @@ CHATWORK_PANEL = """<section class="launcher-panel" id="inbox-panel">
 <div id="cw-room-messages"></div></section>"""
 
 
-def render(message="", view="new", host=None):
+def render(message="", view="new"):
     # view は旧・一覧ページ時代の名残。呼び出し側の互換のため残している。
     del view
-    origin = f"http://{host}" if host else f"http://localhost:{PORT}"
     buttons = "\n".join(
         f'<form class="launch" method="post" action="/launch">'
         f'<input type="hidden" name="dir" value="{html.escape(path)}">'
@@ -4621,7 +4609,6 @@ def render(message="", view="new", host=None):
         static_version=urllib.parse.quote(BOOT_ID),
         message=message, buttons=buttons, options=options, resume_items=resume_items,
         models_claude=model_radios("claude"), models_codex=model_radios("codex"),
-        bookmarklet=html.escape(bookmarklet_js(origin)),
         inbox_prompt_button=inbox_prompt_button,
         chatwork_panel=CHATWORK_PANEL if CW_ENABLED else "",
     )
@@ -4722,7 +4709,7 @@ class Handler(BaseHTTPRequestHandler):
         if icon_match:
             return self._tool_icon(icon_match.group(1))
         if parsed.path == "/new":
-            return self._page(render(view="new", host=self.headers.get("Host")))
+            return self._page(render(view="new"))
         if parsed.path in {"/", "/sessions"}:
             # デフォルトはセッション一覧。PCは右ペインで選択か新規起動を促し、
             # SPは一覧のみを全画面表示する。0件でもランチャーへ自動遷移しない。
