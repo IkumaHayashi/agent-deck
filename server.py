@@ -2086,6 +2086,63 @@ def resume_group_dir(cwd):
     return os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git" else cwd
 
 
+def linked_worktree_info(cwd):
+    """cwd がリンク worktree 内なら、worktree ルートと common git dir を返す。"""
+    try:
+        result = subprocess.run(
+            [
+                find_bin("git"), "-C", cwd, "rev-parse", "--path-format=absolute",
+                "--show-toplevel", "--absolute-git-dir", "--git-common-dir",
+            ],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    paths = result.stdout.splitlines() if result.returncode == 0 else []
+    if len(paths) != 3:
+        return None
+    root, git_dir, common_dir = (os.path.realpath(path) for path in paths)
+    # 通常の作業ツリーでは git dir と common dir が同じ。リンク worktree だけが
+    # .git/worktrees/<name> と共通の .git に分かれる。
+    if git_dir == common_dir:
+        return None
+    return {"path": root, "git_common_dir": common_dir}
+
+
+def path_is_within(path, directory):
+    """path が directory 自身または配下かを、実体パスで判定する。"""
+    try:
+        return os.path.commonpath(
+            [os.path.realpath(path), os.path.realpath(directory)]
+        ) == os.path.realpath(directory)
+    except (OSError, ValueError):
+        return False
+
+
+def remove_session_worktree(cwd, other_cwds=()):
+    """セッション専用のリンク worktree を安全に削除する。
+
+    メイン作業ツリーと Git 管理外は対象外。同じ worktree を別セッションが
+    使っている場合は、最後のセッション終了時まで削除を保留する。
+    """
+    info = linked_worktree_info(cwd)
+    if not info:
+        return False
+    if any(path_is_within(other_cwd, info["path"]) for other_cwd in other_cwds):
+        return False
+    result = subprocess.run(
+        [
+            find_bin("git"), "--git-dir", info["git_common_dir"],
+            "worktree", "remove", info["path"],
+        ],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise RuntimeError(detail or "ワークツリーを削除できませんでした")
+    return True
+
+
 def conversation_log_path(tool, cwd, session_id):
     """cwd の会話ログから session_id のファイルを探す。見つからなければ空文字。"""
     if tool == "claude":
@@ -2312,6 +2369,40 @@ def valid_session(name):
     if not re.fullmatch(r"agent-[A-Za-z0-9_.-]+", name or ""):
         return False
     return any(item["name"] == name for item in managed_sessions())
+
+
+def other_tmux_cwds(name):
+    """終了対象以外の tmux pane が使っているディレクトリを返す。"""
+    result = tmux_run(
+        "list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}"
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            result.stderr.strip() or "他のセッションの作業場所を確認できませんでした"
+        )
+    cwds = []
+    for line in result.stdout.splitlines():
+        session_name, separator, pane_cwd = line.partition("\t")
+        if separator and session_name != name and pane_cwd:
+            cwds.append(pane_cwd)
+    return cwds
+
+
+def terminate_session(name, cwd):
+    """tmux セッションを終了し、専用 worktree があれば続けて削除する。"""
+    # キャッシュされた管理セッション一覧ではなく tmux の現在値を見る。
+    # 別 pane が同じ worktree を利用中なら、削除を保留するために必要になる。
+    other_cwds = other_tmux_cwds(name)
+    result = tmux_run("kill-session", "-t", name)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "終了できませんでした")
+    invalidate_session_cache()
+    try:
+        return remove_session_worktree(cwd, other_cwds)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        raise RuntimeError(
+            f"セッションは終了しましたが、ワークツリーを削除できませんでした: {exc}"
+        ) from exc
 
 
 def dir_label(cwd):
@@ -4477,7 +4568,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   }});
   document.querySelectorAll("[data-key]").forEach(button => button.addEventListener("click", () => post("/api/sessions/" + encodeURIComponent(session) + "/key", {{key: button.dataset.key}}).then(refresh).catch(e => status.textContent = e.message)));
   document.getElementById("kill").addEventListener("click", async () => {{
-    if (!await askConfirm("このセッションを終了しますか？")) return;
+    if (!await askConfirm("このセッションを終了しますか？リンクされたGitワークツリーで作業中の場合は、ワークツリーも削除します。")) return;
     showNavLoading("セッションを終了中...");
     try {{
       await post("/api/sessions/" + encodeURIComponent(session) + "/kill", {{}});
@@ -5161,10 +5252,12 @@ class Handler(BaseHTTPRequestHandler):
                     if result.returncode != 0:
                         raise RuntimeError(result.stderr.strip() or "キーを送信できませんでした")
                 elif action == "kill":
-                    result = tmux_run("kill-session", "-t", session)
-                    if result.returncode != 0:
-                        raise RuntimeError(result.stderr.strip() or "終了できませんでした")
-                    invalidate_session_cache()
+                    items = managed_sessions()
+                    item = next(item for item in items if item["name"] == session)
+                    worktree_removed = terminate_session(session, item["cwd"])
+                    return self._json({
+                        "ok": True, "worktree_removed": worktree_removed,
+                    })
                 elif action == "handoff":
                     item = next(item for item in managed_sessions() if item["name"] == session)
                     new_session = self._handoff_session(session, item)

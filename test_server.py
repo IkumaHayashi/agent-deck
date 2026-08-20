@@ -184,6 +184,108 @@ class FrontendTemplateTest(unittest.TestCase):
         )
 
 
+class WorktreeCleanupTest(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.repo = os.path.join(self.temp_dir.name, "repo")
+        os.makedirs(self.repo)
+        self.git("init", self.repo)
+        readme = os.path.join(self.repo, "README.md")
+        with open(readme, "w", encoding="utf-8") as output:
+            output.write("test\n")
+        self.git("-C", self.repo, "add", "README.md")
+        self.git(
+            "-C", self.repo, "-c", "user.name=Agent Deck",
+            "-c", "user.email=agent-deck@example.com", "commit", "-m", "初期化",
+        )
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    @staticmethod
+    def git(*args):
+        return server.subprocess.run(
+            [server.find_bin("git"), *args], check=True,
+            capture_output=True, text=True,
+        )
+
+    def add_worktree(self, name="feature"):
+        path = os.path.join(self.temp_dir.name, name)
+        self.git("-C", self.repo, "worktree", "add", "-b", name, path)
+        return path
+
+    def test_main_worktree_is_not_cleanup_target(self):
+        self.assertIsNone(server.linked_worktree_info(self.repo))
+        self.assertFalse(server.remove_session_worktree(self.repo))
+        self.assertTrue(os.path.isdir(self.repo))
+
+    def test_clean_linked_worktree_is_removed(self):
+        worktree = self.add_worktree()
+        child = os.path.join(worktree, "src")
+        os.makedirs(child)
+
+        info = server.linked_worktree_info(child)
+        removed = server.remove_session_worktree(child)
+
+        self.assertEqual(os.path.realpath(worktree), info["path"])
+        self.assertTrue(removed)
+        self.assertFalse(os.path.exists(worktree))
+
+    def test_worktree_in_use_by_another_session_is_kept(self):
+        worktree = self.add_worktree()
+
+        removed = server.remove_session_worktree(
+            worktree, [os.path.join(worktree, "nested")]
+        )
+
+        self.assertFalse(removed)
+        self.assertTrue(os.path.isdir(worktree))
+
+    def test_dirty_worktree_is_kept(self):
+        worktree = self.add_worktree()
+        dirty_file = os.path.join(worktree, "untracked.txt")
+        with open(dirty_file, "w", encoding="utf-8") as output:
+            output.write("keep me\n")
+
+        with self.assertRaisesRegex(RuntimeError, "modified or untracked"):
+            server.remove_session_worktree(worktree)
+
+        self.assertTrue(os.path.isfile(dirty_file))
+
+    def test_session_is_terminated_before_cleanup_error_is_reported(self):
+        panes = SimpleNamespace(
+            returncode=0, stdout="agent-test\t/tmp/worktree\n", stderr=""
+        )
+        killed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(
+                server, "tmux_run", side_effect=[panes, killed]
+            ) as tmux,
+            mock.patch.object(server, "invalidate_session_cache") as invalidate,
+            mock.patch.object(
+                server, "remove_session_worktree",
+                side_effect=RuntimeError("変更があります"),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError, "セッションは終了しましたが.*変更があります"
+            ):
+                server.terminate_session("agent-test", "/tmp/worktree")
+
+        self.assertEqual(
+            ("kill-session", "-t", "agent-test"), tmux.call_args_list[1].args
+        )
+        invalidate.assert_called_once_with()
+
+    def test_session_is_not_terminated_when_other_panes_cannot_be_checked(self):
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="tmux failed")
+        with mock.patch.object(server, "tmux_run", return_value=failed) as tmux:
+            with self.assertRaisesRegex(RuntimeError, "tmux failed"):
+                server.terminate_session("agent-test", "/tmp/worktree")
+
+        tmux.assert_called_once()
+
+
 class CodexSessionTest(unittest.TestCase):
     def setUp(self):
         server.CODEX_HEAD_CACHE.clear()
