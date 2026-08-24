@@ -220,9 +220,9 @@ WAIT_CLASS_CACHE = {}
 WAIT_CLASS_PENDING = set()
 WAIT_CLASS_RETRY = 120  # 分類失敗時に再試行するまでの秒数
 WAIT_CLASS_MODEL = CONFIG.get("wait_classifier_model", "haiku")
-PR_DIFF_OPEN = CONFIG.get("pr_diff_open", "never")
-if PR_DIFF_OPEN not in {"auto", "always", "never"}:
-    PR_DIFF_OPEN = "never"
+DIFF_OPEN = CONFIG.get("diff_open", CONFIG.get("pr_diff_open", "never"))
+if DIFF_OPEN not in {"auto", "always", "never"}:
+    DIFF_OPEN = "never"
 CLAUDE_BIN = find_bin("claude", CONFIG.get("claude_bin"))
 CODEX_BIN = find_bin("codex", CONFIG.get("codex_bin"))
 CW_INITIAL_ROOM_LIMIT = 20
@@ -1758,40 +1758,134 @@ def normalize_pr_selector(value):
     return value.rstrip("/") if value.startswith("https://") else match.group(1)
 
 
-def pull_request_diff(cwd, selector=""):
-    """cwd の現在ブランチ、または指定されたPRのメタデータと差分を取得する。"""
-    selector = normalize_pr_selector(selector)
+def _verified_git_ref(git, cwd, ref):
+    """ローカルに存在する Git ref だけを返す。"""
+    result = subprocess.run(
+        [git, "rev-parse", "--verify", "--quiet", ref], cwd=cwd,
+        capture_output=True, text=True, timeout=5,
+    )
+    return ref if result.returncode == 0 else ""
+
+
+def git_default_branch(cwd):
+    """cwd のリポジトリについて、デフォルトブランチ名と比較用refを返す。"""
     if not cwd or not os.path.isdir(cwd):
         raise ValueError("セッションの作業ディレクトリが見つかりません")
-    gh = find_bin("gh")
-    target = [selector] if selector else []
-    fields = "number,title,url,state,baseRefName,headRefName,files"
-    metadata = subprocess.run(
-        [gh, "pr", "view", *target, "--json", fields],
-        cwd=cwd, capture_output=True, text=True, timeout=20,
-        env={**os.environ, "NO_COLOR": "1"},
+    git = find_bin("git")
+    inside = subprocess.run(
+        [git, "rev-parse", "--is-inside-work-tree"], cwd=cwd,
+        capture_output=True, text=True, timeout=5,
     )
-    if metadata.returncode != 0:
-        detail = metadata.stderr.strip()
-        if not selector:
-            raise LookupError("現在のブランチに紐づくPRが見つかりません")
-        raise LookupError(detail or "PRが見つかりません")
-    try:
-        result = json.loads(metadata.stdout)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("GitHubから返されたPR情報を読み取れませんでした") from exc
-    diff_target = selector or str(result.get("number") or "")
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        raise LookupError("作業ディレクトリはGitリポジトリではありません")
+
+    remotes_result = subprocess.run(
+        [git, "remote"], cwd=cwd, capture_output=True, text=True, timeout=5,
+    )
+    remotes = remotes_result.stdout.split() if remotes_result.returncode == 0 else []
+    remotes.sort(key=lambda remote: remote != "origin")
+    for remote in remotes:
+        symbolic = subprocess.run(
+            [git, "symbolic-ref", "--quiet", "--short", f"refs/remotes/{remote}/HEAD"],
+            cwd=cwd, capture_output=True, text=True, timeout=5,
+        )
+        ref = symbolic.stdout.strip() if symbolic.returncode == 0 else ""
+        if ref.startswith(f"{remote}/") and _verified_git_ref(git, cwd, ref):
+            return ref.removeprefix(f"{remote}/"), ref
+
+    # origin/HEAD が未設定のcloneでも、remoteのHEADから正確な名前を取得する。
+    # ネットワークが使えない場合は後段のローカルrefによる推定へフォールバックする。
+    for remote in remotes:
+        try:
+            remote_head = subprocess.run(
+                [git, "ls-remote", "--symref", remote, "HEAD"], cwd=cwd,
+                capture_output=True, text=True, timeout=10,
+            )
+        except subprocess.TimeoutExpired:
+            continue
+        match = re.search(r"^ref: refs/heads/(.+)\tHEAD$", remote_head.stdout, re.MULTILINE)
+        if not match:
+            continue
+        branch = match.group(1)
+        ref = _verified_git_ref(git, cwd, f"{remote}/{branch}")
+        ref = ref or _verified_git_ref(git, cwd, f"refs/heads/{branch}")
+        if ref:
+            return branch, ref
+
+    for branch in ("main", "master"):
+        for ref in [*(f"{remote}/{branch}" for remote in remotes), f"refs/heads/{branch}"]:
+            if _verified_git_ref(git, cwd, ref):
+                return branch, ref
+    raise LookupError("デフォルトブランチを特定できません")
+
+
+def _parse_git_numstat(output):
+    """git diff --numstat -z を画面用のファイル一覧へ変換する。"""
+    entries = output.split("\0")
+    files = []
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry:
+            continue
+        parts = entry.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        additions, deletions, path = parts
+        if not path and index + 1 < len(entries):
+            # rename/copy は空のpathに old, new の2要素が続く。
+            index += 1
+            path = entries[index]
+            index += 1
+        files.append({
+            "path": path,
+            "additions": int(additions) if additions.isdigit() else 0,
+            "deletions": int(deletions) if deletions.isdigit() else 0,
+        })
+    return files
+
+
+def directory_diff(cwd):
+    """cwd の作業ツリーと、そのリポジトリのデフォルトブランチとの差分を返す。"""
+    branch, base_ref = git_default_branch(cwd)
+    git = find_bin("git")
+    current = subprocess.run(
+        [git, "branch", "--show-current"], cwd=cwd,
+        capture_output=True, text=True, timeout=5,
+    )
+    if current.returncode != 0:
+        raise RuntimeError(current.stderr.strip() or "現在のブランチを取得できませんでした")
+    head = current.stdout.strip() or "HEAD (detached)"
+    merge_base = subprocess.run(
+        [git, "merge-base", base_ref, "HEAD"], cwd=cwd,
+        capture_output=True, text=True, timeout=5,
+    )
+    if merge_base.returncode != 0 or not merge_base.stdout.strip():
+        raise RuntimeError(merge_base.stderr.strip() or "デフォルトブランチとの分岐点を取得できませんでした")
+    # デフォルトブランチ側だけで進んだ変更は除外し、分岐後の作業ツリー全体
+    # （コミット済み・staged・unstaged）をレビュー対象にする。
+    common_args = ["--no-ext-diff", "--find-renames", merge_base.stdout.strip(), "--"]
+    stats = subprocess.run(
+        [git, "diff", "--numstat", "-z", *common_args], cwd=cwd,
+        capture_output=True, text=True, timeout=20,
+    )
+    if stats.returncode != 0:
+        raise RuntimeError(stats.stderr.strip() or "変更ファイルを取得できませんでした")
     diff = subprocess.run(
-        [gh, "pr", "diff", diff_target, "--patch"],
-        cwd=cwd, capture_output=True, text=True, timeout=30,
-        env={**os.environ, "NO_COLOR": "1"},
+        [git, "diff", "--patch", *common_args], cwd=cwd,
+        capture_output=True, text=True, timeout=30,
     )
     if diff.returncode != 0:
-        raise RuntimeError(diff.stderr.strip() or "PRの差分を取得できませんでした")
+        raise RuntimeError(diff.stderr.strip() or "差分を取得できませんでした")
     if len(diff.stdout.encode("utf-8")) > 5 * 1024 * 1024:
-        raise ValueError("差分が5MBを超えています。GitHubで確認してください")
-    result["patch"] = diff.stdout
-    return result
+        raise ValueError("差分が5MBを超えています。Gitで確認してください")
+    return {
+        "baseRefName": branch,
+        "headRefName": head,
+        "files": _parse_git_numstat(stats.stdout),
+        "patch": diff.stdout,
+    }
 
 
 def local_projects():
@@ -3467,14 +3561,9 @@ TERMINAL_PAGE = r"""<!doctype html>
   .review-title-row {{ display: flex; align-items: center; gap: 8px; }}
   .review-title-row strong {{ min-width: 0; flex: 1; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }}
-  .review-title-row a {{ color: #58a6ff; text-decoration: none; }}
   .review-title-row button {{ flex: 0 0 auto; width: auto; padding: 5px 9px; font-size: .82rem; }}
   .review-meta {{ margin-top: 4px; color: #8b949e; font-size: .76rem; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }}
-  .review-picker {{ display: flex; gap: 6px; margin-top: 8px; }}
-  .review-picker input {{ min-width: 0; flex: 1; padding: 7px 9px; color: #e6edf3;
-    background: #0d1117; border: 1px solid #484f58; border-radius: 7px; font-size: .82rem; }}
-  .review-picker button {{ flex: 0 0 auto; width: auto; padding: 7px 10px; font-size: .82rem; }}
   #review-content {{ flex: 1; min-height: 0; display: flex; flex-direction: column; }}
   #review-message {{ padding: 20px; color: #8b949e; line-height: 1.5; }}
   #review-files {{ flex-shrink: 0; max-height: 30%; overflow-y: auto;
@@ -3660,27 +3749,21 @@ TERMINAL_PAGE = r"""<!doctype html>
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
 <small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
-<button type="button" id="review-toggle" title="PR差分"><span class="label">差分</span><span class="icon">±</span></button>
+<button type="button" id="review-toggle" title="デフォルトブランチとの差分"><span class="label">差分</span><span class="icon">±</span></button>
 <button type="button" id="menu-toggle" aria-label="メニュー">☰</button></header>
 <div id="artifacts">{artifacts_html}</div>
 <div id="chat"><div class="chat-empty">会話を読み込み中...</div></div>
 <pre id="screen" hidden>接続中...</pre>
-<section id="review-pane" aria-label="PR差分">
+<section id="review-pane" aria-label="デフォルトブランチとの差分">
   <div class="review-head">
-    <div class="review-title-row"><strong id="review-title">PR差分</strong>
-      <a id="review-link" target="_blank" rel="noopener" hidden>GitHub ↗</a>
-      <button type="button" id="review-unlink" title="PRの紐づけを解除" hidden>解除</button>
+    <div class="review-title-row"><strong id="review-title">変更差分</strong>
       <button type="button" id="review-refresh" title="再読み込み">↻</button>
       <button type="button" id="review-close" title="チャットに戻る">×</button>
     </div>
-    <div class="review-meta" id="review-meta">現在のブランチからPRを探します</div>
-    <form class="review-picker" id="review-picker">
-      <input id="review-pr" inputmode="numeric" placeholder="PR番号またはGitHub PR URL">
-      <button type="submit">表示</button>
-    </form>
+    <div class="review-meta" id="review-meta">デフォルトブランチと比較します</div>
   </div>
   <div id="review-content">
-    <div id="review-message">PR差分を読み込み中...</div>
+    <div id="review-message">差分を読み込み中...</div>
     <div id="review-selection" hidden><span id="review-selection-count"></span>
       <button type="button" id="review-selection-clear">解除</button></div>
     <div id="review-files" hidden></div>
@@ -3737,19 +3820,14 @@ TERMINAL_PAGE = r"""<!doctype html>
   const reviewPane = document.getElementById("review-pane");
   const reviewTitle = document.getElementById("review-title");
   const reviewMeta = document.getElementById("review-meta");
-  const reviewLink = document.getElementById("review-link");
   const reviewMessage = document.getElementById("review-message");
   const reviewFiles = document.getElementById("review-files");
   const reviewDiff = document.getElementById("review-diff");
-  const reviewPr = document.getElementById("review-pr");
-  const reviewUnlink = document.getElementById("review-unlink");
   const reviewToggle = document.getElementById("review-toggle");
   const reviewSelection = document.getElementById("review-selection");
   const reviewSelectionCount = document.getElementById("review-selection-count");
-  const reviewKey = "reviewPr:" + session;
-  const reviewOpenMode = {pr_diff_open_json};
-  let linkedPullRequest = {pr_selector_json};
-  let reviewSelector = linkedPullRequest || localStorage.getItem(reviewKey) || "";
+  const reviewOpenMode = {diff_open_json};
+  const linkedPullRequest = {pr_selector_json};
   let reviewData = null;
   let reviewManuallyOpened = false;
   const selectedDiffLines = new Map();
@@ -3762,8 +3840,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       if (!groups.has(item.path)) groups.set(item.path, []);
       groups.get(item.path).push(item);
     }}
-    const prLabel = reviewData ? "PR " + reviewData.url + " の" : "";
-    const parts = [prLabel + "以下の選択行について確認してください。"];
+    const parts = ["以下の選択行について確認してください。"];
     for (const [path, items] of groups) {{
       items.sort((a, b) => a.index - b.index);
       const numbers = items.map(item => item.line).join(", ");
@@ -3795,13 +3872,12 @@ TERMINAL_PAGE = r"""<!doctype html>
   const reviewSeedKey = "reviewSeed:" + session;
   // 端末内のAIはPRの紐づけを知らないため、レビュー対象を伝える書き出しを
   // 入力欄へ一度だけプリセットする。送信するかどうかはユーザーに任せる
-  function seedReviewContext(data) {{
+  function seedReviewContext() {{
     if (!linkedPullRequest || document.body.classList.contains("readonly")) return;
-    if (localStorage.getItem(reviewSeedKey) === data.url) return;
-    localStorage.setItem(reviewSeedKey, data.url);
-    if (input.value.includes(data.url)) return;
-    input.value = "PR " + data.url + "（" + data.baseRefName + " ← " + data.headRefName
-      + "）をレビューしています。\n" + input.value;
+    if (localStorage.getItem(reviewSeedKey) === linkedPullRequest) return;
+    localStorage.setItem(reviewSeedKey, linkedPullRequest);
+    if (input.value.includes(linkedPullRequest)) return;
+    input.value = "PR " + linkedPullRequest + " をレビューしています。\n" + input.value;
     syncInput();
   }}
   // 拡張子から言語グループを引き、行単位の正規表現でトークン色分けする。
@@ -3962,13 +4038,11 @@ TERMINAL_PAGE = r"""<!doctype html>
     updateDiffSelection();
     reviewDiff.hidden = false;
   }}
-  function renderPullRequest(data) {{
+  function renderDirectoryDiff(data) {{
     reviewData = data;
-    reviewTitle.textContent = "#" + data.number + " " + data.title;
+    reviewTitle.textContent = "変更差分";
     reviewMeta.textContent = data.baseRefName + " ← " + data.headRefName + " · "
-      + data.state + " · " + (data.files || []).length + " files";
-    reviewLink.href = data.url; reviewLink.hidden = false;
-    reviewUnlink.hidden = !linkedPullRequest;
+      + (data.files || []).length + " files";
     reviewMessage.hidden = true; reviewFiles.hidden = false; reviewDiff.hidden = false;
     const patches = splitPatch(data.patch);
     const files = data.files || [];
@@ -3995,55 +4069,33 @@ TERMINAL_PAGE = r"""<!doctype html>
     reviewToggle.querySelector(".icon").textContent = "💬";
     reviewToggle.title = "チャットに戻る";
   }}
-  async function loadPullRequest(selector = reviewSelector, userInitiated = false) {{
+  async function loadDirectoryDiff(userInitiated = false) {{
     clearDiffSelection();
-    reviewSelector = selector.trim(); reviewPr.value = reviewSelector;
-    reviewMessage.hidden = false; reviewMessage.textContent = "PR差分を読み込み中...";
-    reviewFiles.hidden = true; reviewDiff.hidden = true; reviewLink.hidden = true;
-    reviewTitle.textContent = "PR差分";
+    reviewMessage.hidden = false; reviewMessage.textContent = "差分を読み込み中...";
+    reviewFiles.hidden = true; reviewDiff.hidden = true;
+    reviewTitle.textContent = "変更差分";
     try {{
-      const query = reviewSelector ? "?pr=" + encodeURIComponent(reviewSelector) : "";
-      // サーバ側のgh呼び出しは最長50秒（20+30）。それを超えて待ち続けないよう
+      // サーバ側のGit呼び出しを超えて待ち続けないよう
       // クライアント側でも打ち切り、↻で再試行できるようにする
       const response = await fetch(
-        "/api/sessions/" + encodeURIComponent(session) + "/pull-request" + query,
+        "/api/sessions/" + encodeURIComponent(session) + "/diff",
         {{signal: AbortSignal.timeout(55000)}});
       const data = await response.json();
-      if (!response.ok) throw new Error(data.error || "PR差分を取得できませんでした");
-      if (userInitiated && !document.body.classList.contains("readonly")) {{
-        await post("/api/sessions/" + encodeURIComponent(session) + "/pull-request", {{pr: data.url}});
-        linkedPullRequest = data.url; reviewSelector = data.url;
-        localStorage.removeItem(reviewKey);
-      }} else if (reviewSelector && !linkedPullRequest) {{
-        localStorage.setItem(reviewKey, reviewSelector);
-      }}
-      renderPullRequest(data);
-      seedReviewContext(data);
+      if (!response.ok) throw new Error(data.error || "差分を取得できませんでした");
+      renderDirectoryDiff(data);
+      seedReviewContext();
       if (userInitiated) openReview();
       else if (reviewOpenMode !== "never") openReview();
     }} catch (error) {{
-      reviewMeta.textContent = "PR番号またはURLを指定できます";
+      reviewMeta.textContent = "デフォルトブランチと比較します";
       reviewMessage.textContent = error.name === "TimeoutError"
-        ? "PR差分の取得がタイムアウトしました。↻で再試行してください"
+        ? "差分の取得がタイムアウトしました。↻で再試行してください"
         : error.message;
       if (!userInitiated && !reviewManuallyOpened && reviewOpenMode === "auto") closeReview();
     }}
   }}
-  document.getElementById("review-picker").addEventListener("submit", event => {{
-    event.preventDefault(); reviewManuallyOpened = true; clearDiffSelection();
-    loadPullRequest(reviewPr.value, true);
-  }});
   document.getElementById("review-selection-clear").addEventListener("click", clearDiffSelection);
-  document.getElementById("review-refresh").addEventListener("click", () => loadPullRequest(reviewSelector, true));
-  reviewUnlink.addEventListener("click", async () => {{
-    try {{
-      await post("/api/sessions/" + encodeURIComponent(session) + "/pull-request", {{pr: ""}});
-      linkedPullRequest = ""; reviewSelector = ""; reviewUnlink.hidden = true;
-      localStorage.removeItem(reviewKey); localStorage.removeItem(reviewSeedKey);
-      reviewPr.value = "";
-      await loadPullRequest("", false);
-    }} catch (error) {{ reviewMessage.hidden = false; reviewMessage.textContent = error.message; }}
-  }});
+  document.getElementById("review-refresh").addEventListener("click", () => loadDirectoryDiff(true));
   function closeReview() {{
     reviewManuallyOpened = false;
     document.body.classList.remove("review-open");
@@ -4052,7 +4104,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     screen.hidden = true; chat.hidden = false;
     reviewToggle.querySelector(".label").textContent = "差分";
     reviewToggle.querySelector(".icon").textContent = "±";
-    reviewToggle.title = "PR差分";
+    reviewToggle.title = "デフォルトブランチとの差分";
     const historyButton = document.getElementById("history");
     historyButton.querySelector(".label").textContent = "ターミナル";
     historyButton.querySelector(".icon").textContent = "▤";
@@ -4064,7 +4116,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     if (opening) {{
       reviewManuallyOpened = true;
       openReview();
-      if (!reviewData) loadPullRequest(reviewSelector, true);
+      if (!reviewData) loadDirectoryDiff(true);
     }} else closeReview();
   }});
   if (document.body.classList.contains("review-open")) openReview();
@@ -4113,10 +4165,10 @@ TERMINAL_PAGE = r"""<!doctype html>
     autoGrow();
   }}
   input.addEventListener("input", syncInput);
-  // loadPullRequest() は開始直後に clearDiffSelection() → syncInput() を呼ぶ。
+  // loadDirectoryDiff() は開始直後に clearDiffSelection() → syncInput() を呼ぶ。
   // 下書き用の draftKey と syncInput の初期化後に自動読み込みを始める。
-  if (reviewOpenMode !== "never") loadPullRequest();
-  else reviewMessage.textContent = "差分ボタンからPRを読み込めます";
+  if (reviewOpenMode !== "never") loadDirectoryDiff();
+  else reviewMessage.textContent = "差分ボタンからデフォルトブランチとの差分を読み込めます";
   let lastOutput = "";
   let lastMessages = "";
   let followOutput = true;
@@ -4777,7 +4829,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       document.body.classList.add("review-closed");
       reviewToggle.querySelector(".label").textContent = "差分";
       reviewToggle.querySelector(".icon").textContent = "±";
-      reviewToggle.title = "PR差分";
+      reviewToggle.title = "デフォルトブランチとの差分";
       showingHistory = false; historyButton.querySelector(".label").textContent = "チャット";
       historyButton.querySelector(".icon").textContent = "💬";
       chat.hidden = true; screen.hidden = false;
@@ -5102,7 +5154,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/terminal":
             terminal_qs = urllib.parse.parse_qs(parsed.query)
             session = terminal_qs.get("session", [""])[0]
-            pr_diff_open = "always" if terminal_qs.get("review") == ["1"] else PR_DIFF_OPEN
+            diff_open = "always" if terminal_qs.get("review") == ["1"] else DIFF_OPEN
             if not valid_session(session):
                 return self._page(render('<div class="msg err">❌ セッションが見つかりません</div>'), 404)
             item = next(item for item in managed_sessions() if item["name"] == session)
@@ -5129,7 +5181,7 @@ class Handler(BaseHTTPRequestHandler):
                     if value in choices
                 ),
                 session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
-                pr_diff_open_json=json.dumps(pr_diff_open),
+                diff_open_json=json.dumps(diff_open),
                 pr_selector_json=json.dumps(item.get("pull_request", "")),
                 upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
                 note_json=json.dumps(item.get("note", "")),
@@ -5167,7 +5219,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 ),
                 body_class=(
-                    ' class="review-closed"' if pr_diff_open != "always" else ' class="review-open"'
+                    ' class="review-closed"' if diff_open != "always" else ' class="review-open"'
                 ),
                 artifacts_html=artifact_links(item.get("artifacts", [])),
             ))
@@ -5219,31 +5271,28 @@ class Handler(BaseHTTPRequestHandler):
                     "artifacts": entry.get("artifacts", []),
                 })
             return self._json({"items": items, "boot": BOOT_ID})
-        pr_match = re.fullmatch(
-            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/pull-request", parsed.path
+        diff_match = re.fullmatch(
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/diff", parsed.path
         )
-        if pr_match:
-            session = pr_match.group(1)
-            linked_selector = ""
+        if diff_match:
+            session = diff_match.group(1)
             item = next(
                 (entry for entry in managed_sessions() if entry["name"] == session), None
             )
             cwd = item.get("cwd", "") if item else ""
-            linked_selector = item.get("pull_request", "") if item else ""
             if not cwd:
                 return self._json({"error": "セッションが見つかりません"}, 404)
-            selector = urllib.parse.parse_qs(parsed.query).get("pr", [linked_selector])[0]
             started = time.monotonic()
             try:
-                return self._json(pull_request_diff(cwd, selector))
+                return self._json(directory_diff(cwd))
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
             except LookupError as exc:
                 return self._json({"error": str(exc), "not_found": True}, 404)
             except FileNotFoundError:
-                return self._json({"error": "gh CLIが見つかりません"}, 503)
+                return self._json({"error": "gitコマンドが見つかりません"}, 503)
             except subprocess.TimeoutExpired:
-                return self._json({"error": "GitHubからの取得がタイムアウトしました"}, 504)
+                return self._json({"error": "Git差分の取得がタイムアウトしました"}, 504)
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
             finally:
@@ -5251,8 +5300,8 @@ class Handler(BaseHTTPRequestHandler):
                 if elapsed > 10:
                     # 無限スピナー問題の追跡用。通常は数秒で返るので遅い時だけ残す
                     print(
-                        f"[pull-request] {session} {selector or '(branch)'} "
-                        f"took {elapsed:.1f}s", file=sys.stderr, flush=True,
+                        f"[diff] {session} took {elapsed:.1f}s",
+                        file=sys.stderr, flush=True,
                     )
         if parsed.path.startswith("/uploads/"):
             return self._upload_file(parsed.path)
@@ -5730,7 +5779,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             return self._page(render(f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"))
         if pull_request:
-            # レビュー起動ではPR差分が対象なので、通常起動用の入力欄は引き継がない。
+            # レビュー起動では対象PRを別途書き出すため、通常起動用の入力欄は引き継がない。
             prompt = ""
         prompt = prompt.strip()
         if len(prompt) > 8000:

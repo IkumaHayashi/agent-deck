@@ -94,23 +94,32 @@ class FrontendTemplateTest(unittest.TestCase):
 
     def test_review_context_is_seeded_into_input_without_sending(self):
         # レビュー対象PRは入力欄への書き出しプリセットでAIへ伝える（自動送信はしない）
-        self.assertIn("seedReviewContext(data)", server.TERMINAL_PAGE)
+        self.assertIn("seedReviewContext()", server.TERMINAL_PAGE)
         self.assertIn("をレビューしています。", server.TERMINAL_PAGE)
         self.assertIn(
-            'localStorage.getItem(reviewSeedKey) === data.url', server.TERMINAL_PAGE
+            'localStorage.getItem(reviewSeedKey) === linkedPullRequest',
+            server.TERMINAL_PAGE,
         )
 
-    def test_diff_selection_quote_names_the_pull_request(self):
+    def test_diff_selection_quote_does_not_name_the_pull_request(self):
         self.assertIn(
-            'prLabel + "以下の選択行について確認してください。"', server.TERMINAL_PAGE
+            'const parts = ["以下の選択行について確認してください。"]',
+            server.TERMINAL_PAGE,
         )
+
+    def test_diff_fetches_directory_comparison_without_pr_picker(self):
+        self.assertIn(
+            'encodeURIComponent(session) + "/diff"', server.TERMINAL_PAGE
+        )
+        self.assertNotIn('id="review-picker"', server.TERMINAL_PAGE)
+        self.assertIn("デフォルトブランチとの差分", server.TERMINAL_PAGE)
 
     def test_review_autoload_starts_after_draft_storage_is_initialized(self):
         page = server.TERMINAL_PAGE
 
         self.assertLess(
             page.index('const draftKey = "draft:" + session;'),
-            page.index('if (reviewOpenMode !== "never") loadPullRequest();'),
+            page.index('if (reviewOpenMode !== "never") loadDirectoryDiff();'),
         )
 
     def test_template_path_cannot_escape_template_directory(self):
@@ -516,7 +525,7 @@ class SessionArtifactTest(unittest.TestCase):
         self.assertEqual([], server.GH_CREATE_RE.findall(command))
 
 
-class PullRequestDiffTest(unittest.TestCase):
+class DirectoryDiffTest(unittest.TestCase):
     def test_normalizes_number_and_github_url(self):
         self.assertEqual("123", server.normalize_pr_selector("123"))
         self.assertEqual(
@@ -528,47 +537,98 @@ class PullRequestDiffTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "PR番号"):
             server.normalize_pr_selector("https://example.com/repo/pull/1")
 
-    def test_fetches_current_branch_pull_request_and_patch(self):
-        metadata = {
-            "number": 42,
-            "title": "差分ペインを追加",
-            "url": "https://github.com/example/repo/pull/42",
-            "state": "OPEN",
-            "baseRefName": "main",
-            "headRefName": "feature/review",
-            "files": [{"path": "server.py", "additions": 10, "deletions": 2}],
-        }
+    def test_fetches_diff_from_default_branch_to_worktree(self):
         results = [
-            SimpleNamespace(returncode=0, stdout=json.dumps(metadata), stderr=""),
+            SimpleNamespace(returncode=0, stdout="feature/review\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="base123\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="10\t2\tserver.py\0", stderr=""),
             SimpleNamespace(returncode=0, stdout="diff --git a/server.py b/server.py\n", stderr=""),
         ]
         with (
             tempfile.TemporaryDirectory() as cwd,
-            mock.patch.object(server, "find_bin", return_value="/usr/bin/gh"),
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/git"),
+            mock.patch.object(
+                server, "git_default_branch", return_value=("main", "origin/main")
+            ),
             mock.patch.object(server.subprocess, "run", side_effect=results) as run,
         ):
-            result = server.pull_request_diff(cwd)
+            result = server.directory_diff(cwd)
 
-        self.assertEqual(42, result["number"])
+        self.assertEqual("main", result["baseRefName"])
+        self.assertEqual("feature/review", result["headRefName"])
+        self.assertEqual(
+            [{"path": "server.py", "additions": 10, "deletions": 2}],
+            result["files"],
+        )
         self.assertIn("diff --git", result["patch"])
         self.assertEqual(
-            ["/usr/bin/gh", "pr", "view", "--json",
-             "number,title,url,state,baseRefName,headRefName,files"],
+            ["/usr/bin/git", "branch", "--show-current"],
             run.call_args_list[0].args[0],
         )
         self.assertEqual(
-            ["/usr/bin/gh", "pr", "diff", "42", "--patch"],
-            run.call_args_list[1].args[0],
+            ["/usr/bin/git", "diff", "--patch", "--no-ext-diff", "--find-renames",
+             "base123", "--"],
+            run.call_args_list[3].args[0],
         )
 
-    def test_missing_current_branch_pull_request_has_friendly_error(self):
-        failed = SimpleNamespace(returncode=1, stdout="", stderr="no pull requests found")
+    def test_uses_remote_symbolic_default_branch(self):
+        results = [
+            SimpleNamespace(returncode=0, stdout="true\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="upstream\norigin\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin/develop\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="abc123\n", stderr=""),
+        ]
         with (
             tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/git"),
+            mock.patch.object(server.subprocess, "run", side_effect=results) as run,
+        ):
+            result = server.git_default_branch(cwd)
+
+        self.assertEqual(("develop", "origin/develop"), result)
+        self.assertEqual(
+            ["/usr/bin/git", "symbolic-ref", "--quiet", "--short",
+             "refs/remotes/origin/HEAD"],
+            run.call_args_list[2].args[0],
+        )
+
+    def test_finds_remote_default_when_origin_head_is_not_configured(self):
+        results = [
+            SimpleNamespace(returncode=0, stdout="true\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="origin\n", stderr=""),
+            SimpleNamespace(returncode=1, stdout="", stderr=""),
+            SimpleNamespace(
+                returncode=0,
+                stdout="ref: refs/heads/trunk\tHEAD\nabc123\tHEAD\n",
+                stderr="",
+            ),
+            SimpleNamespace(returncode=0, stdout="abc123\n", stderr=""),
+        ]
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/git"),
+            mock.patch.object(server.subprocess, "run", side_effect=results),
+        ):
+            result = server.git_default_branch(cwd)
+
+        self.assertEqual(("trunk", "origin/trunk"), result)
+
+    def test_numstat_uses_new_path_for_renamed_file(self):
+        result = server._parse_git_numstat("3\t1\t\0old.py\0new.py\0")
+
+        self.assertEqual(
+            [{"path": "new.py", "additions": 3, "deletions": 1}], result
+        )
+
+    def test_non_git_directory_has_friendly_error(self):
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="not a git repository")
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/git"),
             mock.patch.object(server.subprocess, "run", return_value=failed),
         ):
-            with self.assertRaisesRegex(LookupError, "現在のブランチ"):
-                server.pull_request_diff(cwd)
+            with self.assertRaisesRegex(LookupError, "Gitリポジトリ"):
+                server.git_default_branch(cwd)
 
     def test_normalizes_github_remote_urls(self):
         self.assertEqual(
