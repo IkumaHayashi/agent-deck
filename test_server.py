@@ -158,6 +158,52 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertNotIn("selectedQuoteText || item.text", server.TERMINAL_PAGE)
         self.assertIn('line ? "> " + line : ">"', server.TERMINAL_PAGE)
 
+    def test_local_markdown_images_have_caption_and_paging(self):
+        page = server.TERMINAL_PAGE
+
+        self.assertIn('id="lightbox-prev"', page)
+        self.assertIn('id="lightbox-next"', page)
+        self.assertIn('id="lightbox-path"', page)
+        self.assertIn('id="lightbox-description"', page)
+        self.assertIn('id="lightbox-context"', page)
+        self.assertIn('"/api/local-image?path=" + encodeURIComponent(markdownImagePath)', page)
+        self.assertIn('fullPath.textContent = path', page)
+        self.assertIn('img.dataset.description = alt', page)
+        self.assertIn('img.dataset.context = context', page)
+        self.assertIn('normalized.length > 160', page)
+        self.assertIn('contextLine.textContent = "文章: " + context', page)
+        self.assertIn('description.textContent = "説明: " + alt', page)
+        self.assertIn('event.key === "ArrowRight"', page)
+        self.assertIn('chat.querySelectorAll("img.thumb")', page)
+        self.assertIn('!event.target.closest("img, figcaption, button")', page)
+
+    def test_resolve_local_image_accepts_real_png(self):
+        with tempfile.NamedTemporaryFile(suffix=".png") as image:
+            image.write(b"\x89PNG\r\n\x1a\nimage-data")
+            image.flush()
+
+            path, content_type = server.resolve_local_image(image.name)
+
+        self.assertEqual(os.path.realpath(image.name), path)
+        self.assertEqual("image/png", content_type)
+
+    def test_resolve_local_image_rejects_non_image_content(self):
+        with tempfile.NamedTemporaryFile(suffix=".png") as image:
+            image.write(b"not-an-image")
+            image.flush()
+
+            with self.assertRaisesRegex(ValueError, "画像データ"):
+                server.resolve_local_image(image.name)
+
+    def test_resolve_local_image_uses_signature_when_extension_differs(self):
+        with tempfile.NamedTemporaryFile(suffix=".png") as image:
+            image.write(b"\xff\xd8\xffjpeg-data")
+            image.flush()
+
+            _, content_type = server.resolve_local_image(image.name)
+
+        self.assertEqual("image/jpeg", content_type)
+
     def test_quote_places_cursor_below_quoted_text(self):
         # removeAllRanges を引用より後に呼ぶと入力欄のカーソルが先頭へ戻る（Chrome）
         handler = server.TERMINAL_PAGE[

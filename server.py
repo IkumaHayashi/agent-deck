@@ -711,6 +711,35 @@ def tool_use_label(name, payload):
 
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+LOCAL_IMAGE_TYPES = {
+    ".png": ("image/png", (b"\x89PNG\r\n\x1a\n",)),
+    ".jpg": ("image/jpeg", (b"\xff\xd8\xff",)),
+    ".jpeg": ("image/jpeg", (b"\xff\xd8\xff",)),
+    ".gif": ("image/gif", (b"GIF87a", b"GIF89a")),
+    ".webp": ("image/webp", (b"RIFF",)),
+}
+
+
+def resolve_local_image(path):
+    """会話内で参照されたローカル画像の実体と Content-Type を返す。"""
+    if not isinstance(path, str) or not os.path.isabs(path):
+        raise ValueError("画像パスが不正です")
+    resolved = os.path.realpath(path)
+    if os.path.splitext(resolved)[1].lower() not in LOCAL_IMAGE_TYPES:
+        raise ValueError("対応していない画像形式です")
+    if not os.path.isfile(resolved):
+        raise FileNotFoundError("画像が見つかりません")
+    with open(resolved, "rb") as source:
+        header = source.read(12)
+    content_type = next((
+        candidate_type
+        for candidate_type, signatures in LOCAL_IMAGE_TYPES.values()
+        if any(header.startswith(signature) for signature in signatures)
+        and (candidate_type != "image/webp" or header[8:12] == b"WEBP")
+    ), "")
+    if not content_type:
+        raise ValueError("画像データが不正です")
+    return resolved, content_type
 
 
 def sent_files_text(payload):
@@ -3533,8 +3562,19 @@ TERMINAL_PAGE = r"""<!doctype html>
   #artifacts .art {{ font-size: .78rem; }}
   .message.user .bubble {{ cursor: pointer; }}
   .message.user .bubble:hover {{ border-color: #58a6ff; }}
-  .bubble img.thumb {{ display: block; max-width: min(220px, 100%); max-height: 180px;
-    margin: 6px 0; border: 1px solid #30363d; border-radius: 9px; cursor: zoom-in; }}
+  .bubble .image-card {{ width: fit-content; max-width: 100%; margin: 10px 0;
+    border: 1px solid #30363d; border-radius: 10px; overflow: hidden; background: #161b22; }}
+  .bubble img.thumb {{ display: block; max-width: min(360px, 100%); max-height: 280px;
+    margin: 0; border: 0; cursor: zoom-in; }}
+  .bubble .image-caption {{ max-width: min(520px, 100%); padding: 8px 10px;
+    border-top: 1px solid #30363d; font-size: .76rem; line-height: 1.4; }}
+  .bubble .image-context {{ display: block; margin-bottom: 5px; color: #c9d1d9;
+    font-size: .9rem; }}
+  .bubble .image-description {{ display: block; margin-bottom: 5px; color: #e6edf3;
+    font-size: .9rem; }}
+  .bubble .image-name {{ display: block; color: #e6edf3; font-weight: 600; }}
+  .bubble .image-path {{ display: block; margin-top: 2px; overflow-wrap: anywhere;
+    color: #8b949e; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }}
   .bubble a.file-chip {{ display: inline-block; max-width: 100%; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; margin: 6px 0; padding: 7px 12px;
     border: 1px solid #30363d; border-radius: 9px; background: #21262d;
@@ -3544,10 +3584,28 @@ TERMINAL_PAGE = r"""<!doctype html>
   .bubble .pdf-card .file-chip {{ margin-bottom: 8px; }}
   .bubble iframe.pdf-preview {{ display: block; width: 100%; height: min(68vh, 680px);
     min-height: 420px; border: 1px solid #3d444d; border-radius: 9px; background: #fff; }}
-  #lightbox {{ position: fixed; inset: 0; z-index: 200; display: grid; place-items: center;
-    padding: 14px; background: #000d; cursor: zoom-out; }}
+  #lightbox {{ position: fixed; inset: 0; z-index: 200; display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center; gap: 12px; padding: 52px 14px 18px; background: #000e; }}
   #lightbox[hidden] {{ display: none; }}
-  #lightbox img {{ max-width: 96vw; max-height: 94vh; border-radius: 8px; }}
+  #lightbox figure {{ min-width: 0; margin: 0; text-align: center; }}
+  #lightbox img {{ display: block; max-width: 100%; max-height: calc(100vh - 150px);
+    margin: 0 auto; border-radius: 8px; }}
+  #lightbox figcaption {{ margin-top: 10px; line-height: 1.4; }}
+  #lightbox-context {{ display: block; max-width: 900px; margin: 0 auto 6px;
+    color: #c9d1d9; font-size: 1rem; }}
+  #lightbox-description {{ display: block; margin-bottom: 6px; color: #e6edf3;
+    font-size: 1rem; }}
+  #lightbox figcaption strong, #lightbox figcaption code {{ display: block; }}
+  #lightbox figcaption code {{ margin-top: 3px; color: #8b949e; overflow-wrap: anywhere; }}
+  #lightbox-count {{ display: block; margin-top: 5px; color: #8b949e; font-size: .8rem; }}
+  #lightbox button {{ position: static; flex: none; width: 44px; height: 44px; padding: 0;
+    border-radius: 999px; background: #21262dcc; cursor: pointer; }}
+  #lightbox button:disabled {{ visibility: hidden; }}
+  #lightbox-close {{ position: absolute !important; top: 10px; right: 12px; }}
+  @media (max-width: 599px) {{
+    #lightbox {{ gap: 6px; padding-inline: 7px; }}
+    #lightbox button {{ width: 38px; height: 38px; }}
+  }}
   /* 一覧（/）へ戻るリンク。PCはサイドバー常設なので出さない */
   #back-link {{ display: none; flex: 0 0 auto; padding: 7px 10px;
     border: 1px solid #484f58; border-radius: 8px; }}
@@ -3783,7 +3841,15 @@ TERMINAL_PAGE = r"""<!doctype html>
   <div id="status"></div>
 </div>
 </main></div>
-<div id="lightbox" hidden><img alt="添付画像"></div>
+<div id="lightbox" hidden role="dialog" aria-modal="true" aria-label="画像ビューア">
+  <button type="button" id="lightbox-close" aria-label="閉じる">×</button>
+  <button type="button" id="lightbox-prev" aria-label="前の画像">‹</button>
+  <figure><img alt="添付画像"><figcaption><span id="lightbox-context"></span>
+    <span id="lightbox-description"></span>
+    <strong id="lightbox-name"></strong>
+    <code id="lightbox-path"></code><span id="lightbox-count"></span></figcaption></figure>
+  <button type="button" id="lightbox-next" aria-label="次の画像">›</button>
+</div>
 <div class="modal" id="confirm-modal" hidden><div class="modal-card" role="dialog" aria-modal="true">
   <p id="confirm-message">このセッションを終了しますか？</p><div class="modal-actions"><button type="button" id="confirm-cancel">キャンセル</button><button type="button" class="danger" id="confirm-ok">実行する</button></div>
 </div></div>
@@ -3802,13 +3868,58 @@ TERMINAL_PAGE = r"""<!doctype html>
   const bootId = {boot_json};
   let sessionNote = {note_json};
   let sessionPinned = {pinned_json};
-  // 添付画像の拡大表示
+  // 添付画像の拡大表示とページ送り
   const lightbox = document.getElementById("lightbox");
-  function showLightbox(src) {{
-    lightbox.querySelector("img").src = src;
+  const lightboxImage = lightbox.querySelector("img");
+  const lightboxPrev = document.getElementById("lightbox-prev");
+  const lightboxNext = document.getElementById("lightbox-next");
+  let lightboxItems = [], lightboxIndex = -1;
+  function updateLightbox() {{
+    const item = lightboxItems[lightboxIndex];
+    if (!item) return;
+    lightboxImage.src = item.src;
+    lightboxImage.alt = item.description || item.name || "添付画像";
+    const context = document.getElementById("lightbox-context");
+    context.textContent = item.context ? "文章: " + item.context : "";
+    context.hidden = !item.context;
+    const description = document.getElementById("lightbox-description");
+    description.textContent = item.description ? "説明: " + item.description : "";
+    description.hidden = !item.description;
+    document.getElementById("lightbox-name").textContent = item.name;
+    document.getElementById("lightbox-path").textContent = item.path;
+    document.getElementById("lightbox-count").textContent =
+      (lightboxIndex + 1) + " / " + lightboxItems.length;
+    lightboxPrev.disabled = lightboxIndex === 0;
+    lightboxNext.disabled = lightboxIndex === lightboxItems.length - 1;
+  }}
+  function showLightbox(selected) {{
+    lightboxItems = Array.from(chat.querySelectorAll("img.thumb")).map(img => ({{
+      element: img, src: img.src, name: img.dataset.name || "添付画像",
+      path: img.dataset.path || "", description: img.dataset.description || "",
+      context: img.dataset.context || ""
+    }}));
+    lightboxIndex = Math.max(0, lightboxItems.findIndex(item => item.element === selected));
+    updateLightbox();
     lightbox.hidden = false;
   }}
-  lightbox.addEventListener("click", () => {{ lightbox.hidden = true; }});
+  function closeLightbox() {{ lightbox.hidden = true; lightboxImage.removeAttribute("src"); }}
+  function moveLightbox(step) {{
+    const next = lightboxIndex + step;
+    if (next < 0 || next >= lightboxItems.length) return;
+    lightboxIndex = next; updateLightbox();
+  }}
+  lightbox.addEventListener("click", event => {{
+    if (!event.target.closest("img, figcaption, button")) closeLightbox();
+  }});
+  document.getElementById("lightbox-close").addEventListener("click", closeLightbox);
+  lightboxPrev.addEventListener("click", () => moveLightbox(-1));
+  lightboxNext.addEventListener("click", () => moveLightbox(1));
+  document.addEventListener("keydown", event => {{
+    if (lightbox.hidden) return;
+    if (event.key === "Escape") closeLightbox();
+    else if (event.key === "ArrowLeft") moveLightbox(-1);
+    else if (event.key === "ArrowRight") moveLightbox(1);
+  }});
 {sidebar_js}
   const screen = document.getElementById("screen");
   const chat = document.getElementById("chat");
@@ -4243,6 +4354,38 @@ TERMINAL_PAGE = r"""<!doctype html>
     }}
     if (cursor < text.length) target.append(document.createTextNode(text.slice(cursor)));
   }}
+  function imageName(path) {{
+    const name = path.split("/").pop() || path;
+    try {{ return decodeURIComponent(name); }} catch (error) {{ return name; }}
+  }}
+  function imageContext(text) {{
+    const normalized = (text || "").replace(/\s+/g, " ").trim();
+    return normalized.length > 160 ? normalized.slice(0, 159).trimEnd() + "…" : normalized;
+  }}
+  function appendImageCard(target, src, path, alt = "", context = "") {{
+    const card = document.createElement("figure"); card.className = "image-card";
+    const img = document.createElement("img");
+    img.className = "thumb"; img.alt = alt || imageName(path); img.loading = "lazy";
+    img.src = src; img.dataset.name = imageName(path); img.dataset.path = path;
+    img.dataset.description = alt; img.dataset.context = context;
+    img.addEventListener("click", event => {{ event.stopPropagation(); showLightbox(img); }});
+    const caption = document.createElement("figcaption"); caption.className = "image-caption";
+    if (context) {{
+      const contextLine = document.createElement("span");
+      contextLine.className = "image-context"; contextLine.textContent = "文章: " + context;
+      caption.append(contextLine);
+    }}
+    if (alt) {{
+      const description = document.createElement("span");
+      description.className = "image-description"; description.textContent = "説明: " + alt;
+      caption.append(description);
+    }}
+    const name = document.createElement("span"); name.className = "image-name";
+    name.textContent = imageName(path);
+    const fullPath = document.createElement("code"); fullPath.className = "image-path";
+    fullPath.textContent = path;
+    caption.append(name, fullPath); card.append(img, caption); target.append(card);
+  }}
   function shellCommand(language, lines) {{
     // 出力の貼り付けを誤って実行しないよう、複数行はシェルだと明示された
     // コードブロックだけ、言語指定なしは ! / $ で始まる1行だけに限る。
@@ -4283,12 +4426,16 @@ TERMINAL_PAGE = r"""<!doctype html>
   function renderMarkdown(target, text) {{
     const lines = text.replace(/\r\n/g, "\n").split("\n");
     let paragraph = [], listStack = [], codeLines = [], inCode = false, codeLanguage = "", codeIndent = 0,
-      codeTarget = target;
+      codeTarget = target, lastProse = "";
     const flushParagraph = () => {{
       if (!paragraph.length) return;
-      const p = document.createElement("p"); appendInlineMarkdown(p, paragraph.join("\n"));
+      const content = paragraph.join("\n"); lastProse = content;
+      const p = document.createElement("p"); appendInlineMarkdown(p, content);
       target.append(p); paragraph = [];
     }};
+    const currentImageContext = () => imageContext(
+      paragraph.length ? paragraph.join("\n") : lastProse
+    );
     // リストは作成時にDOMへ追加する。空行や別ブロックではスタックだけを閉じる。
     const flushList = () => {{ listStack = []; }};
     const appendListItem = (indent, tag, content, start = 1) => {{
@@ -4351,18 +4498,40 @@ TERMINAL_PAGE = r"""<!doctype html>
         codeLines.push(codeIndent ? line.replace(new RegExp("^\\s{{0," + codeIndent + "}}"), "") : line);
         continue;
       }}
+      // Markdown のローカル画像参照を Agent Deck が直接配信して表示する。
+      // パスに空白や括弧がある場合の `![説明](</path/to/image.png>)` にも対応。
+      const markdownImage = line.match(
+        /^!\[([^\]\n]*)\]\(\s*(?:<([^>\n]+)>|([^)\s]+))\s*\)$/);
+      const markdownImagePath = markdownImage && (markdownImage[2] || markdownImage[3]);
+      if (markdownImagePath && markdownImagePath.startsWith("/")) {{
+        const context = currentImageContext();
+        flushParagraph(); flushList();
+        appendImageCard(
+          target,
+          "/api/local-image?path=" + encodeURIComponent(markdownImagePath),
+          markdownImagePath,
+          markdownImage[1],
+          context
+        );
+        continue;
+      }}
       // アップロード画像への言及行はサムネイル表示にする（クリックで拡大）。
       // 送信時は「添付画像: <パス>」、TUI が読み込んだ後のログでは
       // 「[Image: source: <パス>]」の形になる。保存先の新旧パス両方を拾う。
       const imageLine = line.match(
         /^(?:添付画像[:：]|\[Image:(?:\s*source:)?)\s*((?:{upload_prefix_alt})\/uploads\/[^\s\]]+?)\]?$/);
       if (imageLine) {{
+        const context = currentImageContext();
         flushParagraph(); flushList();
-        const img = document.createElement("img");
-        img.className = "thumb"; img.alt = "添付画像"; img.loading = "lazy";
-        img.src = "/uploads/" + imageLine[1].split("/uploads/")[1];
-        img.addEventListener("click", event => {{ event.stopPropagation(); showLightbox(img.src); }});
-        target.append(img);
+        const imagePath = imageLine[1];
+        const rel = imagePath.split("/uploads/")[1];
+        appendImageCard(
+          target,
+          "/uploads/" + rel.split("/").map(encodeURIComponent).join("/"),
+          imagePath,
+          "",
+          context
+        );
         continue;
       }}
       // アップロードファイルへの言及行はチップ表示にする（タップで内容表示/ダウンロード）
@@ -5250,6 +5419,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(exc)}, 500)
         if parsed.path == "/api/version":
             return self._json(latest_release())
+        if parsed.path == "/api/local-image":
+            image_path = urllib.parse.parse_qs(parsed.query).get("path", [""])[0]
+            return self._local_image(image_path)
         if parsed.path == "/api/sidebar":
             items = []
             for entry in managed_sessions():
@@ -5681,6 +5853,24 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Disposition",
                              f"attachment; filename*=UTF-8''{quoted}")
         self.send_header("Cache-Control", "private, max-age=86400")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _local_image(self, path):
+        """会話内の Markdown で参照されたローカル画像をインライン配信する。"""
+        try:
+            resolved, content_type = resolve_local_image(path)
+            with open(resolved, "rb") as source:
+                data = source.read()
+        except (FileNotFoundError, OSError):
+            return self._json({"error": "画像が見つかりません"}, 404)
+        except ValueError as exc:
+            return self._json({"error": str(exc)}, 400)
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
