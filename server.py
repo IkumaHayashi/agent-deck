@@ -197,6 +197,9 @@ CW_LOCK = threading.Lock()
 SESSION_CACHE_LOCK = threading.Lock()
 SESSION_CACHE = {"expires": 0, "items": [], "loading": False, "loaded": False}
 SESSION_CACHE_TTL = 5
+# セッション一覧での手動配置。既存の @launcher_pinned は top として読み替える。
+SESSION_POSITIONS = {"top", "normal", "later"}
+SESSION_POSITION_ORDER = {"top": 0, "normal": 1, "later": 2}
 # ログの要約/最終メッセージを (mtime, size) をキーにメモ化する。
 # 会話ログは追記されない限り再パースしない。
 LOG_META_LOCK = threading.Lock()
@@ -2274,6 +2277,12 @@ def load_managed_sessions():
             pinned = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_pinned"
             ).stdout.strip() == "1"
+            position = tmux_run(
+                "show-option", "-qv", "-t", parts[0], "@launcher_position"
+            ).stdout.strip()
+            if position not in SESSION_POSITIONS:
+                position = "top" if pinned else "normal"
+            pinned = position == "top"
             pull_request = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_pull_request"
             ).stdout.strip()
@@ -2326,6 +2335,7 @@ def load_managed_sessions():
                 "last_message": last_message, "log_path": log_path,
                 "note": note,
                 "pinned": pinned,
+                "position": position,
                 "pull_request": pull_request,
                 "session_id": session_id, "bypass": bypass,
                 "running": running,
@@ -2338,7 +2348,9 @@ def load_managed_sessions():
         # バックグラウンド監視中は返事を求めていないので実行中と同じ扱い。
         sessions.sort(key=lambda item: item["name"], reverse=True)
         sessions.sort(key=lambda item: bool(item["running"] or item["background"]))
-        sessions.sort(key=lambda item: not item["pinned"])
+        sessions.sort(
+            key=lambda item: SESSION_POSITION_ORDER[session_position(item)]
+        )
         return sessions
     except (OSError, subprocess.SubprocessError):
         return []
@@ -2445,6 +2457,25 @@ def dir_label(cwd):
     return os.path.basename((cwd or "").rstrip("/")) or cwd or ""
 
 
+def session_position(item):
+    """一覧での手動配置を返す。旧 pinned データも先頭固定として扱う。"""
+    position = item.get("position")
+    if position in SESSION_POSITIONS:
+        return position
+    return "top" if item.get("pinned") else "normal"
+
+
+def position_button_html(item):
+    position = session_position(item)
+    icon = {"top": "📌", "normal": "↕", "later": "↓"}[position]
+    state_class = " placed" if position != "normal" else ""
+    return (
+        f'<button type="button" class="side-position{state_class}" '
+        f'data-position="{position}" aria-label="並び位置を変更" '
+        f'title="並び位置を変更">{icon}</button>'
+    )
+
+
 def tool_label(tool):
     """ツール名の表示HTML。公式アイコンがあれば画像、無ければテキスト。"""
     escaped = html.escape(tool)
@@ -2464,14 +2495,29 @@ def build_sidebar(active):
         "要対応のみ表示</label>"
     )
     sidebar += '<div id="side-sessions">'
-    # ピン留めだけを最優先し、各グループ内では一覧本来の順序を保つ。
+    # 手動配置だけを優先し、各グループ内では一覧本来の順序を保つ。
     sessions = sorted(
         managed_sessions(),
-        key=lambda item: not item.get("pinned"),
+        key=lambda item: SESSION_POSITION_ORDER[session_position(item)],
     )
+    later_count = sum(session_position(item) == "later" for item in sessions)
+    later_keep = any(
+        session_position(item) == "later"
+        and sidebar_status(item)[1] in ("need", "ask", "wait")
+        for item in sessions
+    )
+    later_started = False
     for other in sessions:
         status_text, status_class = sidebar_status(other)
         keep = " f-keep" if status_class in ("need", "ask", "wait") else ""
+        position = session_position(other)
+        if position == "later" and not later_started:
+            heading_keep = " f-keep" if later_keep else ""
+            sidebar += (
+                f'<div class="deferred-heading{heading_keep}">'
+                f'<span>後回し</span><small>{later_count}件</small></div>'
+            )
+            later_started = True
         # 最初のプロンプトでセッションを識別し、最終メッセージは同じでなければ添える。
         first = other["summary"]
         last = other["last_message"]
@@ -2482,17 +2528,15 @@ def build_sidebar(active):
             lines += f'<small class="note">📝 {html.escape(other["note"])}</small>'
         lines += artifact_chips(other.get("artifacts", []))
         sidebar += (
-            f'<div class="session-card{keep}" data-session="{html.escape(other["name"])}">'
+            f'<div class="session-card{keep}{" is-later" if position == "later" else ""}" '
+            f'data-session="{html.escape(other["name"])}">'
             f'<a class="{"active" if other["name"] == active else ""}" '
             f'href="/terminal?session={urllib.parse.quote(other["name"])}">'
             f'<strong>{tool_label(other["tool"])}'
             f'<span class="dir">{html.escape(dir_label(other["cwd"]))}</span>'
             f'<span class="st st-{status_class}">{html.escape(status_text)}</span>'
             f'{context_chip(other.get("context"))}</strong>'
-            f'{lines}</a><button type="button" class="side-pin{" pinned" if other.get("pinned") else ""}" '
-            f'aria-label="{"ピン留めを解除" if other.get("pinned") else "ピン留め"}" '
-            f'title="{"ピン留めを解除" if other.get("pinned") else "ピン留め"}">'
-            f'{"📌" if other.get("pinned") else "📍"}</button></div>'
+            f'{lines}</a>{position_button_html(other)}</div>'
         )
     sidebar += "</div>"
     # バージョンとAI使用量は一覧が短いときもサイドバー最下部へ置く。
@@ -2712,7 +2756,7 @@ def launcher_session_name(output):
 
 def set_session_metadata(
     name, summary="", session_id="", bypass=False, note="", pinned=False,
-    pull_request="",
+    pull_request="", position="",
 ):
     if not name:
         return
@@ -2725,7 +2769,11 @@ def set_session_metadata(
         tmux_run("set-option", "-t", name, "@launcher_bypass", "1")
     if note:
         tmux_run("set-option", "-t", name, "@launcher_note", note[:1000])
-    if pinned:
+    if position not in SESSION_POSITIONS:
+        position = "top" if pinned else ""
+    if position:
+        tmux_run("set-option", "-t", name, "@launcher_position", position)
+    if position == "top" or (not position and pinned):
         tmux_run("set-option", "-t", name, "@launcher_pinned", "1")
     if pull_request:
         tmux_run(
@@ -2931,16 +2979,34 @@ SIDEBAR_CSS = r"""
   aside .filter-toggle input { accent-color: #f85149; }
   /* 要対応のみ表示: 自分のアクションが要るもの（要対応・選択待ち・未分類の返事待ち）だけ残す */
   body.filter-need #side-sessions .session-card:not(.f-keep) { display: none; }
+  body.filter-need #side-sessions .deferred-heading:not(.f-keep) { display: none; }
+  aside .deferred-heading { display: flex; align-items: center; gap: 8px; margin: 14px 4px 4px;
+    color: #8b949e; font-size: .78rem; font-weight: 600; }
+  aside .deferred-heading::before { content: ""; flex: 1; border-top: 1px solid #30363d; }
+  aside .deferred-heading span { order: 1; }
+  aside .deferred-heading small { order: 2; display: inline; margin: 0; font-size: .7rem; }
   aside .session-card { position: relative; }
   aside .session-card > a { padding-right: 40px; }
-  aside .side-pin { position: absolute; top: 12px; right: 7px; z-index: 1;
+  aside .session-card.is-later > a { opacity: .68; }
+  aside .session-card.is-later:hover > a, aside .session-card.is-later > a.active { opacity: 1; }
+  aside .side-position { position: absolute; top: 12px; right: 7px; z-index: 1;
     width: 30px; height: 30px; padding: 0; display: grid; place-items: center;
     border: 0; border-radius: 7px; background: transparent; color: #8b949e;
     font-size: .82rem; opacity: 0; cursor: pointer; }
-  aside .session-card:hover .side-pin, aside .side-pin:focus-visible,
-  aside .side-pin.pinned { opacity: 1; }
-  aside .side-pin:hover { background: #30363d; color: #e6edf3; }
-  @media (pointer: coarse) { aside .side-pin { opacity: 1; } }
+  aside .session-card:hover .side-position, aside .side-position:focus-visible,
+  aside .side-position.placed { opacity: 1; }
+  aside .side-position:hover { background: #30363d; color: #e6edf3; }
+  @media (pointer: coarse) { aside .side-position { opacity: 1; } }
+  .position-menu { position: fixed; z-index: 250; width: 190px; padding: 6px;
+    border: 1px solid #30363d; border-radius: 10px; background: #21262d;
+    box-shadow: 0 10px 30px #0008; }
+  .position-menu[hidden] { display: none; }
+  .position-menu button { width: 100%; padding: 9px 10px; display: flex; align-items: center;
+    gap: 9px; border: 0; border-radius: 7px; background: transparent; color: #e6edf3;
+    font: inherit; font-size: .82rem; text-align: left; cursor: pointer; }
+  .position-menu button:hover, .position-menu button:focus-visible { background: #30363d; }
+  .position-menu button[aria-checked="true"]::after { content: "✓"; margin-left: auto;
+    color: #58a6ff; }
   aside #side-sessions strong { display: flex; align-items: center; min-width: 0; }
   /* ツール名は潰さず、長いステータスやディレクトリ名は…で切る（縦書き化防止） */
   aside strong .tool { flex: 0 0 auto; }
@@ -3021,6 +3087,89 @@ SIDEBAR_JS = r"""
   }
   // サイドバーのセッション一覧を定期更新する（状態バッジと最終メッセージ）
   const sideSessions = document.getElementById("side-sessions");
+  const positionOrder = {top: 0, normal: 1, later: 2};
+  const positionMeta = {
+    top: {icon: "📌", label: "先頭に固定"},
+    normal: {icon: "↕", label: "通常"},
+    later: {icon: "↓", label: "後回し"},
+  };
+  const positionMenu = document.createElement("div");
+  positionMenu.className = "position-menu";
+  positionMenu.hidden = true;
+  positionMenu.setAttribute("role", "menu");
+  for (const [value, meta] of Object.entries(positionMeta)) {
+    const choice = document.createElement("button");
+    choice.type = "button";
+    choice.dataset.position = value;
+    choice.setAttribute("role", "menuitemradio");
+    choice.textContent = meta.icon + "  " + meta.label;
+    positionMenu.append(choice);
+  }
+  document.body.append(positionMenu);
+  let positionTarget = null;
+  function itemPosition(item) {
+    return item.position in positionOrder ? item.position : (item.pinned ? "top" : "normal");
+  }
+  function closePositionMenu() {
+    positionMenu.hidden = true;
+    positionTarget = null;
+  }
+  function openPositionMenu(button) {
+    positionTarget = {
+      session: button.closest(".session-card").dataset.session,
+      button,
+    };
+    const current = button.dataset.position || "normal";
+    positionMenu.querySelectorAll("button").forEach(choice => {
+      choice.setAttribute("aria-checked", choice.dataset.position === current ? "true" : "false");
+    });
+    positionMenu.hidden = false;
+    const rect = button.getBoundingClientRect();
+    const menuRect = positionMenu.getBoundingClientRect();
+    const left = Math.max(8, Math.min(rect.right - menuRect.width, innerWidth - menuRect.width - 8));
+    const below = rect.bottom + 5;
+    const top = below + menuRect.height <= innerHeight - 8
+      ? below : Math.max(8, rect.top - menuRect.height - 5);
+    positionMenu.style.left = left + "px";
+    positionMenu.style.top = top + "px";
+    positionMenu.querySelector('[aria-checked="true"]')?.focus();
+  }
+  sideSessions?.addEventListener("click", event => {
+    const button = event.target.closest(".side-position");
+    if (!button) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (!positionMenu.hidden && positionTarget?.button === button) closePositionMenu();
+    else openPositionMenu(button);
+  });
+  positionMenu.addEventListener("click", async event => {
+    const choice = event.target.closest("button[data-position]");
+    if (!choice || !positionTarget) return;
+    const target = positionTarget;
+    choice.disabled = true;
+    try {
+      const body = new URLSearchParams({position: choice.dataset.position});
+      const response = await fetch(
+        "/api/sessions/" + encodeURIComponent(target.session) + "/position",
+        {method: "POST", headers: {"Content-Type": "application/x-www-form-urlencoded"}, body}
+      );
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "並び位置を変更できませんでした");
+      closePositionMenu();
+      await refreshSidebar();
+    } catch (error) {
+      target.button.title = error.message;
+    } finally {
+      choice.disabled = false;
+    }
+  });
+  document.addEventListener("click", event => {
+    if (!positionMenu.hidden && !positionMenu.contains(event.target)) closePositionMenu();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") closePositionMenu();
+  });
+  window.addEventListener("resize", closePositionMenu);
   async function refreshSidebar() {
     try {
       const response = await fetch("/api/sidebar");
@@ -3032,12 +3181,33 @@ SIDEBAR_JS = r"""
         location.reload();
         return;
       }
-      // ピン留めだけを最優先し、各グループ内ではAPIの順序を保つ。
+      // メニュー操作中はカードを差し替えず、選択先とフォーカスを維持する。
+      if (!positionMenu.hidden) return;
+      // 手動配置だけを優先し、各グループ内ではAPIの順序を保つ。
       const items = data.items.slice().sort((a, b) =>
-        Number(b.pinned) - Number(a.pinned));
-      sideSessions.replaceChildren(...items.map(item => {
+        positionOrder[itemPosition(a)] - positionOrder[itemPosition(b)]);
+      const laterItems = items.filter(item => itemPosition(item) === "later");
+      const nodes = [];
+      let laterStarted = false;
+      for (const item of items) {
+        const position = itemPosition(item);
+        if (position === "later" && !laterStarted) {
+          const heading = document.createElement("div");
+          heading.className = "deferred-heading";
+          if (laterItems.some(other => ["need", "ask", "wait"].includes(other.status_class))) {
+            heading.classList.add("f-keep");
+          }
+          const label = document.createElement("span");
+          label.textContent = "後回し";
+          const count = document.createElement("small");
+          count.textContent = laterItems.length + "件";
+          heading.append(label, count);
+          nodes.push(heading);
+          laterStarted = true;
+        }
         const card = document.createElement("div");
         card.className = "session-card";
+        if (position === "later") card.classList.add("is-later");
         card.dataset.session = item.name;
         const link = document.createElement("a");
         link.href = "/terminal?session=" + encodeURIComponent(item.name);
@@ -3107,26 +3277,16 @@ SIDEBAR_JS = r"""
           }
           link.append(arts);
         }
-        const pin = document.createElement("button");
-        pin.type = "button";
-        pin.className = "side-pin" + (item.pinned ? " pinned" : "");
-        pin.textContent = item.pinned ? "📌" : "📍";
-        pin.title = pin.ariaLabel = item.pinned ? "ピン留めを解除" : "ピン留め";
-        pin.addEventListener("click", async event => {
-          event.preventDefault(); event.stopPropagation(); pin.disabled = true;
-          try {
-            const body = new URLSearchParams({pinned: item.pinned ? "0" : "1"});
-            const response = await fetch(
-              "/api/sessions/" + encodeURIComponent(item.name) + "/pin",
-              {method: "POST", headers: {"Content-Type": "application/x-www-form-urlencoded"}, body}
-            );
-            if (!response.ok) throw new Error("ピン留めを変更できませんでした");
-            await refreshSidebar();
-          } catch (error) { pin.title = error.message; pin.disabled = false; }
-        });
-        card.append(link, pin);
-        return card;
-      }));
+        const positionButton = document.createElement("button");
+        positionButton.type = "button";
+        positionButton.className = "side-position" + (position !== "normal" ? " placed" : "");
+        positionButton.dataset.position = position;
+        positionButton.textContent = positionMeta[position].icon;
+        positionButton.title = positionButton.ariaLabel = "並び位置を変更";
+        card.append(link, positionButton);
+        nodes.push(card);
+      }
+      sideSessions.replaceChildren(...nodes);
     } catch (error) { /* サイドバーは更新失敗しても本体に影響させない */ }
   }
   setInterval(refreshSidebar, 5000);
@@ -5055,6 +5215,7 @@ class Handler(BaseHTTPRequestHandler):
                     "last_message": entry["last_message"],
                     "note": entry.get("note", ""),
                     "pinned": bool(entry.get("pinned")),
+                    "position": session_position(entry),
                     "artifacts": entry.get("artifacts", []),
                 })
             return self._json({"items": items, "boot": BOOT_ID})
@@ -5264,7 +5425,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
         match = re.fullmatch(
-            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(input|key|kill|restart|handoff|answer|model|shell|note|pin|pull-request)",
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/(input|key|kill|restart|handoff|answer|model|shell|note|pin|position|pull-request)",
             self.path,
         )
         if match:
@@ -5301,16 +5462,41 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": True, "note": value})
                 elif action == "pin":
                     pinned = qs.get("pinned", ["0"])[0] == "1"
+                    position = "top" if pinned else "normal"
                     result = (
+                        tmux_run("set-option", "-t", session, "@launcher_position", position)
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stderr.strip() or "ピン留めを変更できませんでした")
+                    legacy = (
                         tmux_run("set-option", "-t", session, "@launcher_pinned", "1")
                         if pinned else tmux_run(
                             "set-option", "-u", "-t", session, "@launcher_pinned"
                         )
                     )
-                    if result.returncode != 0:
-                        raise RuntimeError(result.stderr.strip() or "ピン留めを変更できませんでした")
+                    if legacy.returncode != 0:
+                        raise RuntimeError(legacy.stderr.strip() or "ピン留めを変更できませんでした")
                     invalidate_session_cache()
                     return self._json({"ok": True, "pinned": pinned})
+                elif action == "position":
+                    position = qs.get("position", [""])[0]
+                    if position not in SESSION_POSITIONS:
+                        return self._json({"error": "並び位置の指定が不正です"}, 400)
+                    result = tmux_run(
+                        "set-option", "-t", session, "@launcher_position", position
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(result.stderr.strip() or "並び位置を変更できませんでした")
+                    legacy = (
+                        tmux_run("set-option", "-t", session, "@launcher_pinned", "1")
+                        if position == "top" else tmux_run(
+                            "set-option", "-u", "-t", session, "@launcher_pinned"
+                        )
+                    )
+                    if legacy.returncode != 0:
+                        raise RuntimeError(legacy.stderr.strip() or "並び位置を変更できませんでした")
+                    invalidate_session_cache()
+                    return self._json({"ok": True, "position": position})
                 elif action == "pull-request":
                     value = qs.get("pr", [""])[0].strip()
                     if value:
@@ -5476,6 +5662,7 @@ class Handler(BaseHTTPRequestHandler):
         set_session_metadata(
             new_session, item["summary"], item["session_id"], bypass, item.get("note", ""),
             bool(item.get("pinned")), item.get("pull_request", ""),
+            session_position(item),
         )
         invalidate_session_cache()
         return new_session
@@ -5509,7 +5696,7 @@ class Handler(BaseHTTPRequestHandler):
         set_session_metadata(
             new_session, item.get("summary") or prompt, session_id,
             bool(item.get("bypass")), item.get("note", ""), bool(item.get("pinned")),
-            item.get("pull_request", ""),
+            item.get("pull_request", ""), session_position(item),
         )
         result = tmux_run("kill-session", "-t", session)
         if result.returncode != 0:

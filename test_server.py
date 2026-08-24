@@ -612,7 +612,7 @@ class PullRequestDiffTest(unittest.TestCase):
                 server.pull_request_target("https://github.com/example/repo/pull/12")
 
 
-class SessionPinTest(unittest.TestCase):
+class SessionPositionTest(unittest.TestCase):
     def test_pinned_session_is_rendered_before_active_unpinned_session(self):
         sessions = [
             self._session("agent-pinned", pinned=True),
@@ -641,6 +641,29 @@ class SessionPinTest(unittest.TestCase):
             sidebar.index("session=agent-active"),
         )
 
+    def test_deferred_session_is_rendered_after_normal_session(self):
+        sessions = [
+            self._session("agent-later", position="later"),
+            self._session("agent-normal", position="normal"),
+        ]
+        with mock.patch.object(server, "managed_sessions", return_value=sessions):
+            sidebar = server.build_sidebar(None)
+
+        self.assertLess(
+            sidebar.index("session=agent-normal"),
+            sidebar.index("後回し"),
+        )
+        self.assertLess(
+            sidebar.index("後回し"),
+            sidebar.index("session=agent-later"),
+        )
+        self.assertIn("1件", sidebar)
+
+    def test_position_is_exclusive_even_when_legacy_pinned_is_true(self):
+        session = self._session("agent-later", pinned=True, position="later")
+
+        self.assertEqual("later", server.session_position(session))
+
     def test_pinned_metadata_is_restored_on_restarted_session(self):
         calls = []
         with mock.patch.object(
@@ -652,6 +675,22 @@ class SessionPinTest(unittest.TestCase):
             )
 
         self.assertIn(
+            ("set-option", "-t", "agent-new", "@launcher_pinned", "1"), calls
+        )
+
+    def test_deferred_metadata_is_restored_on_restarted_session(self):
+        calls = []
+        with mock.patch.object(
+            server, "tmux_run",
+            side_effect=lambda *args: calls.append(args) or SimpleNamespace(),
+        ):
+            server.set_session_metadata("agent-new", position="later")
+
+        self.assertIn(
+            ("set-option", "-t", "agent-new", "@launcher_position", "later"),
+            calls,
+        )
+        self.assertNotIn(
             ("set-option", "-t", "agent-new", "@launcher_pinned", "1"), calls
         )
 
@@ -674,12 +713,12 @@ class SessionPinTest(unittest.TestCase):
         )
 
     @staticmethod
-    def _session(name, pinned=False):
+    def _session(name, pinned=False, position=None):
         return {
             "name": name, "tool": "codex", "cwd": "/tmp/project",
             "summary": "summary", "last_message": "summary", "note": "",
             "running": False, "background": "", "context": None,
-            "artifacts": [], "pinned": pinned,
+            "artifacts": [], "pinned": pinned, "position": position,
         }
 
 
