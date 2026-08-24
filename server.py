@@ -3339,6 +3339,13 @@ TERMINAL_PAGE = r"""<!doctype html>
   .diff-add {{ background: #2ea04326; }} .diff-del {{ background: #f8514926; }}
   .diff-hunk {{ color: #8ab4f8; background: #1f6feb20; }}
   .diff-note {{ color: #8b949e; }}
+  /* 差分のシンタックスハイライト（GitHubダークテーマ準拠の配色） */
+  .tok-c {{ color: #8b949e; font-style: italic; }}
+  .tok-s {{ color: #a5d6ff; }}
+  .tok-k {{ color: #ff7b72; }}
+  .tok-n {{ color: #79c0ff; }}
+  .tok-t {{ color: #7ee787; }}
+  .tok-f {{ color: #d2a8ff; }}
   #review-selection {{ flex-shrink: 0; display: flex; align-items: center; gap: 7px;
     padding: 7px 11px; border-bottom: 1px solid #30363d; background: #1f6feb1f;
     color: #8ab4f8; font-size: .8rem; }}
@@ -3637,6 +3644,82 @@ TERMINAL_PAGE = r"""<!doctype html>
       + "）をレビューしています。\n" + input.value;
     syncInput();
   }}
+  // 拡張子から言語グループを引き、行単位の正規表現でトークン色分けする。
+  // 複数行コメント等は行をまたぐと崩れるが、差分ビューアの用途では許容する
+  const DIFF_HIGHLIGHT_SPECS = {{
+    clike: {{comment: "//.*|/\\*.*?(?:\\*/|$)",
+      keywords: "abstract as async await break case catch chan class const continue"
+        + " debugger default defer delete do else enum export extends fallthrough final"
+        + " finally fn for func function get go if impl implements import in instanceof"
+        + " interface internal is let loop match mod module mut new nil null of override"
+        + " package private protected pub public range readonly return select self set"
+        + " static struct super switch this throw trait true try type typeof undefined"
+        + " unsafe use var void when where while with yield"}},
+    py: {{comment: "#.*",
+      keywords: "False None True and as assert async await break class continue def del"
+        + " elif else except finally for from global if import in is lambda nonlocal not"
+        + " or pass raise return self try while with yield"}},
+    rb: {{comment: "#.*",
+      keywords: "alias and attr_accessor attr_reader attr_writer begin break case class"
+        + " def do else elsif end ensure false for if in module next nil not or private"
+        + " protected public raise redo require require_relative rescue retry return self"
+        + " super then true undef unless until when while yield"}},
+    sh: {{comment: "#.*",
+      keywords: "case do done echo elif else esac exit export fi for function if in"
+        + " local read return set shift then unset until while"}},
+    sql: {{comment: "--.*", ignoreCase: true,
+      keywords: "add all alter and as asc begin by case column commit create default"
+        + " delete desc distinct drop else end exists foreign from group having in index"
+        + " inner insert into is join key left like limit not null offset on or order"
+        + " outer primary references right rollback select set table then to transaction"
+        + " union unique update values when where"}},
+    css: {{comment: "/\\*.*?(?:\\*/|$)", keywords: ""}},
+    html: {{comment: "<!--.*", keywords: "", tag: "</?[a-zA-Z][-\\w]*|/?>"}},
+    data: {{comment: "#.*", keywords: "true false null"}},
+  }};
+  const DIFF_EXT_LANG = {{
+    js: "clike", mjs: "clike", cjs: "clike", ts: "clike", tsx: "clike", jsx: "clike",
+    go: "clike", rs: "clike", java: "clike", kt: "clike", swift: "clike", dart: "clike",
+    c: "clike", h: "clike", cpp: "clike", hpp: "clike", cs: "clike", php: "clike",
+    scala: "clike", py: "py", rb: "rb", rake: "rb", gemspec: "rb",
+    sh: "sh", bash: "sh", zsh: "sh", sql: "sql", css: "css", scss: "css", less: "css",
+    html: "html", htm: "html", erb: "html", vue: "html", svelte: "html", xml: "html",
+    json: "data", yml: "data", yaml: "data", toml: "data", tf: "data",
+  }};
+  const diffLangPatterns = new Map();
+  function diffLangFor(path) {{
+    const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
+    const name = DIFF_EXT_LANG[ext];
+    if (!name) return null;
+    if (!diffLangPatterns.has(name)) {{
+      const spec = DIFF_HIGHLIGHT_SPECS[name];
+      const parts = [
+        "(?<c>" + spec.comment + ")",
+        "(?<s>\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|`(?:\\\\.|[^`\\\\])*`)",
+      ];
+      if (spec.keywords) {{
+        parts.push("\\b(?<k>" + spec.keywords.trim().split(/\s+/).join("|") + ")\\b");
+      }}
+      if (spec.tag) parts.push("(?<t>" + spec.tag + ")");
+      parts.push("\\b(?<n>\\d[\\w]*(?:\\.[\\w]+)*)\\b");
+      parts.push("\\b(?<f>[A-Za-z_][\\w$]*)(?=\\s*\\()");
+      diffLangPatterns.set(name, new RegExp(parts.join("|"), spec.ignoreCase ? "gi" : "g"));
+    }}
+    return diffLangPatterns.get(name);
+  }}
+  function appendHighlighted(parent, text, pattern) {{
+    let last = 0;
+    for (const match of text.matchAll(pattern)) {{
+      if (match.index > last) parent.append(text.slice(last, match.index));
+      const kind = Object.keys(match.groups).find(name => match.groups[name] !== undefined);
+      const span = document.createElement("span");
+      span.className = "tok-" + kind;
+      span.textContent = match[0];
+      parent.append(span);
+      last = match.index + match[0].length;
+    }}
+    if (last < text.length) parent.append(text.slice(last));
+  }}
   function splitPatch(patch) {{
     const sections = new Map();
     let current = null;
@@ -3664,6 +3747,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     const heading = document.createElement("div");
     heading.className = "diff-file-title"; heading.textContent = file.path;
     reviewDiff.append(heading);
+    const langPattern = diffLangFor(file.path);
     let oldLine = null, newLine = null;
     for (const [index, line] of (lines || []).entries()) {{
       const row = document.createElement("div"); row.className = "diff-row";
@@ -3680,7 +3764,14 @@ TERMINAL_PAGE = r"""<!doctype html>
       }}
       row.classList.add(lineClass);
       const no = document.createElement("span"); no.className = "diff-no"; no.textContent = shownLine;
-      const code = document.createElement("span"); code.className = "diff-code"; code.textContent = line;
+      const code = document.createElement("span"); code.className = "diff-code";
+      // 追加・削除・文脈行のみ色分けする。先頭の +/-/空白 は差分記号なので素通しする
+      if (langPattern && shownLine && line) {{
+        code.append(line.charAt(0));
+        appendHighlighted(code, line.slice(1), langPattern);
+      }} else {{
+        code.textContent = line;
+      }}
       row.append(no, code);
       if (shownLine && !document.body.classList.contains("readonly")) {{
         const key = file.path + "\u0000" + index;
