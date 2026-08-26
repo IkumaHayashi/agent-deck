@@ -223,6 +223,9 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn(
             'item.text.slice(0, 80) + item.text.slice(-80)', server.TERMINAL_PAGE
         )
+        # 最新の回答は全文のまま出る。新着で「最新」でなくなった瞬間に畳まれると
+        # 読んでいる本文が閉じてしまうので、展開済みとして記録しておく
+        self.assertIn("expandedBubbles.add(key)", server.TERMINAL_PAGE)
 
     def test_page_navigation_shows_loading_overlay(self):
         self.assertIn("#nav-loading", server.SIDEBAR_CSS)

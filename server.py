@@ -4755,9 +4755,13 @@ TERMINAL_PAGE = r"""<!doctype html>
       // 最新の回答は読みに来た本文なので畳まない。それ以外の長文は折りたたみ候補。
       // キーは内容ベースにする。履歴APIは末尾300件だけ返すため、位置（index）を
       // 使うと新着のたびにずれて、展開した吹き出しが畳み直されてしまう
-      if (!(item === lastItem && item.role === "assistant") && !bubble.querySelector(".pdf-card")) {{
-        const key = item.role + "|" + item.text.length + "|"
-          + item.text.slice(0, 80) + item.text.slice(-80);
+      const key = item.role + "|" + item.text.length + "|"
+        + item.text.slice(0, 80) + item.text.slice(-80);
+      if (item === lastItem && item.role === "assistant") {{
+        // 全文で見せた回答は、新着で「最新」でなくなっても畳み直さない。
+        // Set はページを開き直すと空になるので、再訪時は畳まれた状態に戻る
+        expandedBubbles.add(key);
+      }} else if (!bubble.querySelector(".pdf-card")) {{
         collapsible.push({{row, bubble, key}});
       }}
     }}
