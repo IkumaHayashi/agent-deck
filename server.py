@@ -4056,6 +4056,14 @@ TERMINAL_PAGE = r"""<!doctype html>
   function clearDiffSelection() {{
     selectedDiffLines.clear(); lastSelectedLine = null; updateDiffSelection();
   }}
+  // 既存の選択に隣接しているか（同じファイルで隣の行まで）。離れた場所を
+  // 選び直すことが多いため、隣接しない新規選択は前の選択を置き換える
+  function isNearSelection(item) {{
+    for (const selected of selectedDiffLines.values()) {{
+      if (selected.path === item.path && Math.abs(selected.index - item.index) <= 1) return true;
+    }}
+    return false;
+  }}
   function toggleDiffRow(row, withShift) {{
     const item = row._diffItem;
     if (!item) return;
@@ -4070,6 +4078,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     }} else if (selectedDiffLines.has(item.key)) {{
       selectedDiffLines.delete(item.key);
     }} else {{
+      if (!isNearSelection(item)) selectedDiffLines.clear();
       selectedDiffLines.set(item.key, item);
     }}
     lastSelectedLine = item; updateDiffSelection();
@@ -4119,7 +4128,9 @@ TERMINAL_PAGE = r"""<!doctype html>
     if (!row) return;
     event.preventDefault();  // ドラッグ中にテキスト選択が走らないようにする
     dragPointer = event.pointerId; dragAnchorRow = row; dragMoved = false;
-    dragBaseSelection = new Map(selectedDiffLines);
+    // 既存の選択から離れた場所のドラッグは選択の置き換えとして扱う
+    dragBaseSelection = row._diffItem && isNearSelection(row._diffItem)
+      ? new Map(selectedDiffLines) : new Map();
     dragClientX = event.clientX; dragClientY = event.clientY;
     try {{ reviewDiff.setPointerCapture(event.pointerId); }} catch {{ /* 未対応環境では追従のみ */ }}
     dragScrollRaf = requestAnimationFrame(dragAutoScroll);
