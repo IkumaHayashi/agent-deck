@@ -173,6 +173,8 @@ CW_ENABLED = bool(CW_ACCOUNT_ID) and os.path.exists(CW_TOKEN_PATH)
 CW_CACHE_PATH = f"{DATA_DIR}/cw_cache.json"
 # 過去の会話の画像も表示し続けられるよう、tmp ではなく永続領域に置く
 UPLOAD_DIR = f"{DATA_DIR}/uploads"
+# PRレビュー用に切り出す git worktree の置き場所
+WORKTREES_DIR = f"{DATA_DIR}/worktrees"
 # 過去ログに残る旧保存先の添付も表示できるよう、パス検出の対象に含める
 UPLOAD_PATH_PREFIXES = [DATA_DIR] + [_expand(p) for p in CONFIG.get("legacy_upload_dirs", [])]
 # 会話ログ中の「添付画像: <パス>」等を検出する正規表現（Python 側）
@@ -1875,6 +1877,27 @@ def _parse_git_numstat(output):
     return files
 
 
+def _parse_git_name_status(output):
+    """git diff --name-status -z の出力を path→ステータス文字（A/M/D/R/C）に変換する。"""
+    entries = output.split("\0")
+    statuses = {}
+    index = 0
+    while index < len(entries):
+        entry = entries[index]
+        index += 1
+        if not entry or index >= len(entries):
+            continue
+        status = entry[0]
+        path = entries[index]
+        index += 1
+        if status in "RC" and index < len(entries):
+            # rename/copy は old, new の2要素が続くので new をキーにする。
+            path = entries[index]
+            index += 1
+        statuses[path] = status
+    return statuses
+
+
 def directory_diff(cwd):
     """cwd の作業ツリーと、そのリポジトリのデフォルトブランチとの差分を返す。"""
     branch, base_ref = git_default_branch(cwd)
@@ -1901,6 +1924,11 @@ def directory_diff(cwd):
     )
     if stats.returncode != 0:
         raise RuntimeError(stats.stderr.strip() or "変更ファイルを取得できませんでした")
+    names = subprocess.run(
+        [git, "diff", "--name-status", "-z", *common_args], cwd=cwd,
+        capture_output=True, text=True, timeout=20,
+    )
+    statuses = _parse_git_name_status(names.stdout) if names.returncode == 0 else {}
     diff = subprocess.run(
         [git, "diff", "--patch", *common_args], cwd=cwd,
         capture_output=True, text=True, timeout=30,
@@ -1909,10 +1937,13 @@ def directory_diff(cwd):
         raise RuntimeError(diff.stderr.strip() or "差分を取得できませんでした")
     if len(diff.stdout.encode("utf-8")) > 5 * 1024 * 1024:
         raise ValueError("差分が5MBを超えています。Gitで確認してください")
+    files = _parse_git_numstat(stats.stdout)
+    for file in files:
+        file["status"] = statuses.get(file["path"], "M")
     return {
         "baseRefName": branch,
         "headRefName": head,
-        "files": _parse_git_numstat(stats.stdout),
+        "files": files,
         "patch": diff.stdout,
     }
 
@@ -2002,6 +2033,39 @@ def pull_request_target(selector):
     item["cwd"] = cwd
     item["repositoryName"] = match.group("repo")
     return item
+
+
+def pull_request_worktree(target):
+    """PRのheadを検出した専用worktreeを用意し、そのパスを返す。
+
+    レビュー画面の差分はセッションの作業ツリーとデフォルトブランチの比較なので、
+    本体リポジトリのままレビューを起動するとPRと無関係な差分が表示される。
+    PRごとのworktreeでPR headをチェックアウトして、そこでセッションを起動する。
+    """
+    repo = target["cwd"]
+    dirname = f'{os.path.basename(repo.rstrip("/"))}-pr-{target["number"]}'
+    path = os.path.join(WORKTREES_DIR, dirname)
+    fresh = not os.path.isdir(path)
+    if fresh:
+        os.makedirs(WORKTREES_DIR, exist_ok=True)
+        git = find_bin("git")
+        add = subprocess.run(
+            [git, "worktree", "add", "--detach", path], cwd=repo,
+            capture_output=True, text=True, timeout=30,
+        )
+        if add.returncode != 0:
+            raise RuntimeError(add.stderr.strip() or "worktreeを作成できませんでした")
+    # --detach ならPRブランチが本体でチェックアウト済みでも衝突しない。
+    checkout = subprocess.run(
+        [find_bin("gh"), "pr", "checkout", str(target["number"]), "--detach"],
+        cwd=path, capture_output=True, text=True, timeout=60,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    if checkout.returncode != 0 and fresh:
+        raise RuntimeError(checkout.stderr.strip() or "PRブランチを取得できませんでした")
+    # 既存worktreeの更新失敗（レビュー中の修正で作業ツリーが汚れている等）は
+    # 手元の状態を壊さないことを優先し、そのまま続行する。
+    return path
 
 
 def codex_session_head(path):
@@ -3626,12 +3690,24 @@ TERMINAL_PAGE = r"""<!doctype html>
   #review-message {{ padding: 20px; color: #8b949e; line-height: 1.5; }}
   #review-files {{ flex-shrink: 0; max-height: 30%; overflow-y: auto;
     border-bottom: 1px solid #30363d; }}
-  .review-file {{ display: flex; align-items: center; width: 100%; gap: 8px; padding: 8px 11px;
-    text-align: left; border: 0; border-bottom: 1px solid #21262d; border-radius: 0;
+  .review-dir, .review-file {{ display: flex; align-items: center; width: 100%; gap: 6px;
+    padding: 5px 11px; text-align: left; border: 0; border-radius: 0;
     background: #161b22; font: .78rem ui-monospace, SFMono-Regular, Menlo, monospace; }}
+  .review-dir:hover, .review-file:hover {{ background: #21262d; }}
   .review-file.active {{ background: #1f6feb22; color: #fff; }}
-  .review-file .path {{ min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; }}
+  .review-dir .chevron {{ flex: 0 0 auto; width: 12px; color: #8b949e;
+    transition: transform .1s; }}
+  .review-dir.collapsed .chevron {{ transform: rotate(-90deg); }}
+  .review-dir .folder {{ flex: 0 0 auto; color: #768ea7; }}
+  .review-dir .path, .review-file .path {{ min-width: 0; flex: 1; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }}
   .review-file .adds {{ color: #3fb950; }} .review-file .dels {{ color: #f85149; }}
+  /* GitHub風の変更種別アイコン（追加/変更/削除/リネーム） */
+  .review-file .st {{ flex: 0 0 auto; box-sizing: border-box; width: 14px; height: 14px;
+    border: 1px solid currentColor; border-radius: 3px; font-size: 10px;
+    line-height: 11px; text-align: center; user-select: none; }}
+  .st-A {{ color: #3fb950; }} .st-M {{ color: #d29922; }}
+  .st-D {{ color: #f85149; }} .st-R {{ color: #8b949e; }}
   #review-diff {{ flex: 1; min-height: 0; overflow: auto; font: 12px/1.5 ui-monospace,
     SFMono-Regular, Menlo, monospace; }}
   .diff-file-title {{ position: sticky; top: 0; z-index: 1; padding: 8px 10px;
@@ -4149,6 +4225,79 @@ TERMINAL_PAGE = r"""<!doctype html>
     updateDiffSelection();
     reviewDiff.hidden = false;
   }}
+  const FILE_STATUS_BADGES = {{
+    A: ["+", "追加", "st-A"], D: ["−", "削除", "st-D"],
+    R: ["→", "リネーム", "st-R"], C: ["→", "コピー", "st-R"],
+  }};
+  function fileStatusBadge(status) {{
+    const [mark, label, cls] = FILE_STATUS_BADGES[status] || ["•", "変更", "st-M"];
+    const badge = document.createElement("span");
+    badge.className = "st " + cls; badge.textContent = mark; badge.title = label;
+    return badge;
+  }}
+  function folderIcon() {{
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", "14"); svg.setAttribute("height", "14");
+    svg.classList.add("folder");
+    const shape = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    shape.setAttribute("fill", "currentColor");
+    shape.setAttribute("d", "M1.75 2.5h3.4c.54 0 1.05.24 1.39.66l.46.58c.05.06"
+      + ".12.1.2.1h7.05c.69 0 1.25.56 1.25 1.25v7.16c0 .69-.56 1.25-1.25 1.25"
+      + "H1.75c-.69 0-1.25-.56-1.25-1.25V3.75c0-.69.56-1.25 1.25-1.25Z");
+    svg.append(shape);
+    return svg;
+  }}
+  function buildFileTree(files) {{
+    const root = {{dirs: new Map(), files: []}};
+    for (const file of files) {{
+      const parts = file.path.split("/");
+      let node = root;
+      for (const part of parts.slice(0, -1)) {{
+        if (!node.dirs.has(part)) node.dirs.set(part, {{dirs: new Map(), files: []}});
+        node = node.dirs.get(part);
+      }}
+      node.files.push(file);
+    }}
+    return root;
+  }}
+  function renderFileTree(node, depth, container, buttons, selectFile) {{
+    const indent = 11 + depth * 13;
+    for (const name of [...node.dirs.keys()].sort()) {{
+      // GitHubと同様、ファイルを含まない一本道のディレクトリは1行にまとめる
+      let label = name, child = node.dirs.get(name);
+      while (!child.files.length && child.dirs.size === 1) {{
+        const only = child.dirs.keys().next().value;
+        label += "/" + only; child = child.dirs.get(only);
+      }}
+      const button = document.createElement("button"); button.type = "button";
+      button.className = "review-dir"; button.style.paddingLeft = indent + "px";
+      const chevron = document.createElement("span");
+      chevron.className = "chevron"; chevron.textContent = "▾";
+      const path = document.createElement("span"); path.className = "path";
+      path.textContent = label;
+      button.append(chevron, folderIcon(), path);
+      const children = document.createElement("div");
+      button.addEventListener("click", () => {{
+        children.hidden = button.classList.toggle("collapsed");
+      }});
+      container.append(button, children);
+      renderFileTree(child, depth + 1, children, buttons, selectFile);
+    }}
+    for (const file of [...node.files].sort((a, b) => a.path.localeCompare(b.path))) {{
+      const button = document.createElement("button"); button.type = "button";
+      button.className = "review-file";
+      button.style.paddingLeft = (indent + 18) + "px";
+      const path = document.createElement("span"); path.className = "path";
+      path.textContent = file.path.split("/").pop(); path.title = file.path;
+      const adds = document.createElement("span"); adds.className = "adds"; adds.textContent = "+" + file.additions;
+      const dels = document.createElement("span"); dels.className = "dels"; dels.textContent = "−" + file.deletions;
+      button.append(fileStatusBadge(file.status), path, adds, dels);
+      button.addEventListener("click", () => selectFile(file, button));
+      buttons.set(file.path, button);
+      container.append(button);
+    }}
+  }}
   function renderDirectoryDiff(data) {{
     reviewData = data;
     reviewTitle.textContent = "変更差分";
@@ -4157,21 +4306,19 @@ TERMINAL_PAGE = r"""<!doctype html>
     reviewMessage.hidden = true; reviewFiles.hidden = false; reviewDiff.hidden = false;
     const patches = splitPatch(data.patch);
     const files = data.files || [];
-    reviewFiles.replaceChildren(...files.map((file, index) => {{
-      const button = document.createElement("button"); button.type = "button";
-      button.className = "review-file" + (index === 0 ? " active" : "");
-      const path = document.createElement("span"); path.className = "path"; path.textContent = file.path;
-      const adds = document.createElement("span"); adds.className = "adds"; adds.textContent = "+" + file.additions;
-      const dels = document.createElement("span"); dels.className = "dels"; dels.textContent = "−" + file.deletions;
-      button.append(path, adds, dels);
-      button.addEventListener("click", () => {{
-        reviewFiles.querySelectorAll(".review-file").forEach(item => item.classList.remove("active"));
-        button.classList.add("active"); renderDiffFile(file, patches.get(file.path) || []);
-      }});
-      return button;
-    }}));
-    if (files.length) renderDiffFile(files[0], patches.get(files[0].path) || []);
-    else {{ reviewDiff.textContent = "変更ファイルはありません"; }}
+    const selectFile = (file, button) => {{
+      reviewFiles.querySelectorAll(".review-file").forEach(item => item.classList.remove("active"));
+      button.classList.add("active");
+      renderDiffFile(file, patches.get(file.path) || []);
+    }};
+    const buttons = new Map();
+    reviewFiles.replaceChildren();
+    renderFileTree(buildFileTree(files), 0, reviewFiles, buttons, selectFile);
+    if (files.length) {{
+      const first = buttons.get(files[0].path);
+      if (first) first.classList.add("active");
+      renderDiffFile(files[0], patches.get(files[0].path) || []);
+    }} else {{ reviewDiff.textContent = "変更ファイルはありません"; }}
   }}
   function openReview() {{
     document.body.classList.add("review-open");
@@ -5975,6 +6122,14 @@ class Handler(BaseHTTPRequestHandler):
         if pull_request:
             # レビュー起動では対象PRを別途書き出すため、通常起動用の入力欄は引き継がない。
             prompt = ""
+            # PRのheadをチェックアウトした専用worktreeで起動し、
+            # レビュー画面の差分がPRの変更内容と一致するようにする。
+            try:
+                path = pull_request_worktree(pull_request_target(pull_request))
+            except (LookupError, RuntimeError, ValueError) as exc:
+                return self._page(render(
+                    f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"
+                ))
         prompt = prompt.strip()
         if len(prompt) > 8000:
             return self._page(render('<div class="msg err">❌ プロンプトが長すぎます（8000文字まで）</div>', "new"))

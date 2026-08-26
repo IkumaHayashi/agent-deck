@@ -83,6 +83,13 @@ class FrontendTemplateTest(unittest.TestCase):
             mock.patch.object(server, "wait_for_new_session_id", return_value="session-id"),
             mock.patch.object(server, "set_session_metadata"),
             mock.patch.object(server, "invalidate_session_cache"),
+            mock.patch.object(
+                server, "pull_request_target",
+                return_value={"cwd": "/tmp/project", "number": 42},
+            ),
+            mock.patch.object(
+                server, "pull_request_worktree", return_value="/tmp/worktrees/project-pr-42"
+            ) as worktree,
             mock.patch.object(handler, "_redirect"),
         ):
             handler._launch(
@@ -91,6 +98,9 @@ class FrontendTemplateTest(unittest.TestCase):
             )
 
         self.assertNotIn("通常起動用の指示", run.call_args.args[0])
+        # PRレビューはPR headを取得したworktreeで起動する
+        worktree.assert_called_once()
+        self.assertIn("/tmp/worktrees/project-pr-42", run.call_args.args[0])
 
     def test_review_context_is_seeded_into_input_without_sending(self):
         # レビュー対象PRは入力欄への書き出しプリセットでAIへ伝える（自動送信はしない）
@@ -591,6 +601,7 @@ class DirectoryDiffTest(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="feature/review\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="base123\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="10\t2\tserver.py\0", stderr=""),
+            SimpleNamespace(returncode=0, stdout="M\0server.py\0", stderr=""),
             SimpleNamespace(returncode=0, stdout="diff --git a/server.py b/server.py\n", stderr=""),
         ]
         with (
@@ -606,7 +617,7 @@ class DirectoryDiffTest(unittest.TestCase):
         self.assertEqual("main", result["baseRefName"])
         self.assertEqual("feature/review", result["headRefName"])
         self.assertEqual(
-            [{"path": "server.py", "additions": 10, "deletions": 2}],
+            [{"path": "server.py", "additions": 10, "deletions": 2, "status": "M"}],
             result["files"],
         )
         self.assertIn("diff --git", result["patch"])
@@ -615,9 +626,14 @@ class DirectoryDiffTest(unittest.TestCase):
             run.call_args_list[0].args[0],
         )
         self.assertEqual(
+            ["/usr/bin/git", "diff", "--name-status", "-z", "--no-ext-diff",
+             "--find-renames", "base123", "--"],
+            run.call_args_list[3].args[0],
+        )
+        self.assertEqual(
             ["/usr/bin/git", "diff", "--patch", "--no-ext-diff", "--find-renames",
              "base123", "--"],
-            run.call_args_list[3].args[0],
+            run.call_args_list[4].args[0],
         )
 
     def test_uses_remote_symbolic_default_branch(self):
@@ -668,6 +684,63 @@ class DirectoryDiffTest(unittest.TestCase):
         self.assertEqual(
             [{"path": "new.py", "additions": 3, "deletions": 1}], result
         )
+
+    def test_name_status_maps_paths_and_uses_new_path_for_renames(self):
+        result = server._parse_git_name_status(
+            "A\0created.txt\0D\0del.txt\0M\0mod.txt\0R100\0old.txt\0new.txt\0"
+        )
+
+        self.assertEqual(
+            {"created.txt": "A", "del.txt": "D", "mod.txt": "M", "new.txt": "R"},
+            result,
+        )
+
+    def test_pull_request_worktree_creates_worktree_and_checks_out_pr(self):
+        ok = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            tempfile.TemporaryDirectory() as repo,
+            mock.patch.object(
+                server, "WORKTREES_DIR", os.path.join(data_dir, "worktrees")
+            ),
+            mock.patch.object(
+                server, "find_bin", side_effect=lambda name, *a: f"/usr/bin/{name}"
+            ),
+            mock.patch.object(server.subprocess, "run", return_value=ok) as run,
+        ):
+            path = server.pull_request_worktree({"cwd": repo, "number": 7})
+
+            expected = os.path.join(
+                server.WORKTREES_DIR, os.path.basename(repo) + "-pr-7"
+            )
+        self.assertEqual(expected, path)
+        self.assertEqual(
+            ["/usr/bin/git", "worktree", "add", "--detach", expected],
+            run.call_args_list[0].args[0],
+        )
+        self.assertEqual(repo, run.call_args_list[0].kwargs["cwd"])
+        self.assertEqual(
+            ["/usr/bin/gh", "pr", "checkout", "7", "--detach"],
+            run.call_args_list[1].args[0],
+        )
+        self.assertEqual(expected, run.call_args_list[1].kwargs["cwd"])
+
+    def test_pull_request_worktree_keeps_existing_worktree_on_update_failure(self):
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="dirty")
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            mock.patch.object(server, "WORKTREES_DIR", data_dir),
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/gh"),
+            mock.patch.object(server.subprocess, "run", return_value=failed) as run,
+        ):
+            existing = os.path.join(data_dir, "repo-pr-7")
+            os.makedirs(existing)
+            path = server.pull_request_worktree(
+                {"cwd": "/home/user/repo", "number": 7}
+            )
+        self.assertEqual(existing, path)
+        # 既存worktreeなら worktree add は走らず、checkout失敗でもそのまま使う
+        self.assertEqual(1, run.call_count)
 
     def test_non_git_directory_has_friendly_error(self):
         failed = SimpleNamespace(returncode=1, stdout="", stderr="not a git repository")
