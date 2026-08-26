@@ -4056,6 +4056,96 @@ TERMINAL_PAGE = r"""<!doctype html>
   function clearDiffSelection() {{
     selectedDiffLines.clear(); lastSelectedLine = null; updateDiffSelection();
   }}
+  function toggleDiffRow(row, withShift) {{
+    const item = row._diffItem;
+    if (!item) return;
+    if (withShift && lastSelectedLine && lastSelectedLine.path === item.path) {{
+      const start = Math.min(lastSelectedLine.index, item.index);
+      const end = Math.max(lastSelectedLine.index, item.index);
+      reviewDiff.querySelectorAll(".diff-row[data-line-key]").forEach(candidate => {{
+        const candidateIndex = Number(candidate.dataset.lineIndex);
+        if (candidateIndex < start || candidateIndex > end) return;
+        if (candidate._diffItem) selectedDiffLines.set(candidate._diffItem.key, candidate._diffItem);
+      }});
+    }} else if (selectedDiffLines.has(item.key)) {{
+      selectedDiffLines.delete(item.key);
+    }} else {{
+      selectedDiffLines.set(item.key, item);
+    }}
+    lastSelectedLine = item; updateDiffSelection();
+  }}
+  // ドラッグで複数行をまとめて選択する。タッチはスクロールと衝突するので
+  // 対象外（従来どおりタップで1行ずつ / Shiftクリックで範囲選択）
+  let dragPointer = null, dragAnchorRow = null, dragMoved = false;
+  let dragBaseSelection = null, dragClientX = 0, dragClientY = 0;
+  let dragScrollRaf = 0, suppressRowClick = false;
+  function dragRowAt(clientX, clientY) {{
+    const target = document.elementFromPoint(clientX, clientY);
+    return target ? target.closest(".diff-row[data-line-key]") : null;
+  }}
+  function applyDragRange(row) {{
+    if (!row || !dragAnchorRow || !row._diffItem) return;
+    const start = Math.min(Number(dragAnchorRow.dataset.lineIndex), Number(row.dataset.lineIndex));
+    const end = Math.max(Number(dragAnchorRow.dataset.lineIndex), Number(row.dataset.lineIndex));
+    // ドラッグ開始前の選択状態へ毎回リセットしてから範囲を足すことで、
+    // ドラッグを縮めたときに行き過ぎた分の選択が残らないようにする
+    selectedDiffLines.clear();
+    dragBaseSelection.forEach((value, key) => selectedDiffLines.set(key, value));
+    reviewDiff.querySelectorAll(".diff-row[data-line-key]").forEach(candidate => {{
+      const candidateIndex = Number(candidate.dataset.lineIndex);
+      if (candidateIndex < start || candidateIndex > end) return;
+      if (candidate._diffItem) selectedDiffLines.set(candidate._diffItem.key, candidate._diffItem);
+    }});
+    lastSelectedLine = row._diffItem;
+    updateDiffSelection();
+  }}
+  function dragAutoScroll() {{
+    if (dragPointer === null) return;
+    const bounds = reviewDiff.getBoundingClientRect();
+    const margin = 28;
+    let delta = 0;
+    if (dragClientY < bounds.top + margin) delta = -Math.min(24, bounds.top + margin - dragClientY);
+    else if (dragClientY > bounds.bottom - margin) delta = Math.min(24, dragClientY - (bounds.bottom - margin));
+    if (delta && dragMoved) {{
+      reviewDiff.scrollTop += delta;
+      applyDragRange(dragRowAt(dragClientX, dragClientY));
+    }}
+    dragScrollRaf = requestAnimationFrame(dragAutoScroll);
+  }}
+  reviewDiff.addEventListener("pointerdown", event => {{
+    if (event.button !== 0 || event.pointerType === "touch") return;
+    if (event.altKey) return;  // Alt押下時は通常のテキスト選択を通す
+    const row = event.target.closest ? event.target.closest(".diff-row[data-line-key]") : null;
+    if (!row) return;
+    event.preventDefault();  // ドラッグ中にテキスト選択が走らないようにする
+    dragPointer = event.pointerId; dragAnchorRow = row; dragMoved = false;
+    dragBaseSelection = new Map(selectedDiffLines);
+    dragClientX = event.clientX; dragClientY = event.clientY;
+    try {{ reviewDiff.setPointerCapture(event.pointerId); }} catch {{ /* 未対応環境では追従のみ */ }}
+    dragScrollRaf = requestAnimationFrame(dragAutoScroll);
+  }});
+  reviewDiff.addEventListener("pointermove", event => {{
+    if (event.pointerId !== dragPointer) return;
+    dragClientX = event.clientX; dragClientY = event.clientY;
+    const row = dragRowAt(event.clientX, event.clientY);
+    if (!row || (!dragMoved && row === dragAnchorRow)) return;
+    dragMoved = true;
+    applyDragRange(row);
+  }});
+  function endDiffDrag(event) {{
+    if (event.pointerId !== dragPointer) return;
+    cancelAnimationFrame(dragScrollRaf);
+    // 動かさず離した場合はクリック相当のトグルとして扱う。pointer capture中は
+    // click の届き先がブラウザにより異なるため、click側は一律無視させる
+    if (!dragMoved && dragAnchorRow && event.type === "pointerup") {{
+      toggleDiffRow(dragAnchorRow, event.shiftKey);
+    }}
+    dragPointer = null; dragAnchorRow = null; dragBaseSelection = null;
+    suppressRowClick = true;
+    setTimeout(() => {{ suppressRowClick = false; }}, 0);
+  }}
+  reviewDiff.addEventListener("pointerup", endDiffDrag);
+  reviewDiff.addEventListener("pointercancel", endDiffDrag);
   const reviewSeedKey = "reviewSeed:" + session;
   // 端末内のAIはPRの紐づけを知らないため、レビュー対象を伝える書き出しを
   // 入力欄へ一度だけプリセットする。送信するかどうかはユーザーに任せる
@@ -4200,23 +4290,12 @@ TERMINAL_PAGE = r"""<!doctype html>
         const key = file.path + "\u0000" + index;
         const item = {{key, path: file.path, line: shownLine, text: line, index}};
         row.classList.add("selectable"); row.dataset.lineKey = key;
-        row.title = "クリックして選択（Shiftで範囲選択）";
+        row.title = "クリックで選択・ドラッグやShiftクリックで範囲選択";
+        // マウス/ペンは pointer イベント側で処理済みなので、ここはタッチ等の
+        // click だけを拾う
         row.addEventListener("click", event => {{
-          if (event.shiftKey && lastSelectedLine && lastSelectedLine.path === file.path) {{
-            const start = Math.min(lastSelectedLine.index, index);
-            const end = Math.max(lastSelectedLine.index, index);
-            reviewDiff.querySelectorAll(".diff-row[data-line-key]").forEach(candidate => {{
-              const candidateIndex = Number(candidate.dataset.lineIndex);
-              if (candidateIndex < start || candidateIndex > end) return;
-              const candidateItem = candidate._diffItem;
-              if (candidateItem) selectedDiffLines.set(candidateItem.key, candidateItem);
-            }});
-          }} else if (selectedDiffLines.has(key)) {{
-            selectedDiffLines.delete(key);
-          }} else {{
-            selectedDiffLines.set(key, item);
-          }}
-          lastSelectedLine = item; updateDiffSelection();
+          if (suppressRowClick) return;
+          toggleDiffRow(row, event.shiftKey);
         }});
         row.dataset.lineIndex = String(index); row._diffItem = item;
       }}
