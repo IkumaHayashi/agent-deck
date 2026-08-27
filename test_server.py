@@ -12,6 +12,10 @@ MODULE_PATH = os.path.join(os.path.dirname(__file__), "server.py")
 SPEC = importlib.util.spec_from_file_location("launcher_server", MODULE_PATH)
 server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(server)
+# テスト中のセッション一覧取得が利用者の実データを更新しないよう隔離する。
+TEST_RUNTIME_DIR = tempfile.TemporaryDirectory()
+server.DATA_DIR = TEST_RUNTIME_DIR.name
+server.SESSION_REGISTRY_PATH = os.path.join(TEST_RUNTIME_DIR.name, "sessions.json")
 
 
 class FrontendTemplateTest(unittest.TestCase):
@@ -263,6 +267,7 @@ class FrontendTemplateTest(unittest.TestCase):
 class WorktreeCleanupTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
+        server.SESSION_REGISTRY_FORGOTTEN.clear()
         self.repo = os.path.join(self.temp_dir.name, "repo")
         os.makedirs(self.repo)
         self.git("init", self.repo)
@@ -338,6 +343,7 @@ class WorktreeCleanupTest(unittest.TestCase):
                 server, "tmux_run", side_effect=[panes, killed]
             ) as tmux,
             mock.patch.object(server, "invalidate_session_cache") as invalidate,
+            mock.patch.object(server, "forget_registered_session") as forget,
             mock.patch.object(
                 server, "remove_session_worktree",
                 side_effect=RuntimeError("変更があります"),
@@ -352,6 +358,7 @@ class WorktreeCleanupTest(unittest.TestCase):
             ("kill-session", "-t", "agent-test"), tmux.call_args_list[1].args
         )
         invalidate.assert_called_once_with()
+        forget.assert_called_once_with("agent-test")
 
     def test_session_is_not_terminated_when_other_panes_cannot_be_checked(self):
         failed = SimpleNamespace(returncode=1, stdout="", stderr="tmux failed")
@@ -360,6 +367,142 @@ class WorktreeCleanupTest(unittest.TestCase):
                 server.terminate_session("agent-test", "/tmp/worktree")
 
         tmux.assert_called_once()
+
+
+class SessionRestoreTest(unittest.TestCase):
+    SESSION_ID = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.data_dir_patch = mock.patch.object(server, "DATA_DIR", self.temp_dir.name)
+        self.registry_patch = mock.patch.object(
+            server, "SESSION_REGISTRY_PATH",
+            os.path.join(self.temp_dir.name, "sessions.json"),
+        )
+        self.data_dir_patch.start()
+        self.registry_patch.start()
+
+    def tearDown(self):
+        server.SESSION_REGISTRY_FORGOTTEN.clear()
+        self.registry_patch.stop()
+        self.data_dir_patch.stop()
+        self.temp_dir.cleanup()
+
+    def session(self, **overrides):
+        item = {
+            "name": "agent-20260828-120000-123",
+            "tool": "codex",
+            "cwd": self.temp_dir.name,
+            "session_id": self.SESSION_ID,
+            "summary": "再起動後も続ける作業",
+            "note": "確認待ち",
+            "position": "top",
+            "pull_request": "https://github.com/example/repo/pull/42",
+            "bypass": True,
+            "restore_model": "gpt-5.6",
+        }
+        item.update(overrides)
+        return item
+
+    def test_registry_keeps_only_resumable_non_ephemeral_sessions(self):
+        server.save_session_registry([
+            self.session(),
+            self.session(name="agent-ephemeral", ephemeral=True),
+            self.session(name="agent-shell", tool="shell", session_id=""),
+        ])
+
+        items = server.load_session_registry()
+
+        self.assertEqual(1, len(items))
+        self.assertEqual(self.SESSION_ID, items[0]["session_id"])
+        self.assertEqual("gpt-5.6", items[0]["model"])
+        self.assertEqual(0o600, os.stat(server.SESSION_REGISTRY_PATH).st_mode & 0o777)
+
+    def test_restores_missing_session_with_its_metadata_and_options(self):
+        server.save_session_registry([self.session()])
+        launched = SimpleNamespace(
+            returncode=0,
+            stdout="OK: restored (session agent-20260828-130000-456)\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(server, "live_registered_sessions", return_value=[]),
+            mock.patch.object(server, "conversation_log_path", return_value="/tmp/log.jsonl"),
+            mock.patch.object(server.subprocess, "run", return_value=launched) as run,
+            mock.patch.object(server, "set_session_metadata") as metadata,
+            mock.patch.object(server, "invalidate_session_cache"),
+        ):
+            report = server.restore_registered_sessions()
+
+        command = run.call_args.args[0]
+        self.assertIn("resume", command)
+        self.assertIn(self.SESSION_ID, command)
+        self.assertIn("--model", command)
+        self.assertIn("gpt-5.6", command)
+        self.assertIn("workspace-write", command)
+        self.assertEqual(["agent-20260828-130000-456"], report["restored"])
+        self.assertEqual([], report["failed"])
+        metadata.assert_called_once()
+        self.assertEqual(
+            "agent-20260828-130000-456",
+            server.load_session_registry()[0]["name"],
+        )
+
+    def test_existing_tmux_session_is_not_started_twice(self):
+        item = self.session()
+        server.save_session_registry([item])
+        current = {**item, "name": "agent-20260828-140000-789"}
+        with (
+            mock.patch.object(server, "live_registered_sessions", return_value=[current]),
+            mock.patch.object(server.subprocess, "run") as run,
+            mock.patch.object(server, "invalidate_session_cache"),
+        ):
+            report = server.restore_registered_sessions()
+
+        run.assert_not_called()
+        self.assertEqual({"restored": [], "failed": []}, report)
+        self.assertEqual(current["name"], server.load_session_registry()[0]["name"])
+
+    def test_failed_restore_is_kept_for_the_next_startup(self):
+        item = self.session()
+        server.save_session_registry([item])
+        failed = SimpleNamespace(returncode=1, stdout="", stderr="一時的な起動失敗")
+        with (
+            mock.patch.object(server, "live_registered_sessions", return_value=[]),
+            mock.patch.object(server, "conversation_log_path", return_value="/tmp/log.jsonl"),
+            mock.patch.object(server.subprocess, "run", return_value=failed),
+            mock.patch.object(server, "invalidate_session_cache"),
+        ):
+            report = server.restore_registered_sessions()
+
+        self.assertEqual([], report["restored"])
+        self.assertIn("一時的な起動失敗", report["failed"][0]["error"])
+        self.assertEqual(item["name"], server.load_session_registry()[0]["name"])
+
+    def test_stale_snapshot_cannot_restore_an_explicitly_ended_session(self):
+        item = self.session()
+        server.save_session_registry([item])
+
+        server.forget_registered_session(item["name"])
+        server.save_session_registry([item])
+
+        self.assertEqual([], server.load_session_registry())
+
+    def test_server_startup_registers_live_sessions_before_restore(self):
+        restorable = self.session()
+        ephemeral = self.session(name="agent-ephemeral", ephemeral=True)
+        with (
+            mock.patch.object(
+                server, "load_managed_sessions",
+                return_value=[restorable, ephemeral],
+            ) as load,
+            mock.patch.object(server, "upsert_registered_session") as upsert,
+        ):
+            registered = server.register_live_sessions_for_restore()
+
+        load.assert_called_once_with(persist=False)
+        upsert.assert_called_once_with(restorable)
+        self.assertEqual(1, registered)
 
 
 class CodexSessionTest(unittest.TestCase):

@@ -6,6 +6,9 @@
   "_data_dir": "アップロード画像・キャッシュの保存先（既定 ~/.local/share/agent-deck）",
   "data_dir": "~/.local/share/agent-deck",
 
+  "_restore_sessions": "Mac再起動後に保存済みの通常セッションを会話IDから自動復元する",
+  "restore_sessions": true,
+
   "_project_bases": "直下のディレクトリをドロップダウンに列挙する親ディレクトリ",
   "project_bases": [
     "~/projects"

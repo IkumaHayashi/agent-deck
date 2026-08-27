@@ -164,6 +164,12 @@ PORT = int(os.environ.get("AGENT_DECK_PORT") or CONFIG.get("port", 8787))
 BOOT_ID = uuid.uuid4().hex
 DATA_DIR = _expand(CONFIG.get("data_dir", "~/.local/share/agent-deck"))
 TMUX = find_bin("tmux", CONFIG.get("tmux_bin"))
+# OS再起動で tmux が消えても会話を再開できるよう、管理セッションを永続化する。
+SESSION_REGISTRY_PATH = f"{DATA_DIR}/sessions.json"
+RESTORE_SESSIONS = CONFIG.get("restore_sessions", True) is not False
+SESSION_REGISTRY_LOCK = threading.Lock()
+# 終了直前に始まった一覧更新が、古いスナップショットを後から書き戻すのを防ぐ。
+SESSION_REGISTRY_FORGOTTEN = set()
 # Chatwork 受信箱（任意機能）: account_id を設定し token ファイルがあるときだけ有効
 CW_CONF = CONFIG.get("chatwork") or {}
 CW_API = "https://api.chatwork.com/v2"
@@ -2387,6 +2393,220 @@ def tmux_run(*args, input_text=None, timeout=10):
     )
 
 
+def _restorable_session(item):
+    """永続化できる通常のAIセッションだけを正規化して返す。"""
+    if item.get("ephemeral"):
+        return None
+    name = str(item.get("name", ""))
+    tool = str(item.get("tool", ""))
+    session_id = str(item.get("session_id", ""))
+    cwd = str(item.get("cwd", ""))
+    if (
+        not re.fullmatch(r"agent-[A-Za-z0-9_.-]+", name)
+        or tool not in TOOLS
+        or not re.fullmatch(r"[0-9a-f-]{36}", session_id)
+        or not os.path.isabs(cwd)
+    ):
+        return None
+    position = session_position(item)
+    return {
+        "name": name,
+        "tool": tool,
+        "cwd": cwd,
+        "session_id": session_id,
+        "summary": str(item.get("summary", ""))[:200],
+        "note": str(item.get("note", ""))[:1000],
+        "position": position,
+        "pull_request": str(item.get("pull_request", "")),
+        "bypass": bool(item.get("bypass")),
+        "model": str(item.get("restore_model") or item.get("model") or ""),
+    }
+
+
+def _read_session_registry_unlocked():
+    try:
+        with open(SESSION_REGISTRY_PATH, encoding="utf-8") as source:
+            payload = json.load(source)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return []
+    items = []
+    for raw in payload.get("sessions", []):
+        if isinstance(raw, dict):
+            item = _restorable_session(raw)
+            if item:
+                items.append(item)
+    return items
+
+
+def load_session_registry():
+    with SESSION_REGISTRY_LOCK:
+        return _read_session_registry_unlocked()
+
+
+def _write_session_registry_unlocked(items):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    normalized = []
+    seen = set()
+    for raw in items:
+        item = _restorable_session(raw)
+        if not item or item["name"] in SESSION_REGISTRY_FORGOTTEN:
+            continue
+        identity = (item["tool"], item["session_id"])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        normalized.append(item)
+    payload = {"version": 1, "sessions": normalized}
+    temporary = f"{SESSION_REGISTRY_PATH}.tmp-{uuid.uuid4().hex}"
+    try:
+        with open(temporary, "x", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, SESSION_REGISTRY_PATH)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def save_session_registry(items):
+    with SESSION_REGISTRY_LOCK:
+        _write_session_registry_unlocked(items)
+
+
+def upsert_registered_session(item):
+    normalized = _restorable_session(item)
+    if not normalized:
+        return
+    with SESSION_REGISTRY_LOCK:
+        SESSION_REGISTRY_FORGOTTEN.discard(normalized["name"])
+        items = _read_session_registry_unlocked()
+        identity = (normalized["tool"], normalized["session_id"])
+        items = [
+            old for old in items
+            if old["name"] != normalized["name"]
+            and (old["tool"], old["session_id"]) != identity
+        ]
+        items.append(normalized)
+        _write_session_registry_unlocked(items)
+
+
+def update_registered_session(name, **changes):
+    with SESSION_REGISTRY_LOCK:
+        items = _read_session_registry_unlocked()
+        changed = False
+        for item in items:
+            if item["name"] == name:
+                item.update(changes)
+                changed = True
+        if changed:
+            _write_session_registry_unlocked(items)
+
+
+def forget_registered_session(name):
+    with SESSION_REGISTRY_LOCK:
+        SESSION_REGISTRY_FORGOTTEN.add(name)
+        items = _read_session_registry_unlocked()
+        remaining = [item for item in items if item["name"] != name]
+        if len(remaining) != len(items):
+            _write_session_registry_unlocked(remaining)
+
+
+def live_registered_sessions():
+    """重複復元を避けるため、現在の tmux セッションの名前と会話IDを返す。"""
+    result = tmux_run(
+        "list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}"
+    )
+    if result.returncode != 0:
+        return []
+    items = []
+    seen = set()
+    for line in result.stdout.splitlines():
+        name, separator, cwd = line.partition("\t")
+        if not separator or not name.startswith("agent-") or name in seen:
+            continue
+        seen.add(name)
+        tool = tmux_run("show-option", "-qv", "-t", name, "@launcher_tool").stdout.strip()
+        session_id = tmux_run(
+            "show-option", "-qv", "-t", name, "@launcher_session_id"
+        ).stdout.strip()
+        items.append({"name": name, "tool": tool, "session_id": session_id, "cwd": cwd})
+    return items
+
+
+def restore_registered_sessions():
+    """保存済み会話のうち tmux に存在しないものを resume で復元する。"""
+    if not RESTORE_SESSIONS:
+        return {"restored": [], "failed": []}
+    stored = load_session_registry()
+    if not stored:
+        return {"restored": [], "failed": []}
+    live = live_registered_sessions()
+    live_names = {item["name"] for item in live}
+    live_ids = {
+        (item["tool"], item["session_id"])
+        for item in live if item["tool"] in TOOLS and item["session_id"]
+    }
+    live_by_id = {
+        (item["tool"], item["session_id"]): item
+        for item in live if item["tool"] in TOOLS and item["session_id"]
+    }
+    resulting = []
+    restored = []
+    failed = []
+    for item in stored:
+        identity = (item["tool"], item["session_id"])
+        if item["name"] in live_names or identity in live_ids:
+            # 前回の復元直後にサーバだけ再起動した場合も、現在の tmux 名へ追随する。
+            current = live_by_id.get(identity)
+            resulting.append({**item, "name": current["name"]} if current else item)
+            continue
+        if not os.path.isdir(item["cwd"]):
+            resulting.append(item)
+            failed.append({"name": item["name"], "error": "作業ディレクトリがありません"})
+            continue
+        if not conversation_log_path(item["tool"], item["cwd"], item["session_id"]):
+            resulting.append(item)
+            failed.append({"name": item["name"], "error": "会話ログがありません"})
+            continue
+        cmd = [*TOOLS[item["tool"]], item["cwd"]]
+        cmd += (["--resume", item["session_id"]] if item["tool"] == "claude"
+                else ["resume", item["session_id"]])
+        if item.get("model") and item["model"] != "default":
+            cmd += ["--model", item["model"]]
+        if item.get("bypass"):
+            cmd += BYPASS_FLAGS[item["tool"]]
+        try:
+            launched = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=20, env={**os.environ}
+            )
+            if launched.returncode != 0:
+                detail = (launched.stderr or launched.stdout or "").strip()
+                raise RuntimeError(detail or "resumeに失敗しました")
+            new_name = launcher_session_name(launched.stdout)
+            if not new_name:
+                raise RuntimeError("復元したセッション名を取得できませんでした")
+            set_session_metadata(
+                new_name, item["summary"], item["session_id"], item["bypass"],
+                item["note"], item["position"] == "top", item["pull_request"],
+                item["position"], item.get("model", ""),
+            )
+            restored_item = {**item, "name": new_name}
+            resulting.append(restored_item)
+            restored.append(new_name)
+            live_ids.add(identity)
+        except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+            resulting.append(item)
+            failed.append({"name": item["name"], "error": str(exc)})
+    save_session_registry(resulting)
+    invalidate_session_cache()
+    return {"restored": restored, "failed": failed}
+
+
 def first_prompt_from_screen(output):
     for line in output.splitlines():
         text = line.strip()
@@ -2435,7 +2655,7 @@ def current_model(name, exact, agent):
     return logged or (agent["model"] if agent else "")
 
 
-def load_managed_sessions():
+def load_managed_sessions(persist=True):
     """ランチャーが作成した tmux セッションの一覧を返す。"""
     try:
         result = tmux_run(
@@ -2455,6 +2675,9 @@ def load_managed_sessions():
             bypass = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_bypass"
             ).stdout.strip() == "1"
+            ephemeral = tmux_run(
+                "show-option", "-qv", "-t", parts[0], "@launcher_ephemeral"
+            ).stdout.strip() == "1"
             summary = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_summary"
             ).stdout.strip()
@@ -2472,6 +2695,9 @@ def load_managed_sessions():
             pinned = position == "top"
             pull_request = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_pull_request"
+            ).stdout.strip()
+            restore_model = tmux_run(
+                "show-option", "-qv", "-t", parts[0], "@launcher_restore_model"
             ).stdout.strip()
             agent = pane_agent({"tty_name": parts[4]})
             exact = None
@@ -2525,9 +2751,11 @@ def load_managed_sessions():
                 "position": position,
                 "pull_request": pull_request,
                 "session_id": session_id, "bypass": bypass,
+                "ephemeral": ephemeral,
                 "running": running,
                 "background": "" if running else screen_background_label(screen),
                 "model": current_model(parts[0], exact, agent),
+                "restore_model": restore_model,
                 "context": exact.get("context") if exact else None,
                 "artifacts": session_artifacts(log_path, tool or parts[3]),
             })
@@ -2538,6 +2766,13 @@ def load_managed_sessions():
         sessions.sort(
             key=lambda item: SESSION_POSITION_ORDER[session_position(item)]
         )
+        if persist:
+            try:
+                save_session_registry(sessions)
+            except OSError as exc:
+                # 永続化に失敗しても、動いているセッション一覧は表示し続ける。
+                print(f"[registry] セッションを保存できませんでした: {exc}",
+                      file=sys.stderr, flush=True)
         return sessions
     except (OSError, subprocess.SubprocessError):
         return []
@@ -2599,6 +2834,17 @@ def invalidate_session_cache():
         SESSION_CACHE["loaded"] = False
 
 
+def register_live_sessions_for_restore():
+    """サーバー起動時に、既存 tmux セッションを復元レジストリへ合流する。"""
+    sessions = load_managed_sessions(persist=False)
+    registered = 0
+    for item in sessions:
+        if _restorable_session(item):
+            upsert_registered_session(item)
+            registered += 1
+    return registered
+
+
 def valid_session(name):
     if not re.fullmatch(r"agent-[A-Za-z0-9_.-]+", name or ""):
         return False
@@ -2630,6 +2876,8 @@ def terminate_session(name, cwd):
     result = tmux_run("kill-session", "-t", name)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "終了できませんでした")
+    # 明示的に終了したセッションは、次回のPC起動で復元しない。
+    forget_registered_session(name)
     invalidate_session_cache()
     try:
         return remove_session_worktree(cwd, other_cwds)
@@ -2943,7 +3191,7 @@ def launcher_session_name(output):
 
 def set_session_metadata(
     name, summary="", session_id="", bypass=False, note="", pinned=False,
-    pull_request="", position="",
+    pull_request="", position="", model="",
 ):
     if not name:
         return
@@ -2966,6 +3214,8 @@ def set_session_metadata(
         tmux_run(
             "set-option", "-t", name, "@launcher_pull_request", pull_request
         )
+    if model and model != "default":
+        tmux_run("set-option", "-t", name, "@launcher_restore_model", model)
 
 
 def wait_for_new_session_id(tool, cwd, started_at, timeout=4):
@@ -5920,6 +6170,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     if result.returncode != 0:
                         raise RuntimeError(result.stderr.strip() or "メモを保存できませんでした")
+                    update_registered_session(session, note=value)
                     invalidate_session_cache()
                     return self._json({"ok": True, "note": value})
                 elif action == "pin":
@@ -5938,6 +6189,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     if legacy.returncode != 0:
                         raise RuntimeError(legacy.stderr.strip() or "ピン留めを変更できませんでした")
+                    update_registered_session(session, position=position)
                     invalidate_session_cache()
                     return self._json({"ok": True, "pinned": pinned})
                 elif action == "position":
@@ -5957,6 +6209,7 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     if legacy.returncode != 0:
                         raise RuntimeError(legacy.stderr.strip() or "並び位置を変更できませんでした")
+                    update_registered_session(session, position=position)
                     invalidate_session_cache()
                     return self._json({"ok": True, "position": position})
                 elif action == "pull-request":
@@ -5977,6 +6230,7 @@ class Handler(BaseHTTPRequestHandler):
                         raise RuntimeError(
                             result.stderr.strip() or "PRの紐づけを変更できませんでした"
                         )
+                    update_registered_session(session, pull_request=value)
                     invalidate_session_cache()
                     return self._json({"ok": True, "pull_request": value})
                 elif action == "model":
@@ -5998,6 +6252,11 @@ class Handler(BaseHTTPRequestHandler):
                         "set-option", "-t", new_session, "@launcher_model",
                         f"{value} {time.time():.3f}",
                     )
+                    tmux_run(
+                        "set-option", "-t", new_session,
+                        "@launcher_restore_model", value,
+                    )
+                    update_registered_session(new_session, model=value)
                     return self._json({
                         "ok": True,
                         "model": model_label(value, item["tool"]),
@@ -6127,6 +6386,9 @@ class Handler(BaseHTTPRequestHandler):
         cmd += (["--resume", item["session_id"]] if item["tool"] == "claude"
                 else ["resume", item["session_id"]])
         cmd += list(extra_args)
+        restore_model = argv_model(extra_args) or item.get("restore_model", "")
+        if restore_model and restore_model != "default" and not argv_model(extra_args):
+            cmd += ["--model", restore_model]
         if bypass:
             cmd += BYPASS_FLAGS[item["tool"]]
         resumed = subprocess.run(
@@ -6142,8 +6404,13 @@ class Handler(BaseHTTPRequestHandler):
         set_session_metadata(
             new_session, item["summary"], item["session_id"], bypass, item.get("note", ""),
             bool(item.get("pinned")), item.get("pull_request", ""),
-            session_position(item),
+            session_position(item), restore_model,
         )
+        forget_registered_session(session)
+        upsert_registered_session({
+            **item, "name": new_session, "bypass": bypass,
+            "restore_model": restore_model,
+        })
         invalidate_session_cache()
         return new_session
 
@@ -6182,6 +6449,12 @@ class Handler(BaseHTTPRequestHandler):
         if result.returncode != 0:
             tmux_run("kill-session", "-t", new_session)
             raise RuntimeError(result.stderr.strip() or "引き継ぎ元を終了できませんでした")
+        forget_registered_session(session)
+        upsert_registered_session({
+            **item, "name": new_session, "tool": target,
+            "session_id": session_id, "summary": item.get("summary") or prompt,
+            "restore_model": "", "model": "",
+        })
         invalidate_session_cache()
         return new_session
 
@@ -6247,15 +6520,24 @@ class Handler(BaseHTTPRequestHandler):
                 summary = log_meta(resume_log, tool).get("summary", "")
                 set_session_metadata(
                     session_name, summary, resume, skip_permissions,
-                    pull_request=pull_request,
+                    pull_request=pull_request, model=model,
                 )
+                session_id = resume
             else:
                 session_id = wait_for_new_session_id(tool, path, started_at)
                 set_session_metadata(
                     session_name, prompt, session_id, skip_permissions,
-                    pull_request=pull_request,
+                    pull_request=pull_request, model=model,
                 )
             if session_name:
+                upsert_registered_session({
+                    "name": session_name, "tool": tool, "cwd": path,
+                    "session_id": session_id,
+                    "summary": summary if resume else prompt,
+                    "note": "", "position": "normal",
+                    "pull_request": pull_request, "bypass": skip_permissions,
+                    "restore_model": model,
+                })
                 invalidate_session_cache()
                 return self._redirect(
                     "/terminal?session=" + urllib.parse.quote(session_name)
@@ -6285,4 +6567,26 @@ if __name__ == "__main__":
     if cli_args.port:
         PORT = cli_args.port
     os.makedirs(UPLOAD_DIR, mode=0o700, exist_ok=True)
+    try:
+        registered = register_live_sessions_for_restore()
+        if registered:
+            print(
+                f"[registry] 起動中の{registered}件を復元対象として保存しました",
+                file=sys.stderr, flush=True,
+            )
+        restore_report = restore_registered_sessions()
+    except Exception as exc:
+        # 復元データの問題でWeb UIそのものが起動不能にならないようにする。
+        restore_report = {"restored": [], "failed": []}
+        print(f"[restore] 復元処理に失敗しました: {exc}", file=sys.stderr, flush=True)
+    if restore_report["restored"]:
+        print(
+            f"[restore] {len(restore_report['restored'])}件のセッションを復元しました",
+            file=sys.stderr, flush=True,
+        )
+    for failure in restore_report["failed"]:
+        print(
+            f"[restore] {failure['name']}: {failure['error']}",
+            file=sys.stderr, flush=True,
+        )
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

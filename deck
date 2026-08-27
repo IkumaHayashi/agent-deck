@@ -81,6 +81,9 @@ fi
 "$TMUX" set-option -g history-limit 10000
 "$TMUX" set-option -g focus-events on
 "$TMUX" set-option -t "$SESSION" @launcher_tool "${BIN:t}"
+if [[ "${CLAUDE_TAB_EPHEMERAL:-0}" == "1" ]]; then
+  "$TMUX" set-option -t "$SESSION" @launcher_ephemeral "1"
+fi
 if [[ -n "$LABEL" ]]; then
   "$TMUX" set-option -t "$SESSION" @launcher_label "$LABEL"
 fi
