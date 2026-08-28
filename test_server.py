@@ -1230,6 +1230,7 @@ class CodexQuestionTest(unittest.TestCase):
                 },
                 {"number": 3, "label": "Cancel", "description": "Cancel this tool call"},
             ],
+            "multi": False,
         }, server.parse_codex_question_screen(screen))
 
     def test_parses_codex_app_sign_in_choices(self):
@@ -1261,6 +1262,7 @@ class CodexQuestionTest(unittest.TestCase):
                 {"number": 1, "label": "Open sign-in URL", "description": ""},
                 {"number": 2, "label": "Back", "description": ""},
             ],
+            "multi": False,
         }, server.parse_codex_question_screen(screen))
 
     def test_quoted_codex_app_dialog_is_not_a_question(self):
@@ -1301,6 +1303,37 @@ Enter to confirm · Esc to cancel
              "Continue without using this MCP server"],
             [choice["label"] for choice in result["choices"]],
         )
+
+    MULTI_DIALOG = """\
+claude: どこが引っかかるかで直し方が変わるので、確認させてください。
+←   ☐ 改善ポイント   ✔ Submit   →
+どこが回答しにくいですか?（複数選択OK）
+1. 絵文字が多すぎる — 10個から探すのが面倒
+2. 2段階タップが面倒 — 数字と種類を別々に押すのが手間
+3. Other
+Enter selections (comma- or space-separated) [1-3] then Enter to Submit, or
+Escape to cancel:
+"""
+
+    def test_parses_multi_select_dialog(self):
+        result = server.parse_question_screen(self.MULTI_DIALOG)
+        self.assertTrue(result["multi"])
+        self.assertEqual("どこが回答しにくいですか?（複数選択OK）", result["question"])
+        self.assertEqual(
+            ["絵文字が多すぎる", "2段階タップが面倒", "Other"],
+            [choice["label"] for choice in result["choices"]],
+        )
+        self.assertEqual(
+            ["10個から探すのが面倒", "数字と種類を別々に押すのが手間", ""],
+            [choice["description"] for choice in result["choices"]],
+        )
+
+    def test_single_select_dialog_is_not_multi(self):
+        self.assertFalse(server.parse_question_screen(self.MCP_DIALOG)["multi"])
+
+    def test_quoted_multi_select_text_is_not_a_question(self):
+        screen = self.MULTI_DIALOG + "以上が前回の質問でした。\n"
+        self.assertIsNone(server.parse_question_screen(screen))
 
     def test_quoted_dialog_text_is_not_a_question(self):
         # 会話に引用されたダイアログ風テキストは、下に本文やフッターが

@@ -931,16 +931,30 @@ def session_running(name):
     return screen.returncode == 0 and screen_is_running(screen.stdout)
 
 
+# 「Enter selection [1-N]」（単一選択）と「Enter selections (comma- or
+# space-separated) [1-N] then Enter to Submit」（複数選択）の両方に一致する。
+SELECTION_PROMPT = r"Enter selection(s)?\b[^\[]*\[1-(\d+)\]"
+
+
+def is_tab_bar(line):
+    """複数質問のタブバー行（← ☐ タブ名  ✔ Submit →）か。"""
+    return "✔ Submit" in line or (line.startswith("←") and "→" in line)
+
+
 def dialog_is_foreground(lines, prompt_index):
     """プロンプト行が画面最下部にあるか（＝実際に入力待ちのダイアログか）。
 
     会話に引用された「Enter selection [1-N]」等のテキストは、下に本文や
     入力欄・フッターが続くので、これで本物と区別できる。本物のダイアログの
-    下は空行か「Enter to confirm · Esc to cancel」のキー案内だけ。
+    下は空行か「Enter to confirm · Esc to cancel」のキー案内、複数選択版で
+    折り返された「Escape to cancel:」だけ。
     """
     for line in lines[prompt_index + 1:]:
         text = line.strip()
-        if text and "Enter to confirm" not in text and "Esc to cancel" not in text:
+        if text and not any(
+            marker in text
+            for marker in ("Enter to confirm", "Esc to cancel", "Escape to cancel")
+        ):
             return False
     return True
 
@@ -981,7 +995,7 @@ def parse_confirm_screen(lines):
         ),
         "Ready to submit your answers?",
     )
-    return {"question": question, "choices": choices}
+    return {"question": question, "choices": choices, "multi": False}
 
 
 def parse_question_screen(screen):
@@ -995,22 +1009,28 @@ def parse_question_screen(screen):
         ...
         N. Chat about this
         Enter selection [1-N], or Escape to cancel:
+
+    複数選択（multiSelect）の質問はプロンプトだけが違い、カンマ/スペース
+    区切りで複数の番号を送って Enter で確定する:
+
+        Enter selections (comma- or space-separated) [1-N] then Enter to Submit,
+        or Escape to cancel:
     """
     lines = screen.splitlines()
     # 引用されたダイアログ風テキストが画面上部に残ることがあるため、
     # 下から探して最下部にあるものだけを本物として扱う。
     prompt_index = next(
-        (i for i in range(len(lines) - 1, -1, -1) if "Enter selection [" in lines[i]),
+        (i for i in range(len(lines) - 1, -1, -1)
+         if re.search(SELECTION_PROMPT, lines[i])),
         None,
     )
     if prompt_index is None:
         return parse_confirm_screen(lines)
     if not dialog_is_foreground(lines, prompt_index):
         return parse_confirm_screen(lines)
-    match = re.search(r"Enter selection \[1-(\d)\]", lines[prompt_index])
-    if not match:
-        return None
-    count = int(match.group(1))
+    match = re.search(SELECTION_PROMPT, lines[prompt_index])
+    multi = bool(match.group(1))
+    count = int(match.group(2))
     # 下から上へ、N. → 1. の順に選択肢を拾う。番号行に挟まれた行は折り返し。
     choices, wrapped = [], []
     expected = count
@@ -1043,6 +1063,10 @@ def parse_question_screen(screen):
         row -= 1
     while row >= 0 and lines[row].strip() and len(question_lines) < 4:
         line = lines[row].strip()
+        # 複数質問のタブバー（← ☐ タブ名  ✔ Submit →）はダイアログの上端。
+        # ここより上は前の会話なので質問文に含めない。
+        if is_tab_bar(line):
+            break
         # 起動時ダイアログ（MCP承認等）の画面先頭に出るモード表示は質問文でない
         if not line.startswith("[Screen Reader Mode"):
             question_lines.insert(0, line)
@@ -1050,7 +1074,7 @@ def parse_question_screen(screen):
     question = " ".join(question_lines)
     if "☐" in question:
         question = question.rsplit("☐", 1)[1].strip()
-    return {"question": question, "choices": choices}
+    return {"question": question, "choices": choices, "multi": multi}
 
 
 def parse_codex_question_screen(screen):
@@ -1128,7 +1152,9 @@ def parse_codex_question_screen(screen):
     question_lines = [line.strip() for line in lines[scan_start:first_choice] if line.strip()]
     if not question_lines:
         return None
-    return {"question": " ".join(question_lines), "choices": choices}
+    return {
+        "question": " ".join(question_lines), "choices": choices, "multi": False,
+    }
 
 
 def pending_question(name, tool):
@@ -4052,6 +4078,12 @@ TERMINAL_PAGE = r"""<!doctype html>
     color: #e6edf3; cursor: pointer; }}
   .question .choice:hover {{ border-color: #d29922; background: #2a2f37; }}
   .question .choice small {{ display: block; margin-top: 3px; color: #8b949e; }}
+  .question .choice[aria-pressed="true"] {{ border-color: #d29922; background: #d2992222; }}
+  .question .choice[aria-pressed="true"] strong::before {{ content: "✔ "; color: #d29922; }}
+  .question-submit {{ display: block; width: 100%; margin: 12px 0 0; padding: 11px 13px;
+    border: 0; border-radius: 9px; background: #d29922; color: #1c2128;
+    font-weight: 700; cursor: pointer; }}
+  .question-submit[disabled] {{ opacity: .45; cursor: default; }}
   .message.activity::before {{ content: "✻"; animation: activity-pulse 1.3s ease-in-out infinite; }}
   .bubble p {{ margin: 0 0 12px; white-space: pre-wrap; }}
   .bubble p:last-child {{ margin-bottom: 0; }}
@@ -5290,6 +5322,9 @@ TERMINAL_PAGE = r"""<!doctype html>
       const panel = document.createElement("div"); panel.className = "message question";
       const title = document.createElement("p"); title.className = "question-title";
       title.textContent = question.question; panel.append(title);
+      // 複数選択の質問はタップで選び、まとめて送信する
+      const picked = new Set();
+      const submit = document.createElement("button");
       for (const choice of question.choices) {{
         const button = document.createElement("button"); button.type = "button";
         button.className = "choice";
@@ -5299,8 +5334,25 @@ TERMINAL_PAGE = r"""<!doctype html>
           const detail = document.createElement("small");
           detail.textContent = choice.description; button.append(detail);
         }}
-        button.addEventListener("click", () => answerQuestion(choice));
+        if (question.multi) {{
+          button.setAttribute("aria-pressed", "false");
+          button.addEventListener("click", () => {{
+            const on = !picked.has(choice);
+            if (on) picked.add(choice); else picked.delete(choice);
+            button.setAttribute("aria-pressed", on ? "true" : "false");
+            submit.disabled = picked.size === 0;
+          }});
+        }} else {{
+          button.addEventListener("click", () => answerQuestion([choice]));
+        }}
         panel.append(button);
+      }}
+      if (question.multi) {{
+        submit.type = "button"; submit.className = "question-submit";
+        submit.textContent = "選択して送信"; submit.disabled = true;
+        submit.addEventListener("click", () => answerQuestion(
+          question.choices.filter(choice => picked.has(choice))));
+        panel.append(submit);
       }}
       chat.append(panel);
     }}
@@ -5309,11 +5361,13 @@ TERMINAL_PAGE = r"""<!doctype html>
       lastChatScrollTop = chat.scrollTop;
     }});
   }}
-  async function answerQuestion(choice) {{
-    if (!await askConfirm("「" + choice.label + "」を選択しますか？")) return;
+  async function answerQuestion(choices) {{
+    if (!choices.length) return;
+    const labels = choices.map(choice => choice.label).join("」「");
+    if (!await askConfirm("「" + labels + "」を選択しますか？")) return;
     try {{
       await post("/api/sessions/" + encodeURIComponent(session) + "/answer",
-                 {{number: String(choice.number)}});
+                 {{number: choices.map(choice => choice.number).join(",")}});
       loadChat();
     }} catch (error) {{ status.textContent = error.message; }}
   }}
@@ -6263,8 +6317,9 @@ class Handler(BaseHTTPRequestHandler):
                         "session": new_session,
                     })
                 elif action == "answer":
+                    # 複数選択の質問は "1,3" のようにカンマ区切りで届く。
                     number = qs.get("number", [""])[0]
-                    if not re.fullmatch(r"[1-9yn]", number):
+                    if not re.fullmatch(r"[1-9yn]|[1-9](,[1-9])*", number):
                         return self._json({"error": "選択番号が不正です"}, 400)
                     # メニュー版の TUI は数字/文字キーで即確定する。プレーン版
                     # （Enter selection [1-N] / Enter y/n:）は Enter が要るので、
@@ -6275,7 +6330,8 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(0.5)
                     screen = capture_session(session)
                     if (
-                        "Enter selection [" in screen or "Enter y/n" in screen
+                        "Enter selection [" in screen or "Enter selections" in screen
+                        or "Enter y/n" in screen
                         or "enter to submit" in screen.lower()
                     ):
                         tmux_run("send-keys", "-t", session, "Enter")
