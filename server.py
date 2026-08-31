@@ -1934,6 +1934,25 @@ def git_default_branch(cwd):
     raise LookupError("デフォルトブランチを特定できません")
 
 
+def git_branch_ref(cwd, branch):
+    """指定ブランチについて、比較に使えるremoteまたはlocal refを返す。"""
+    if not branch:
+        raise ValueError("比較対象のブランチが指定されていません")
+    git = find_bin("git")
+    remotes_result = subprocess.run(
+        [git, "remote"], cwd=cwd, capture_output=True, text=True, timeout=5,
+    )
+    remotes = remotes_result.stdout.split() if remotes_result.returncode == 0 else []
+    remotes.sort(key=lambda remote: remote != "origin")
+    for ref in [
+        *(f"{remote}/{branch}" for remote in remotes),
+        f"refs/heads/{branch}",
+    ]:
+        if _verified_git_ref(git, cwd, ref):
+            return ref
+    raise LookupError(f"比較対象ブランチ {branch} がローカルに見つかりません")
+
+
 def _parse_git_numstat(output):
     """git diff --numstat -z を画面用のファイル一覧へ変換する。"""
     entries = output.split("\0")
@@ -1982,9 +2001,13 @@ def _parse_git_name_status(output):
     return statuses
 
 
-def directory_diff(cwd):
-    """cwd の作業ツリーと、そのリポジトリのデフォルトブランチとの差分を返す。"""
-    branch, base_ref = git_default_branch(cwd)
+def directory_diff(cwd, base_branch=""):
+    """cwd の作業ツリーと、指定またはデフォルトブランチとの差分を返す。"""
+    if base_branch:
+        branch = base_branch
+        base_ref = git_branch_ref(cwd, branch)
+    else:
+        branch, base_ref = git_default_branch(cwd)
     git = find_bin("git")
     current = subprocess.run(
         [git, "branch", "--show-current"], cwd=cwd,
@@ -1998,8 +2021,8 @@ def directory_diff(cwd):
         capture_output=True, text=True, timeout=5,
     )
     if merge_base.returncode != 0 or not merge_base.stdout.strip():
-        raise RuntimeError(merge_base.stderr.strip() or "デフォルトブランチとの分岐点を取得できませんでした")
-    # デフォルトブランチ側だけで進んだ変更は除外し、分岐後の作業ツリー全体
+        raise RuntimeError(merge_base.stderr.strip() or "比較対象ブランチとの分岐点を取得できませんでした")
+    # 比較対象ブランチ側だけで進んだ変更は除外し、分岐後の作業ツリー全体
     # （コミット済み・staged・unstaged）をレビュー対象にする。
     common_args = ["--no-ext-diff", "--find-renames", merge_base.stdout.strip(), "--"]
     stats = subprocess.run(
@@ -4407,6 +4430,11 @@ TERMINAL_PAGE = r"""<!doctype html>
   const reviewSelectionCount = document.getElementById("review-selection-count");
   const reviewOpenMode = {diff_open_json};
   const linkedPullRequest = {pr_selector_json};
+  const reviewBaseLabel = linkedPullRequest ? "PRベースブランチ" : "デフォルトブランチ";
+  const reviewDiffLabel = reviewBaseLabel + "との差分";
+  reviewPane.setAttribute("aria-label", reviewDiffLabel);
+  reviewMeta.textContent = reviewBaseLabel + "と比較します";
+  reviewToggle.title = reviewDiffLabel;
   let reviewData = null;
   let reviewManuallyOpened = false;
   const selectedDiffLines = new Map();
@@ -4827,7 +4855,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       if (userInitiated) openReview();
       else if (reviewOpenMode !== "never") openReview();
     }} catch (error) {{
-      reviewMeta.textContent = "デフォルトブランチと比較します";
+      reviewMeta.textContent = reviewBaseLabel + "と比較します";
       reviewMessage.textContent = error.name === "TimeoutError"
         ? "差分の取得がタイムアウトしました。↻で再試行してください"
         : error.message;
@@ -4844,7 +4872,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     screen.hidden = true; chat.hidden = false;
     reviewToggle.querySelector(".label").textContent = "差分";
     reviewToggle.querySelector(".icon").textContent = "±";
-    reviewToggle.title = "デフォルトブランチとの差分";
+    reviewToggle.title = reviewDiffLabel;
     const historyButton = document.getElementById("history");
     historyButton.querySelector(".label").textContent = "ターミナル";
     historyButton.querySelector(".icon").textContent = "▤";
@@ -4908,7 +4936,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   // loadDirectoryDiff() は開始直後に clearDiffSelection() → syncInput() を呼ぶ。
   // 下書き用の draftKey と syncInput の初期化後に自動読み込みを始める。
   if (reviewOpenMode !== "never") loadDirectoryDiff();
-  else reviewMessage.textContent = "差分ボタンからデフォルトブランチとの差分を読み込めます";
+  else reviewMessage.textContent = "差分ボタンから" + reviewDiffLabel + "を読み込めます";
   let lastOutput = "";
   let lastMessages = "";
   let followOutput = true;
@@ -5653,7 +5681,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       document.body.classList.add("review-closed");
       reviewToggle.querySelector(".label").textContent = "差分";
       reviewToggle.querySelector(".icon").textContent = "±";
-      reviewToggle.title = "デフォルトブランチとの差分";
+      reviewToggle.title = reviewDiffLabel;
       showingHistory = false; historyButton.querySelector(".label").textContent = "チャット";
       historyButton.querySelector(".icon").textContent = "💬";
       chat.hidden = true; screen.hidden = false;
@@ -6111,7 +6139,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "セッションが見つかりません"}, 404)
             started = time.monotonic()
             try:
-                return self._json(directory_diff(cwd))
+                base_branch = ""
+                pull_request = item.get("pull_request", "")
+                if pull_request:
+                    base_branch = pull_request_target(pull_request)["baseRefName"]
+                return self._json(directory_diff(cwd, base_branch))
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
             except LookupError as exc:

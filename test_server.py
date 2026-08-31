@@ -160,6 +160,7 @@ class FrontendTemplateTest(unittest.TestCase):
         )
         self.assertNotIn('id="review-picker"', server.TERMINAL_PAGE)
         self.assertIn("デフォルトブランチとの差分", server.TERMINAL_PAGE)
+        self.assertIn('linkedPullRequest ? "PRベースブランチ"', server.TERMINAL_PAGE)
 
     def test_review_autoload_starts_after_draft_storage_is_initialized(self):
         page = server.TERMINAL_PAGE
@@ -885,6 +886,69 @@ class DirectoryDiffTest(unittest.TestCase):
              "base123", "--"],
             run.call_args_list[4].args[0],
         )
+
+    def test_fetches_diff_from_requested_base_branch(self):
+        results = [
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=0, stdout="base123\n", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+            SimpleNamespace(returncode=0, stdout="", stderr=""),
+        ]
+        with (
+            tempfile.TemporaryDirectory() as cwd,
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/git"),
+            mock.patch.object(
+                server,
+                "git_branch_ref",
+                return_value="origin/feature/stack-base",
+            ) as branch_ref,
+            mock.patch.object(server, "git_default_branch") as default_branch,
+            mock.patch.object(server.subprocess, "run", side_effect=results) as run,
+        ):
+            result = server.directory_diff(cwd, "feature/stack-base")
+
+        branch_ref.assert_called_once_with(cwd, "feature/stack-base")
+        default_branch.assert_not_called()
+        self.assertEqual("feature/stack-base", result["baseRefName"])
+        self.assertEqual(
+            ["/usr/bin/git", "merge-base", "origin/feature/stack-base", "HEAD"],
+            run.call_args_list[1].args[0],
+        )
+
+    def test_pr_review_diff_uses_pull_request_base_branch(self):
+        handler = object.__new__(server.Handler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.path = "/api/sessions/agent-review/diff"
+        handler.headers = {}
+        item = {
+            "name": "agent-review",
+            "cwd": "/tmp/worktrees/project-pr-42",
+            "pull_request": "https://github.com/example/repo/pull/42",
+        }
+        diff = {
+            "baseRefName": "feature/stack-base",
+            "headRefName": "HEAD (detached)",
+            "files": [],
+            "patch": "",
+        }
+        with (
+            mock.patch.object(server, "managed_sessions", return_value=[item]),
+            mock.patch.object(
+                server,
+                "pull_request_target",
+                return_value={"baseRefName": "feature/stack-base"},
+            ) as target,
+            mock.patch.object(server, "directory_diff", return_value=diff) as directory,
+            mock.patch.object(handler, "_json") as response,
+        ):
+            handler.do_GET()
+
+        target.assert_called_once_with("https://github.com/example/repo/pull/42")
+        directory.assert_called_once_with(
+            "/tmp/worktrees/project-pr-42", "feature/stack-base"
+        )
+        response.assert_called_once_with(diff)
 
     def test_uses_remote_symbolic_default_branch(self):
         results = [
