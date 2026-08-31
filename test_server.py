@@ -549,6 +549,80 @@ class CodexSessionTest(unittest.TestCase):
             agent = server.pane_agent({"tty_name": "ttys001"})
         self.assertEqual(main, agent["explicit_id"])
 
+    def test_live_session_id_prefers_newest_user_thread(self):
+        # codex 0.151以降はターンごとに別rolloutへ書くことがあるため、
+        # 開いているユーザー起点スレッドのうち最終更新が最新のものを選ぶ。
+        with tempfile.TemporaryDirectory() as base:
+            older = os.path.join(base, "older.jsonl")
+            newer = os.path.join(base, "newer.jsonl")
+            guardian = os.path.join(base, "guardian.jsonl")
+            pending = os.path.join(base, "pending.jsonl")
+            for path in (older, newer, guardian, pending):
+                open(path, "w").close()
+            os.utime(older, (1000, 1000))
+            os.utime(newer, (2000, 2000))
+            os.utime(guardian, (3000, 3000))
+            os.utime(pending, (4000, 4000))
+            paths = {
+                "older-id": older, "newer-id": newer,
+                "guardian-id": guardian, "pending-id": pending,
+            }
+            heads = {
+                older: {"id": "older-id", "thread_source": "user", "subagent": False},
+                newer: {"id": "newer-id", "thread_source": "user", "subagent": False},
+                # 新形式のguardianはthread_sourceがguardian_reviewでsubagent扱い
+                guardian: {
+                    "id": "guardian-id", "thread_source": "guardian_review",
+                    "subagent": True,
+                },
+                # session_metaがまだ書かれていないスレッドは候補にしない
+                pending: {"id": "", "thread_source": "", "subagent": False},
+            }
+            with (
+                mock.patch.object(
+                    server, "find_log_by_id",
+                    side_effect=lambda _tool, sid: paths.get(sid, ""),
+                ),
+                mock.patch.object(
+                    server, "codex_session_head", side_effect=lambda path: heads[path]
+                ),
+            ):
+                chosen = server.codex_live_session_id(
+                    ["guardian-id", "older-id", "newer-id", "pending-id", "missing-id"]
+                )
+        self.assertEqual("newer-id", chosen)
+
+    def test_session_messages_merges_previous_thread_logs(self):
+        def message(role, text):
+            return json.dumps({
+                "type": "response_item",
+                "payload": {
+                    "type": "message",
+                    "role": role,
+                    "content": [{
+                        "type": "input_text" if role == "user" else "output_text",
+                        "text": text,
+                    }],
+                },
+            }) + "\n"
+
+        with tempfile.TemporaryDirectory() as base:
+            first = os.path.join(base, "first.jsonl")
+            second = os.path.join(base, "second.jsonl")
+            with open(first, "w") as out:
+                out.write(message("user", "最初の質問"))
+                out.write(message("assistant", "最初の回答"))
+            with open(second, "w") as out:
+                out.write(message("user", "続きの依頼"))
+                out.write(message("assistant", "続きの回答"))
+
+            merged = server.session_messages(second, "codex", history=[first])
+
+        self.assertEqual(
+            ["最初の質問", "最初の回答", "続きの依頼", "続きの回答"],
+            [item["text"] for item in merged],
+        )
+
     def test_codex_internal_context_is_not_shown_as_user_message(self):
         internal = {
             "type": "response_item",

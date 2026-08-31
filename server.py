@@ -170,6 +170,9 @@ RESTORE_SESSIONS = CONFIG.get("restore_sessions", True) is not False
 SESSION_REGISTRY_LOCK = threading.Lock()
 # 終了直前に始まった一覧更新が、古いスナップショットを後から書き戻すのを防ぐ。
 SESSION_REGISTRY_FORGOTTEN = set()
+# codexがターンごとにスレッドを切り替えた場合に、チャット表示でつなげる過去
+# スレッドの最大数。
+THREAD_HISTORY_LIMIT = 20
 # Chatwork 受信箱（任意機能）: account_id を設定し token ファイルがあるときだけ有効
 CW_CONF = CONFIG.get("chatwork") or {}
 CW_API = "https://api.chatwork.com/v2"
@@ -428,29 +431,65 @@ def pane_agent(pane):
             (arg for arg in argv[1:] if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27,}", arg)),
             "",
         )
-        if executable == "codex" and not explicit_id:
-            try:
-                opened = subprocess.run(
-                    ["/usr/sbin/lsof", "-p", parts[0]], capture_output=True, text=True, timeout=5
-                ).stdout
+        open_ids = None
+        if executable == "codex":
+            open_ids = codex_open_thread_ids(parts[0])
+            if not explicit_id and open_ids:
                 # Codex本体はメイン会話に加えて、権限審査用guardianのログも
                 # 開いている。lsofの先頭を採ると審査結果JSONだけの会話へ
                 # 誤って紐づくため、ユーザー起点のログだけを候補にする。
-                for session_id in re.findall(
-                    r"rollout-[^\s/]+-([0-9a-f-]{36})\.jsonl", opened
-                ):
-                    path = find_log_by_id("codex", session_id)
-                    head = codex_session_head(path) if path else {}
-                    if head.get("thread_source") != "subagent" and not head.get("subagent"):
-                        explicit_id = session_id
-                        break
-            except (OSError, subprocess.SubprocessError):
-                pass
+                explicit_id = codex_live_session_id(open_ids)
+                if not explicit_id:
+                    for session_id in open_ids:
+                        path = find_log_by_id("codex", session_id)
+                        head = codex_session_head(path) if path else {}
+                        if head.get("thread_source") != "subagent" and not head.get("subagent"):
+                            explicit_id = session_id
+                            break
         return {
             "tool": executable, "pid": int(parts[0]), "command": parts[2],
             "explicit_id": explicit_id, "model": argv_model(argv),
+            "open_ids": open_ids,
         }
     return None
+
+
+def codex_open_thread_ids(pid):
+    """codexプロセスが現在開いているrolloutログの会話ID一覧を返す。"""
+    try:
+        opened = subprocess.run(
+            ["/usr/sbin/lsof", "-p", str(pid)], capture_output=True, text=True, timeout=5
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return re.findall(r"rollout-[^\s/]+-([0-9a-f-]{36})\.jsonl", opened)
+
+
+def codex_live_session_id(open_ids):
+    """開いているrolloutのうち、ユーザー会話が現在書かれているものを選ぶ。
+
+    codex 0.151以降のTUIはターンごとに別スレッド（別rolloutファイル）へ
+    書くことがあり、最初に紐づけた会話IDのままでは以降のやりとりを
+    追えなくなる。session_metaが書かれたユーザー起点のスレッドのうち、
+    最終更新が最新のものを現在の会話とみなす。判定できなければ空を返す。
+    """
+    best = ""
+    best_mtime = -1.0
+    for session_id in dict.fromkeys(open_ids or ()):
+        path = find_log_by_id("codex", session_id)
+        if not path:
+            continue
+        head = codex_session_head(path)
+        if not head.get("id") or head.get("subagent") \
+                or head.get("thread_source") == "subagent":
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime > best_mtime:
+            best, best_mtime = session_id, mtime
+    return best
 
 
 def read_json_lines(path, limit=80):
@@ -833,24 +872,30 @@ def assistant_parts(item, tool):
     return parts
 
 
-def session_messages(path, tool, limit=300):
+def session_messages(path, tool, limit=300, history=()):
     """会話ログの末尾から limit 件を返す。
 
     ログは数百MBに達することがあるため全行は読まず、末尾から必要な分だけ
-    さかのぼってパースする。
+    さかのぼってパースする。history には同じ会話の過去スレッドのログパスを
+    古い順で渡す（codexはターンごとに別rolloutへ書くことがある）。
     """
     messages = []
-    for item in read_json_lines_reverse(path, max_lines=20000, max_bytes=64 * 1024 * 1024):
-        entry = user_message_entry(item, tool)
-        if entry:
-            messages.append(entry)
-        else:
-            # 逆順に読んでいるので、1エントリ内のパーツも逆順に積む。
-            # ツール実行は履歴に残さず、実行中のものだけ session_activity で見せる。
-            messages.extend(
-                part for part in reversed(assistant_parts(item, tool))
-                if part["role"] != "tool"
-            )
+    for source_path in (path, *reversed(tuple(history))):
+        for item in read_json_lines_reverse(
+            source_path, max_lines=20000, max_bytes=64 * 1024 * 1024
+        ):
+            entry = user_message_entry(item, tool)
+            if entry:
+                messages.append(entry)
+            else:
+                # 逆順に読んでいるので、1エントリ内のパーツも逆順に積む。
+                # ツール実行は履歴に残さず、実行中のものだけ session_activity で見せる。
+                messages.extend(
+                    part for part in reversed(assistant_parts(item, tool))
+                    if part["role"] != "tool"
+                )
+            if len(messages) >= limit:
+                break
         if len(messages) >= limit:
             break
     messages.reverse()
@@ -1348,11 +1393,11 @@ def sidebar_status(item):
     return "返事待ち", "wait"
 
 
-def session_transcript(path, tool):
+def session_transcript(path, tool, history=()):
     labels = {"user": "あなた", "assistant": tool, "tool": "ツール"}
     return "\n\n".join(
         f'── {labels[item["role"]]} ──\n{item["text"]}'
-        for item in session_messages(path, tool)
+        for item in session_messages(path, tool, history=history)
     )
 
 
@@ -2442,11 +2487,17 @@ def _restorable_session(item):
     ):
         return None
     position = session_position(item)
+    raw_history = item.get("thread_history")
+    thread_history = [
+        thread_id for thread_id in (raw_history if isinstance(raw_history, list) else [])
+        if isinstance(thread_id, str) and re.fullmatch(r"[0-9a-f-]{36}", thread_id)
+    ][-THREAD_HISTORY_LIMIT:]
     return {
         "name": name,
         "tool": tool,
         "cwd": cwd,
         "session_id": session_id,
+        "thread_history": thread_history,
         "summary": str(item.get("summary", ""))[:200],
         "note": str(item.get("note", ""))[:1000],
         "position": position,
@@ -2627,6 +2678,7 @@ def restore_registered_sessions():
                 new_name, item["summary"], item["session_id"], item["bypass"],
                 item["note"], item["position"] == "top", item["pull_request"],
                 item["position"], item.get("model", ""),
+                thread_history=item.get("thread_history") or (),
             )
             restored_item = {**item, "name": new_name}
             resulting.append(restored_item)
@@ -2739,6 +2791,30 @@ def load_managed_sessions(persist=True):
             ).stdout.strip()
             if not session_id and agent:
                 session_id = agent["explicit_id"]
+            thread_history = [
+                thread_id for thread_id in tmux_run(
+                    "show-option", "-qv", "-t", parts[0], "@launcher_thread_history"
+                ).stdout.strip().split(",") if thread_id
+            ]
+            if agent and agent["tool"] == "codex" and session_id and agent.get("open_ids"):
+                # codex 0.151以降はターンごとに別スレッドへ書くことがある。
+                # 現在書かれているスレッドが変わったら追従し、以前のスレッドは
+                # 履歴として残してチャット表示でつなげる。
+                live_id = codex_live_session_id(agent["open_ids"])
+                if live_id and live_id != session_id:
+                    thread_history = [
+                        thread_id for thread_id in thread_history
+                        if thread_id not in (session_id, live_id)
+                    ] + [session_id]
+                    thread_history = thread_history[-THREAD_HISTORY_LIMIT:]
+                    tmux_run(
+                        "set-option", "-t", parts[0],
+                        "@launcher_thread_history", ",".join(thread_history),
+                    )
+                    session_id = live_id
+                    tmux_run(
+                        "set-option", "-t", parts[0], "@launcher_session_id", session_id
+                    )
             # プロセスを特定できなくても、起動時に保存した tool と session_id が
             # あればログは解決できる（プロンプト付き起動の codex 等で agent が
             # 取れないことがある）。
@@ -2774,11 +2850,19 @@ def load_managed_sessions(persist=True):
             if not last_message:
                 last_message = summary
             log_path = exact.get("path", "") if exact else ""
+            history_paths = [
+                found for found in (
+                    find_log_by_id(tool or parts[3], thread_id)
+                    for thread_id in thread_history if thread_id != session_id
+                ) if found and found != log_path
+            ]
             running = screen_is_running(screen, tool or parts[3])
             sessions.append({
                 "name": parts[0], "pane_id": parts[1], "cwd": parts[2],
                 "command": parts[3], "tool": tool or parts[3], "summary": summary,
                 "last_message": last_message, "log_path": log_path,
+                "thread_history": thread_history,
+                "history_paths": history_paths,
                 "note": note,
                 "pinned": pinned,
                 "position": position,
@@ -3202,7 +3286,9 @@ def save_handoff(item):
     os.makedirs(session_dir, mode=0o700, exist_ok=True)
     filename = f"{time.strftime('%Y%m%d-%H%M%S')}-handoff-{uuid.uuid4().hex[:8]}.md"
     path = os.path.join(session_dir, filename)
-    transcript = session_transcript(item.get("log_path", ""), item["tool"])
+    transcript = session_transcript(
+        item.get("log_path", ""), item["tool"], item.get("history_paths") or ()
+    )
     content = (
         "# AI セッション引き継ぎ\n\n"
         f"- 引き継ぎ元: {item['tool']}\n"
@@ -3224,7 +3310,7 @@ def launcher_session_name(output):
 
 def set_session_metadata(
     name, summary="", session_id="", bypass=False, note="", pinned=False,
-    pull_request="", position="", model="",
+    pull_request="", position="", model="", thread_history=(),
 ):
     if not name:
         return
@@ -3232,6 +3318,11 @@ def set_session_metadata(
         tmux_run("set-option", "-t", name, "@launcher_summary", summary[:200])
     if session_id:
         tmux_run("set-option", "-t", name, "@launcher_session_id", session_id)
+    if thread_history:
+        tmux_run(
+            "set-option", "-t", name, "@launcher_thread_history",
+            ",".join(thread_history[-THREAD_HISTORY_LIMIT:]),
+        )
     if bypass:
         # restart（resume）でも同じ権限モードを引き継げるよう記録する
         tmux_run("set-option", "-t", name, "@launcher_bypass", "1")
@@ -6057,8 +6148,11 @@ class Handler(BaseHTTPRequestHandler):
                             "output": "",
                             "artifacts": [],
                         })
+                    history_paths = item.get("history_paths") or ()
                     return self._json({
-                        "messages": session_messages(item["log_path"], item["tool"]),
+                        "messages": session_messages(
+                            item["log_path"], item["tool"], history=history_paths
+                        ),
                         "queued": queued_inputs(item["log_path"]),
                         "question": pending_question(session, item["tool"]),
                         "auth": pending_shell_auth(session, item["tool"]),
@@ -6066,7 +6160,9 @@ class Handler(BaseHTTPRequestHandler):
                         "model": model_label(item.get("model", ""), item["tool"]),
                         "context": item.get("context"),
                         "activity": session_activity(session, item["log_path"], item["tool"]),
-                        "output": session_transcript(item["log_path"], item["tool"]),
+                        "output": session_transcript(
+                            item["log_path"], item["tool"], history_paths
+                        ),
                         "artifacts": session_artifacts(item["log_path"], item["tool"]),
                     })
                 return self._json({"output": capture_session(session)})
@@ -6468,6 +6564,7 @@ class Handler(BaseHTTPRequestHandler):
             new_session, item["summary"], item["session_id"], bypass, item.get("note", ""),
             bool(item.get("pinned")), item.get("pull_request", ""),
             session_position(item), restore_model,
+            thread_history=item.get("thread_history") or (),
         )
         forget_registered_session(session)
         upsert_registered_session({
