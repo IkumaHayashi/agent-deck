@@ -1365,6 +1365,38 @@ Escape to cancel:
             [choice["label"] for choice in result["choices"]],
         )
 
+    def test_pending_question_prioritizes_dialog_over_waiting_spinner(self):
+        screen = SimpleNamespace(
+            returncode=0,
+            stdout="""\
+tool: Bash (gcloud logging read ...)
+Waiting…
+Permission Required: Bash command
+Auto mode classifier requires confirmation for this command.
+
+Latest blocked action: Blocked by classifier
+Do you want to proceed?
+1. Yes
+2. Yes, and don’t ask again for
+3. No
+Enter selection [1-3], or Escape to cancel:
+Esc to cancel · Tab to amend · ctrl+e to explain
+""",
+        )
+        self.assertTrue(server.screen_is_running(screen.stdout, "claude"))
+
+        with mock.patch.object(server, "tmux_run", return_value=screen):
+            result = server.pending_question("agent-test", "claude")
+
+        self.assertEqual(
+            "Latest blocked action: Blocked by classifier Do you want to proceed?",
+            result["question"],
+        )
+        self.assertEqual(
+            ["Yes", "Yes, and don’t ask again for", "No"],
+            [choice["label"] for choice in result["choices"]],
+        )
+
 
 class WaitClassifierTest(unittest.TestCase):
     def setUp(self):

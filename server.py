@@ -1171,13 +1171,20 @@ def pending_question(name, tool):
         return None
     if screen.returncode != 0:
         return None
-    # 実行中のセッションに本物の選択ダイアログは出ない。会話に引用された
-    # 「Enter selection [1-N]」等が画面に残っているだけの誤検出を避ける。
+    # Claude Code の権限確認では、直前の「Waiting…」が画面に残ったまま
+    # 選択ダイアログへ遷移することがある。最下部に本物のダイアログがあれば
+    # スピナー判定より優先する。引用されたダイアログは各 parser の
+    # foreground 判定で除外される。
+    question = (
+        parse_codex_question_screen(screen.stdout)
+        if tool == "codex"
+        else parse_question_screen(screen.stdout)
+    )
+    if question is not None:
+        return question
     if screen_is_running(screen.stdout, tool):
         return None
-    if tool == "codex":
-        return parse_codex_question_screen(screen.stdout)
-    return parse_question_screen(screen.stdout)
+    return None
 
 
 def parse_shell_auth_screen(screen):
