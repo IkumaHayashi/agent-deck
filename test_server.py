@@ -106,6 +106,39 @@ class FrontendTemplateTest(unittest.TestCase):
         worktree.assert_called_once()
         self.assertIn("/tmp/worktrees/project-pr-42", run.call_args.args[0])
 
+    def test_claude_resume_finds_moved_log_and_uses_its_latest_cwd(self):
+        handler = object.__new__(server.Handler)
+        session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+        result = SimpleNamespace(
+            returncode=0, stdout="Started session agent-resumed\n", stderr=""
+        )
+
+        def validate(path):
+            return path, ""
+
+        with (
+            mock.patch.object(server, "validate_dir", side_effect=validate) as validate_mock,
+            mock.patch.object(server, "conversation_log_path", return_value=""),
+            mock.patch.object(server, "find_log_by_id", return_value="/tmp/moved.jsonl"),
+            mock.patch.object(
+                server, "claude_session_cwd", return_value="/tmp/project-worktree"
+            ),
+            mock.patch.object(server, "log_meta", return_value={"summary": "再開テスト"}),
+            mock.patch.object(server.subprocess, "run", return_value=result) as run,
+            mock.patch.object(server, "set_session_metadata"),
+            mock.patch.object(server, "upsert_registered_session"),
+            mock.patch.object(server, "invalidate_session_cache"),
+            mock.patch.object(handler, "_redirect"),
+        ):
+            handler._launch("/tmp/project", tool="claude", resume=session_id)
+
+        self.assertEqual(
+            [mock.call("/tmp/project"), mock.call("/tmp/project-worktree")],
+            validate_mock.call_args_list,
+        )
+        self.assertIn("/tmp/project-worktree", run.call_args.args[0])
+        self.assertIn(session_id, run.call_args.args[0])
+
     def test_review_context_is_seeded_into_input_without_sending(self):
         # レビュー対象PRは入力欄への書き出しプリセットでAIへ伝える（自動送信はしない）
         self.assertIn("seedReviewContext()", server.TERMINAL_PAGE)
@@ -1145,7 +1178,26 @@ class VersionUpdateTest(unittest.TestCase):
 
 class ClaudeProjectDirTest(unittest.TestCase):
     def setUp(self):
+        server.CLAUDE_CWD_CACHE.clear()
         server.CLAUDE_START_CACHE.clear()
+
+    def test_claude_session_cwd_uses_latest_recorded_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log_path = os.path.join(directory, "conversation.jsonl")
+            with open(log_path, "w", encoding="utf-8") as output:
+                output.write(json.dumps({"cwd": "/Users/xxx/project"}) + "\n")
+                output.write(json.dumps({"cwd": "/Users/xxx/project-worktree"}) + "\n")
+
+            self.assertEqual(
+                "/Users/xxx/project-worktree", server.claude_session_cwd(log_path)
+            )
+
+            with open(log_path, "a", encoding="utf-8") as output:
+                output.write(json.dumps({"cwd": "/Users/xxx/next-worktree"}) + "\n")
+
+            self.assertEqual(
+                "/Users/xxx/next-worktree", server.claude_session_cwd(log_path)
+            )
 
     def test_non_ascii_and_punctuation_are_replaced(self):
         self.assertEqual(

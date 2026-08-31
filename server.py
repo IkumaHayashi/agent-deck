@@ -2181,16 +2181,28 @@ def codex_session_head(path):
 
 
 def claude_session_cwd(path):
-    """claudeログ冒頭の cwd を返す（パス単位でキャッシュ）。"""
+    """claudeログの最新 cwd を返す（パスとファイル状態でキャッシュ）。"""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return ""
+    key = (stat.st_mtime, stat.st_size)
     with CLAUDE_CWD_LOCK:
         cached = CLAUDE_CWD_CACHE.get(path)
-    if cached is not None:
-        return cached
+    if cached and cached["key"] == key:
+        return cached["cwd"]
+    # Claude Codeは会話途中で cwd を移動しても、同じJSONLへ
+    # 追記する。再開先には冒頭ではなく最後に記録された cwd を使う。
     cwd = next(
-        (item["cwd"] for item in read_json_lines(path, 40) if item.get("cwd")), ""
+        (item["cwd"] for item in read_json_lines_reverse(path) if item.get("cwd")), ""
     )
+    # 起動直後など末尾の読み取りが不完全な場合だけ冒頭を見る。
+    if not cwd:
+        cwd = next(
+            (item["cwd"] for item in read_json_lines(path, 40) if item.get("cwd")), ""
+        )
     with CLAUDE_CWD_LOCK:
-        CLAUDE_CWD_CACHE[path] = cwd
+        CLAUDE_CWD_CACHE[path] = {"key": key, "cwd": cwd}
         for old in list(CLAUDE_CWD_CACHE)[: len(CLAUDE_CWD_CACHE) - LOG_META_LIMIT]:
             CLAUDE_CWD_CACHE.pop(old, None)
     return cwd
@@ -6636,7 +6648,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._page(render('<div class="msg err">❌ 再開する会話の指定が不正です</div>', "new"))
             resume_log = conversation_log_path(tool, path, resume)
             if not resume_log:
+                # 会話途中で cwd を移動すると、一覧が送った cwd と
+                # JSONLの保存先が食い違うことがある。IDで横断検索する。
+                resume_log = find_log_by_id(tool, resume)
+            if not resume_log:
                 return self._page(render('<div class="msg err">❌ 再開する会話が見つかりません</div>', "new"))
+            if tool == "claude":
+                # ログが保持する最新 cwd で再開する。削除済みworktree
+                # など、使えない場所には暗黙に起動しない。
+                resume_cwd = claude_session_cwd(resume_log)
+                if resume_cwd and os.path.realpath(resume_cwd) != path:
+                    path, err = validate_dir(resume_cwd)
+                    if err:
+                        return self._page(render(
+                            f'<div class="msg err">❌ 会話の作業ディレクトリを使用できません: '
+                            f'{html.escape(err)}</div>', "new"
+                        ))
         skip_permissions = bypass == "1"
         try:
             pull_request = normalize_pr_selector(pull_request)
