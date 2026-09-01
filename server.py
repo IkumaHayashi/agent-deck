@@ -3275,7 +3275,16 @@ def save_uploaded_image(data, content_type, session_name):
     }
     media_type = content_type.split(";", 1)[0].lower()
     if media_type not in image_types:
-        raise ValueError("PNG・JPEG・GIF・WebP画像のみ添付できます")
+        # OSやブラウザによっては、写真のD&D時にContent-Typeが空または
+        # application/octet-streamになる。対応画像なら実データから形式を補う。
+        media_type = next((
+            candidate
+            for candidate, (_, signatures) in image_types.items()
+            if any(data.startswith(signature) for signature in signatures)
+            and (candidate != "image/webp" or data[8:12] == b"WEBP")
+        ), "")
+        if not media_type:
+            raise ValueError("PNG・JPEG・GIF・WebP画像のみ添付できます")
     if not data or len(data) > 15 * 1024 * 1024:
         raise ValueError("画像は15MBまでです")
     extension, signatures = image_types[media_type]
@@ -5613,19 +5622,30 @@ TERMINAL_PAGE = r"""<!doctype html>
   async function uploadImage(file) {{
     if (file.size > 15 * 1024 * 1024) throw new Error("画像は15MBまでです");
     status.textContent = "画像をアップロード中...";
+    const name = file.name || "";
+    const imageType = file.type || (
+      /\.jpe?g$/i.test(name) ? "image/jpeg"
+      : /\.png$/i.test(name) ? "image/png"
+      : /\.gif$/i.test(name) ? "image/gif"
+      : /\.webp$/i.test(name) ? "image/webp"
+      : "application/octet-stream"
+    );
     const response = await fetch(
       "/api/sessions/" + encodeURIComponent(session) + "/image",
-      {{method: "POST", headers: {{"Content-Type": file.type || "application/octet-stream"}}, body: file}}
+      {{method: "POST", headers: {{"Content-Type": imageType}}, body: file}}
     );
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || "画像のアップロードに失敗しました");
     const prefix = input.value && !input.value.endsWith("\n") ? "\n" : "";
     input.value += prefix + "添付画像: " + data.path + "\n";
-    syncInput(); input.focus(); status.textContent = "画像を添付しました";
+    syncInput(); input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.scrollTop = input.scrollHeight;
   }}
   async function uploadFile(file) {{
     // 画像は既存のサムネイル表示に乗せる。それ以外はパスに変換して入力欄へ入れる
-    if ((file.type || "").startsWith("image/")) return uploadImage(file);
+    if ((file.type || "").startsWith("image/") || /\.(?:png|jpe?g|gif|webp)$/i.test(file.name || ""))
+      return uploadImage(file);
     if (file.size > 15 * 1024 * 1024) throw new Error("ファイルは15MBまでです");
     status.textContent = "ファイルをアップロード中...";
     const response = await fetch(
@@ -5639,18 +5659,41 @@ TERMINAL_PAGE = r"""<!doctype html>
     if (!response.ok) throw new Error(data.error || "ファイルのアップロードに失敗しました");
     const prefix = input.value && !input.value.endsWith("\n") ? "\n" : "";
     input.value += prefix + "添付ファイル: " + data.path + "\n";
-    syncInput(); input.focus(); status.textContent = "ファイルを添付しました";
+    syncInput(); input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    input.scrollTop = input.scrollHeight;
+  }}
+  async function uploadFiles(files) {{
+    let uploaded = 0;
+    statusMessageUntil = Number.POSITIVE_INFINITY;
+    try {{
+      for (const file of files) {{ await uploadFile(file); uploaded++; }}
+      status.textContent = uploaded === 1 ? "ファイルを添付しました" : uploaded + "件を添付しました";
+    }} catch (error) {{
+      status.textContent = uploaded
+        ? uploaded + "件を添付しました（残りは失敗: " + error.message + "）"
+        : error.message;
+    }}
+    statusMessageUntil = Date.now() + 5000;
+  }}
+  function draggedFiles(dataTransfer) {{
+    const items = Array.from(dataTransfer?.items || [])
+      .filter(item => item.kind === "file")
+      .map(item => item.getAsFile()).filter(Boolean);
+    return items.length ? items : Array.from(dataTransfer?.files || []);
   }}
   document.addEventListener("dragover", event => {{
-    if (event.dataTransfer && Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
+    const types = Array.from(event.dataTransfer?.types || []);
+    if (types.some(type => type.toLowerCase() === "files") ||
+        Array.from(event.dataTransfer?.items || []).some(item => item.kind === "file"))
+      event.preventDefault();
   }});
   document.addEventListener("drop", async event => {{
-    const files = Array.from(event.dataTransfer?.files || []);
+    const files = draggedFiles(event.dataTransfer);
     if (!files.length) return;
     event.preventDefault();
     if (document.body.classList.contains("readonly")) return;
-    try {{ for (const file of files) await uploadFile(file); }}
-    catch (error) {{ status.textContent = error.message; }}
+    await uploadFiles(files);
   }});
   async function refresh() {{
     if (showingHistory) return;
@@ -5816,8 +5859,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       .map(item => item.getAsFile()).filter(Boolean);
     if (!images.length) return;
     event.preventDefault();
-    try {{ for (const image of images) await uploadImage(image); }}
-    catch (error) {{ status.textContent = error.message; }}
+    await uploadFiles(images);
   }});
   loadChat(); setInterval(() => showingHistory ? loadChat() : refresh(), 1000);
   if (!document.body.classList.contains("readonly")) input.focus();

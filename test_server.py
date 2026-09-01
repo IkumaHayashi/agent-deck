@@ -252,6 +252,28 @@ class FrontendTemplateTest(unittest.TestCase):
 
         self.assertEqual("image/jpeg", content_type)
 
+    def test_uploaded_image_uses_signature_when_content_type_is_missing(self):
+        image = b"\xff\xd8\xffjpeg-data"
+        with tempfile.TemporaryDirectory() as upload_dir, mock.patch.object(
+            server, "UPLOAD_DIR", upload_dir
+        ):
+            path = server.save_uploaded_image(image, "application/octet-stream", "agent-test")
+
+            with open(path, "rb") as saved:
+                self.assertEqual(image, saved.read())
+
+        self.assertTrue(path.endswith(".jpg"))
+
+    def test_terminal_drop_upload_keeps_visible_feedback(self):
+        page = server.TERMINAL_PAGE
+
+        self.assertIn("function draggedFiles(dataTransfer)", page)
+        self.assertIn('type.toLowerCase() === "files"', page)
+        self.assertIn('/\\.(?:png|jpe?g|gif|webp)$/i.test(file.name || "")', page)
+        self.assertIn("input.scrollTop = input.scrollHeight", page)
+        self.assertIn("statusMessageUntil = Number.POSITIVE_INFINITY", page)
+        self.assertIn("statusMessageUntil = Date.now() + 5000", page)
+
     def test_quote_places_cursor_below_quoted_text(self):
         # removeAllRanges を引用より後に呼ぶと入力欄のカーソルが先頭へ戻る（Chrome）
         handler = server.TERMINAL_PAGE[
