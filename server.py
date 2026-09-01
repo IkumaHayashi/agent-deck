@@ -4346,6 +4346,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     background: #0d1117; border: 1px solid #484f58; border-radius: 8px;
     font-family: inherit; font-size: 17px; line-height: 1.5; }}
   .buttons {{ display: flex; gap: 6px; margin-top: 7px; }}
+  #attach {{ flex: 0 0 auto; padding: 10px 13px; font-size: 1.05rem; }}
   button {{ flex: 1; padding: 10px 6px; color: #e6edf3; background: #21262d;
     border: 1px solid #484f58; border-radius: 8px; font-size: 1rem; }}
   button.primary {{ background: #238636; border-color: #2ea043; font-weight: 600; }}
@@ -4407,8 +4408,10 @@ TERMINAL_PAGE = r"""<!doctype html>
 <button type="button" id="selection-quote" hidden>↩ 選択部分を引用</button>
 <div class="controls">
   <div id="attachment-preview" hidden aria-label="添付画像のプレビュー"></div>
-  <textarea id="input" placeholder="メッセージを入力（! でコマンド実行、画像ペースト・ファイルD&amp;D可）"></textarea>
+  <textarea id="input" placeholder="メッセージを入力（! でコマンド実行、📎 でファイル添付）"></textarea>
+  <input type="file" id="file-picker" multiple hidden>
   <div class="buttons">
+    <button type="button" id="attach" title="ファイルを添付" aria-label="ファイルを添付">📎</button>
     <button type="button" data-key="Escape">Esc</button>
     <button type="button" data-key="C-c">Ctrl+C</button>
     <button type="button" id="enter">Enter</button>
@@ -5795,6 +5798,14 @@ TERMINAL_PAGE = r"""<!doctype html>
     }}
     statusMessageUntil = Date.now() + 5000;
   }}
+  // スマホには D&D もクリップボード貼り付けもないので、📎 から選ばせる。
+  const filePicker = document.getElementById("file-picker");
+  document.getElementById("attach").addEventListener("click", () => filePicker.click());
+  filePicker.addEventListener("change", async () => {{
+    const files = Array.from(filePicker.files || []);
+    filePicker.value = "";  // 同じファイルを続けて選び直せるようにする
+    if (files.length) await uploadFiles(files);
+  }});
   function draggedFiles(dataTransfer) {{
     const items = Array.from(dataTransfer?.items || [])
       .filter(item => item.kind === "file")

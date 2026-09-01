@@ -30,8 +30,10 @@
     </div>
   </details>
   <details id="prompt-details" open><summary>最初のプロンプト（任意）</summary>
-    <textarea id="prompt" rows="3" placeholder="起動時に渡す指示。画像もペーストできます"></textarea>
-    <div class="prompt-actions">{inbox_prompt_button}<div id="prompt-status" class="cw-empty"></div></div>
+    <textarea id="prompt" rows="3" placeholder="起動時に渡す指示。📎 から画像を添付できます"></textarea>
+    <input type="file" id="prompt-image-picker" accept="image/*" multiple hidden>
+    <div class="prompt-actions"><button type="button" class="cw-set" id="prompt-attach"
+      title="画像を添付" aria-label="画像を添付">📎</button>{inbox_prompt_button}<div id="prompt-status" class="cw-empty"></div></div>
   </details>
 </div>
 <div class="launcher-tabs" role="tablist">

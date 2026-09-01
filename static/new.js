@@ -143,15 +143,28 @@
     promptBox.value += prefix + "添付画像: " + data.path + "\n";
     promptStatus.textContent = "画像を添付しました";
   }
+  async function uploadLaunchImages(files) {
+    try {
+      for (var i = 0; i < files.length; i++) await uploadLaunchImage(files[i]);
+    } catch (error) { promptStatus.textContent = "❌ " + error.message; }
+  }
+  // スマホはペーストできないので、📎 から写真・カメラ・ファイルを選ばせる
+  var promptImagePicker = document.getElementById("prompt-image-picker");
+  document.getElementById("prompt-attach").addEventListener("click", function () {
+    promptImagePicker.click();
+  });
+  promptImagePicker.addEventListener("change", async function () {
+    var files = Array.from(promptImagePicker.files || []);
+    promptImagePicker.value = "";  // 同じ画像を続けて選び直せるようにする
+    if (files.length) await uploadLaunchImages(files);
+  });
   promptBox.addEventListener("paste", async function (event) {
     var images = Array.from((event.clipboardData || {}).items || [])
       .filter(function (item) { return item.kind === "file" && item.type.indexOf("image/") === 0; })
       .map(function (item) { return item.getAsFile(); }).filter(Boolean);
     if (!images.length) return;
     event.preventDefault();
-    try {
-      for (var i = 0; i < images.length; i++) await uploadLaunchImage(images[i]);
-    } catch (error) { promptStatus.textContent = "❌ " + error.message; }
+    await uploadLaunchImages(images);
   });
   function cleanChatwork(body) {
     return (body || "")

@@ -28,6 +28,18 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
 
+    def test_new_page_offers_image_picker_for_touch_devices(self):
+        page = server.render()
+
+        self.assertIn('id="prompt-image-picker"', page)
+        self.assertIn('id="prompt-attach"', page)
+
+    def test_terminal_page_offers_file_picker_for_touch_devices(self):
+        # スマホには D&D もペーストもないので 📎 から選べる必要がある
+        self.assertIn('id="file-picker" multiple hidden', server.TERMINAL_PAGE)
+        self.assertIn('id="attach"', server.TERMINAL_PAGE)
+        self.assertIn("filePicker.click()", server.TERMINAL_PAGE)
+
     def test_resume_conversation_can_be_filtered_by_id(self):
         conversation = {
             "cwd": "/Users/demo/project",
