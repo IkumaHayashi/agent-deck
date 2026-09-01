@@ -1417,6 +1417,24 @@ class ClaudeProjectDirTest(unittest.TestCase):
 
 
 class ClaudeShellCommandTest(unittest.TestCase):
+    def test_image_scale_metadata_is_not_shown_as_user_message(self):
+        text = (
+            "[Image: original 4032x3024, displayed at 2000x1500. "
+            "Multiply coordinates by 2.02 to map to original image.]"
+        )
+        item = {
+            "type": "user",
+            "isMeta": True,
+            "turnCompanion": True,
+            "message": {"content": text},
+        }
+
+        self.assertIsNone(server.user_message_entry(item, "claude"))
+        self.assertEqual(
+            {"role": "user", "text": text},
+            server.user_message_entry({"type": "user", "message": {"content": text}}, "claude"),
+        )
+
     def test_user_shell_command_is_rendered_as_markdown(self):
         item = {
             "type": "user",

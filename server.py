@@ -541,6 +541,16 @@ def user_message_raw(item, tool):
                 "",
             )
     text = text.strip()
+    # Claude Code が画像を読み込むたびに、表示用の縮尺情報を内部 user 発言として
+    # 記録する。元画像は直前の発言でカード表示済みなので、チャットには出さない。
+    if (
+        tool == "claude"
+        and item.get("isMeta")
+        and item.get("turnCompanion")
+        and text.startswith("[Image: original ")
+        and text.endswith("original image.]")
+    ):
+        return ""
     if text and not text.startswith((
         "# AGENTS.md instructions", "<environment_context>",
         "The following is the Codex agent history", "<task-notification>",
