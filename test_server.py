@@ -320,6 +320,58 @@ class FrontendTemplateTest(unittest.TestCase):
         )
 
 
+class SessionInputTest(unittest.TestCase):
+    def test_extracts_only_uploaded_image_lines(self):
+        prefix = server.UPLOAD_PATH_PREFIXES[0]
+        image_path = f"{prefix}/uploads/agent-example/photo.jpg"
+        value = "\n".join(
+            [
+                "確認してください",
+                f"添付画像: {image_path}",
+                "添付ファイル: /tmp/report.pdf",
+                "添付画像: /tmp/unmanaged.jpg",
+            ]
+        )
+
+        self.assertEqual([image_path], server.pasted_upload_image_paths(value))
+
+    def test_waits_until_claude_converts_image_path(self):
+        path = f"{server.UPLOAD_PATH_PREFIXES[0]}/uploads/agent-example/photo.jpg"
+        screens = [f"入力中 {path}", "入力中 [Image #8]"]
+        with (
+            mock.patch.object(server, "capture_session", side_effect=screens) as capture,
+            mock.patch.object(server.time, "monotonic", side_effect=[0.0, 0.1, 0.2]),
+            mock.patch.object(server.time, "sleep") as sleep,
+        ):
+            server.wait_for_claude_image_paste("agent-example", [path], "[Image #7]")
+
+        self.assertEqual(2, capture.call_count)
+        sleep.assert_called_once_with(0.1)
+
+    def test_image_send_uses_conversion_wait_before_enter(self):
+        path = f"{server.UPLOAD_PATH_PREFIXES[0]}/uploads/agent-example/photo.jpg"
+
+        def tmux_result(*args, **_kwargs):
+            if args[:2] == ("show-option", "-qv"):
+                return SimpleNamespace(returncode=0, stdout="claude\n", stderr="")
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        with (
+            mock.patch.object(server, "tmux_run", side_effect=tmux_result) as tmux,
+            mock.patch.object(server, "capture_session", return_value="[Image #4]"),
+            mock.patch.object(server, "wait_for_claude_image_paste") as wait,
+            mock.patch.object(server.time, "sleep"),
+        ):
+            server.send_session_text("agent-example", f"添付画像: {path}\n")
+
+        wait.assert_called_once_with("agent-example", [path], "[Image #4]")
+        self.assertEqual(
+            ("send-keys", "-t", "agent-example", "Enter"),
+            tmux.call_args_list[-2].args,
+        )
+        self.assertEqual(("delete-buffer",), tmux.call_args_list[-1].args[:1])
+
+
 class WorktreeCleanupTest(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()

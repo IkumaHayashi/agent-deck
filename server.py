@@ -3177,6 +3177,43 @@ def fast_mode_enabled(name):
     return bool(re.search(r"\bfast\s+·", tail))
 
 
+def pasted_upload_image_paths(value):
+    """Web入力に含まれるアップロード済み画像の絶対パスを返す。"""
+    paths = []
+    for line in value.splitlines():
+        match = re.fullmatch(r"\s*添付画像[:：]\s*(/\S+)\s*", line)
+        if not match:
+            continue
+        path = match.group(1)
+        if any(path.startswith(prefix + "/uploads/") for prefix in UPLOAD_PATH_PREFIXES):
+            paths.append(path)
+    return paths
+
+
+def wait_for_claude_image_paste(name, paths, before_screen):
+    """Claude TUI が画像パスを添付トークンへ変換するまで待つ。"""
+    before_numbers = [
+        int(value) for value in re.findall(r"\[Image #(\d+)\]", before_screen)
+    ]
+    before_max = max(before_numbers, default=0)
+    saw_raw_path = False
+    deadline = time.monotonic() + min(15.0, 3.0 + 0.75 * len(paths))
+    while time.monotonic() < deadline:
+        try:
+            screen = capture_session(name)
+        except RuntimeError:
+            break
+        raw_path_visible = any(path in screen for path in paths)
+        saw_raw_path = saw_raw_path or raw_path_visible
+        image_numbers = [int(value) for value in re.findall(r"\[Image #(\d+)\]", screen)]
+        converted = max(image_numbers, default=0) > before_max
+        # 変換前のパス表示を一度観測できた場合と、変換が速くて観測できなかった
+        # 場合（新しい Image トークンが現れた）の両方を扱う。
+        if not raw_path_visible and (saw_raw_path or converted):
+            return
+        time.sleep(0.1)
+
+
 def send_session_text(name, value, enter=True):
     fast_command = re.fullmatch(r"/fast(?:\s+(on|off|status))?", value.strip())
     if fast_command:
@@ -3223,6 +3260,17 @@ def send_session_text(name, value, enter=True):
         # 貼り付けた本文と連結されて送信されてしまう。送信時は先にクリアする。
         tmux_run("send-keys", "-t", name, "C-u")
         time.sleep(0.1)
+    image_paths = pasted_upload_image_paths(value) if enter and not bash_mode else []
+    claude_image_paste = False
+    before_screen = ""
+    if image_paths:
+        tool = tmux_run("show-option", "-qv", "-t", name, "@launcher_tool")
+        claude_image_paste = tool.returncode == 0 and tool.stdout.strip() == "claude"
+        if claude_image_paste:
+            try:
+                before_screen = capture_session(name)
+            except RuntimeError:
+                claude_image_paste = False
     buffer_name = "web-" + uuid.uuid4().hex
     loaded = tmux_run("load-buffer", "-b", buffer_name, "-", input_text=value)
     if loaded.returncode != 0:
@@ -3236,8 +3284,13 @@ def send_session_text(name, value, enter=True):
         if enter:
             # Codex/Claude の TUI が貼り付けイベントを処理してから Enter を送る。
             # 直後に送ると Enter が先に処理され、文字だけ入力欄に残ることがある。
-            # bash モードは切り替え直後で描画が重なるため、少し長めに待つ。
-            time.sleep(0.3 if bash_mode else 0.15)
+            # Claude の画像はパスから添付トークンへの変換が非同期なので、変換完了を
+            # 画面で確認する。特に長い会話では固定の短い待ち時間だと画像だけ残る。
+            if claude_image_paste:
+                wait_for_claude_image_paste(name, image_paths, before_screen)
+            else:
+                # bash モードは切り替え直後で描画が重なるため、少し長めに待つ。
+                time.sleep(0.3 if bash_mode else 0.15)
             tmux_run("send-keys", "-t", name, "Enter")
     finally:
         tmux_run("delete-buffer", "-b", buffer_name)
