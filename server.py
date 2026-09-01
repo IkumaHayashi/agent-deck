@@ -4319,6 +4319,19 @@ TERMINAL_PAGE = r"""<!doctype html>
   .controls {{ flex-shrink: 0; padding: 8px max(8px, env(safe-area-inset-right))
     max(8px, env(safe-area-inset-bottom)) max(8px, env(safe-area-inset-left));
     border-top: 1px solid #30363d; background: #161b22; }}
+  #attachment-preview {{ display: flex; gap: 8px; margin-bottom: 8px; padding-bottom: 2px;
+    overflow-x: auto; overscroll-behavior-x: contain; }}
+  #attachment-preview[hidden] {{ display: none; }}
+  .input-attachment {{ position: relative; flex: 0 0 116px; margin: 0;
+    overflow: hidden; border: 1px solid #3d444d; border-radius: 9px; background: #0d1117; }}
+  .input-attachment img {{ display: block; width: 116px; height: 88px; object-fit: cover;
+    cursor: zoom-in; }}
+  .input-attachment figcaption {{ padding: 5px 7px; overflow: hidden;
+    color: #8b949e; font-size: .68rem; text-overflow: ellipsis; white-space: nowrap; }}
+  .input-attachment .remove-attachment {{ position: absolute; top: 4px; right: 4px;
+    width: 28px; height: 28px; flex: none; padding: 0; border-color: #8b949e;
+    border-radius: 50%; background: #0d1117dd; color: #fff; line-height: 26px;
+    box-shadow: 0 1px 5px #000a; cursor: pointer; }}
   textarea {{ width: 100%; min-height: 80px; resize: vertical; padding: 12px; color: #e6edf3;
     background: #0d1117; border: 1px solid #484f58; border-radius: 8px;
     font-family: inherit; font-size: 17px; line-height: 1.5; }}
@@ -4383,6 +4396,7 @@ TERMINAL_PAGE = r"""<!doctype html>
 </section>
 <button type="button" id="selection-quote" hidden>↩ 選択部分を引用</button>
 <div class="controls">
+  <div id="attachment-preview" hidden aria-label="添付画像のプレビュー"></div>
   <textarea id="input" placeholder="メッセージを入力（! でコマンド実行、画像ペースト・ファイルD&amp;D可）"></textarea>
   <div class="buttons">
     <button type="button" data-key="Escape">Esc</button>
@@ -4446,7 +4460,8 @@ TERMINAL_PAGE = r"""<!doctype html>
     lightboxNext.disabled = lightboxIndex === lightboxItems.length - 1;
   }}
   function showLightbox(selected) {{
-    lightboxItems = Array.from(chat.querySelectorAll("img.thumb")).map(img => ({{
+    const root = selected.closest("#attachment-preview") || chat;
+    lightboxItems = Array.from(root.querySelectorAll("img.thumb")).map(img => ({{
       element: img, src: img.src, name: img.dataset.name || "添付画像",
       path: img.dataset.path || "", description: img.dataset.description || "",
       context: img.dataset.context || ""
@@ -4477,6 +4492,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   const screen = document.getElementById("screen");
   const chat = document.getElementById("chat");
   const input = document.getElementById("input");
+  const attachmentPreview = document.getElementById("attachment-preview");
   const status = document.getElementById("status");
   const noteButton = document.getElementById("note");
   const noteModal = document.getElementById("note-modal");
@@ -4984,15 +5000,55 @@ TERMINAL_PAGE = r"""<!doctype html>
     input.style.height = "auto";
     input.style.height = Math.min(input.scrollHeight + border, maxHeight) + "px";
   }}
+  function inputUploadImagePaths() {{
+    return input.value.split(/\r?\n/).map(line => {{
+      const match = line.match(
+        /^\s*添付画像[:：]\s*((?:{upload_prefix_alt})\/uploads\/[^\s]+)\s*$/);
+      return match ? match[1] : "";
+    }}).filter(Boolean);
+  }}
+  function uploadedImageSrc(path) {{
+    const rel = path.split("/uploads/")[1];
+    return "/uploads/" + rel.split("/").map(encodeURIComponent).join("/");
+  }}
+  function removeInputAttachment(path) {{
+    const lines = input.value.replace(/\r\n/g, "\n").split("\n");
+    const index = lines.findIndex(line =>
+      line.trim() === "添付画像: " + path || line.trim() === "添付画像：" + path);
+    if (index < 0) return;
+    lines.splice(index, 1);
+    input.value = lines.join("\n").replace(/^\n+|\n+$/g, "");
+    if (input.value) input.value += "\n";
+    syncInput(); input.focus();
+  }}
+  function renderInputAttachments() {{
+    const paths = inputUploadImagePaths();
+    attachmentPreview.replaceChildren(...paths.map(path => {{
+      const card = document.createElement("figure"); card.className = "input-attachment";
+      const img = document.createElement("img"); img.className = "thumb";
+      img.src = uploadedImageSrc(path); img.alt = imageName(path); img.loading = "lazy";
+      img.dataset.name = imageName(path); img.dataset.path = path;
+      img.addEventListener("click", () => showLightbox(img));
+      const caption = document.createElement("figcaption");
+      caption.textContent = imageName(path); caption.title = imageName(path);
+      const remove = document.createElement("button");
+      remove.type = "button"; remove.className = "remove-attachment";
+      remove.textContent = "×"; remove.title = "添付から外す";
+      remove.setAttribute("aria-label", imageName(path) + "を添付から外す");
+      remove.addEventListener("click", () => removeInputAttachment(path));
+      card.append(img, caption, remove); return card;
+    }}));
+    attachmentPreview.hidden = paths.length === 0;
+  }}
   // input.value を触ったら必ず呼ぶ（下書き保存と高さ調整をまとめて行う）
   function syncInput() {{
     if (input.value) localStorage.setItem(draftKey, input.value);
     else localStorage.removeItem(draftKey);
-    autoGrow();
+    autoGrow(); renderInputAttachments();
   }}
   if (!document.body.classList.contains("readonly") && localStorage.getItem(draftKey)) {{
     input.value = localStorage.getItem(draftKey);
-    autoGrow();
+    syncInput();
   }}
   input.addEventListener("input", syncInput);
   // loadDirectoryDiff() は開始直後に clearDiffSelection() → syncInput() を呼ぶ。

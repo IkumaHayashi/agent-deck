@@ -222,7 +222,7 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('contextLine.textContent = "文章: " + context', page)
         self.assertIn('description.textContent = "説明: " + alt', page)
         self.assertIn('event.key === "ArrowRight"', page)
-        self.assertIn('chat.querySelectorAll("img.thumb")', page)
+        self.assertIn('root.querySelectorAll("img.thumb")', page)
         self.assertIn('!event.target.closest("img, figcaption, button")', page)
 
     def test_resolve_local_image_accepts_real_png(self):
@@ -273,6 +273,14 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("input.scrollTop = input.scrollHeight", page)
         self.assertIn("statusMessageUntil = Number.POSITIVE_INFINITY", page)
         self.assertIn("statusMessageUntil = Date.now() + 5000", page)
+
+    def test_terminal_shows_uploaded_images_before_send(self):
+        page = server.TERMINAL_PAGE
+
+        self.assertIn('id="attachment-preview"', page)
+        self.assertIn("function renderInputAttachments()", page)
+        self.assertIn('remove.className = "remove-attachment"', page)
+        self.assertIn("autoGrow(); renderInputAttachments();", page)
 
     def test_quote_places_cursor_below_quoted_text(self):
         # removeAllRanges を引用より後に呼ぶと入力欄のカーソルが先頭へ戻る（Chrome）
