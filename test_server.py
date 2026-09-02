@@ -1633,6 +1633,62 @@ Escape to cancel:
     def test_single_select_dialog_is_not_multi(self):
         self.assertFalse(server.parse_question_screen(self.MCP_DIALOG)["multi"])
 
+    # Claude Code 2.1.257 でプロンプトの文言が変わった。旧文言も resume した
+    # 古いバージョンで出るので、両方を拾えることを確かめる。
+    NEW_DIALOG = """\
+claude: 実装に入る前に確認させてください。
+←   ☐ 確定ポリシー   ✔ Submit   →
+2日の自動確定で、どこまでを確定対象にしますか？
+1. オムニ全部＋クレーは不足時のみ — 運用ルール通り
+2. 当選は全部確定 — 取りこぼしゼロだが余剰枠は手動キャンセル
+3. Other
+4. Chat about this
+Select with numbers [1-4]. Then Enter to submit or Escape to cancel:
+"""
+
+    NEW_MULTI_DIALOG = """\
+←   ☐ 改善ポイント   ✔ Submit   →
+どこが回答しにくいですか?（複数選択OK）
+1. 絵文字が多すぎる — 10個から探すのが面倒
+2. 2段階タップが面倒 — 数字と種類を別々に押すのが手間
+3. Other
+Select with numbers [1-3] (comma- or space-separated for several). Then Space
+to toggle, Enter to submit or Escape to cancel:
+"""
+
+    def test_parses_new_single_select_prompt(self):
+        result = server.parse_question_screen(self.NEW_DIALOG)
+        self.assertFalse(result["multi"])
+        self.assertEqual(
+            "2日の自動確定で、どこまでを確定対象にしますか？", result["question"],
+        )
+        self.assertEqual(
+            ["オムニ全部＋クレーは不足時のみ", "当選は全部確定", "Other",
+             "Chat about this"],
+            [choice["label"] for choice in result["choices"]],
+        )
+        self.assertEqual("運用ルール通り", result["choices"][0]["description"])
+
+    def test_parses_new_multi_select_prompt(self):
+        result = server.parse_question_screen(self.NEW_MULTI_DIALOG)
+        self.assertTrue(result["multi"])
+        self.assertEqual("どこが回答しにくいですか?（複数選択OK）", result["question"])
+        self.assertEqual(
+            ["絵文字が多すぎる", "2段階タップが面倒", "Other"],
+            [choice["label"] for choice in result["choices"]],
+        )
+
+    def test_new_prompt_with_arrow_key_hint_is_parsed(self):
+        screen = self.NEW_DIALOG.replace(
+            "Select with numbers [1-4].",
+            "Select with numbers [1-4] or up / down arrow keys.",
+        )
+        self.assertEqual(4, len(server.parse_question_screen(screen)["choices"]))
+
+    def test_quoted_new_prompt_is_not_a_question(self):
+        screen = self.NEW_DIALOG + "以上が前回の質問でした。\n"
+        self.assertIsNone(server.parse_question_screen(screen))
+
     def test_quoted_multi_select_text_is_not_a_question(self):
         screen = self.MULTI_DIALOG + "以上が前回の質問でした。\n"
         self.assertIsNone(server.parse_question_screen(screen))

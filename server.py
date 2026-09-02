@@ -986,9 +986,25 @@ def session_running(name):
     return screen.returncode == 0 and screen_is_running(screen.stdout)
 
 
-# 「Enter selection [1-N]」（単一選択）と「Enter selections (comma- or
-# space-separated) [1-N] then Enter to Submit」（複数選択）の両方に一致する。
-SELECTION_PROMPT = r"Enter selection(s)?\b[^\[]*\[1-(\d+)\]"
+# 選択プロンプト行。Claude Code 2.1.257 で文言が「Enter selection(s) …
+# [1-N]」から「Select with numbers [1-N]」へ変わったため、新旧どちらにも
+# 一致させる。複数選択は旧版が「selections」の s、新版が番号の後ろに続く
+# 「(comma- or space-separated for several)」で見分ける。
+SELECTION_PROMPT = (
+    r"Enter selection(?P<old_multi>s)?\b[^\[]*\[1-(?P<old_count>\d+)\]"
+    r"|Select with numbers \[1-(?P<count>\d+)\]"
+    r"(?P<multi> \(comma- or space-separated)?"
+)
+
+
+def match_selection_prompt(line):
+    """選択プロンプト行なら (複数選択か, 選択肢数) を返す。違えば None。"""
+    match = re.search(SELECTION_PROMPT, line)
+    if match is None:
+        return None
+    if match.group("count") is not None:
+        return bool(match.group("multi")), int(match.group("count"))
+    return bool(match.group("old_multi")), int(match.group("old_count"))
 
 
 def is_tab_bar(line):
@@ -999,16 +1015,20 @@ def is_tab_bar(line):
 def dialog_is_foreground(lines, prompt_index):
     """プロンプト行が画面最下部にあるか（＝実際に入力待ちのダイアログか）。
 
-    会話に引用された「Enter selection [1-N]」等のテキストは、下に本文や
+    会話に引用された「Select with numbers [1-N]」等のテキストは、下に本文や
     入力欄・フッターが続くので、これで本物と区別できる。本物のダイアログの
-    下は空行か「Enter to confirm · Esc to cancel」のキー案内、複数選択版で
-    折り返された「Escape to cancel:」だけ。
+    下は空行か「Enter to confirm · Esc to cancel」のキー案内、折り返された
+    プロンプト末尾（「Then Enter to submit or Escape to cancel:」等）だけ。
     """
     for line in lines[prompt_index + 1:]:
         text = line.strip()
         if text and not any(
             marker in text
-            for marker in ("Enter to confirm", "Esc to cancel", "Escape to cancel")
+            for marker in (
+                "Enter to confirm", "Esc to cancel", "Escape to cancel",
+                "Enter to submit", "Space to toggle", "bare Enter for defaults",
+                "up / down arrow keys",
+            )
         ):
             return False
     return True
@@ -1063,29 +1083,30 @@ def parse_question_screen(screen):
         1. ラベル — 説明（折り返しあり）
         ...
         N. Chat about this
-        Enter selection [1-N], or Escape to cancel:
+        Select with numbers [1-N]. Then Enter to submit or Escape to cancel:
 
     複数選択（multiSelect）の質問はプロンプトだけが違い、カンマ/スペース
     区切りで複数の番号を送って Enter で確定する:
 
-        Enter selections (comma- or space-separated) [1-N] then Enter to Submit,
-        or Escape to cancel:
+        Select with numbers [1-N] (comma- or space-separated for several).
+        Then Space to toggle, Enter to submit or Escape to cancel:
+
+    2.1.257 より前は「Enter selection(s) … [1-N]」だった。resume した古い
+    バージョンが残っている環境のため、旧文言も引き続き受け付ける。
     """
     lines = screen.splitlines()
     # 引用されたダイアログ風テキストが画面上部に残ることがあるため、
     # 下から探して最下部にあるものだけを本物として扱う。
     prompt_index = next(
         (i for i in range(len(lines) - 1, -1, -1)
-         if re.search(SELECTION_PROMPT, lines[i])),
+         if match_selection_prompt(lines[i])),
         None,
     )
     if prompt_index is None:
         return parse_confirm_screen(lines)
     if not dialog_is_foreground(lines, prompt_index):
         return parse_confirm_screen(lines)
-    match = re.search(SELECTION_PROMPT, lines[prompt_index])
-    multi = bool(match.group(1))
-    count = int(match.group(2))
+    multi, count = match_selection_prompt(lines[prompt_index])
     # 下から上へ、N. → 1. の順に選択肢を拾う。番号行に挟まれた行は折り返し。
     choices, wrapped = [], []
     expected = count
@@ -6641,7 +6662,8 @@ class Handler(BaseHTTPRequestHandler):
                     if not re.fullmatch(r"[1-9yn]|[1-9](,[1-9])*", number):
                         return self._json({"error": "選択番号が不正です"}, 400)
                     # メニュー版の TUI は数字/文字キーで即確定する。プレーン版
-                    # （Enter selection [1-N] / Enter y/n:）は Enter が要るので、
+                    # （Select with numbers [1-N] / Enter y/n:）は Enter が
+                    # 要るので、
                     # プロンプトが残っていたら追送する。
                     result = tmux_run("send-keys", "-t", session, number)
                     if result.returncode != 0:
@@ -6649,7 +6671,9 @@ class Handler(BaseHTTPRequestHandler):
                     time.sleep(0.5)
                     screen = capture_session(session)
                     if (
-                        "Enter selection [" in screen or "Enter selections" in screen
+                        "Select with numbers [" in screen
+                        or "Enter selection [" in screen
+                        or "Enter selections" in screen
                         or "Enter y/n" in screen
                         or "enter to submit" in screen.lower()
                     ):
