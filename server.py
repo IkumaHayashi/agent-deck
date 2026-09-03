@@ -1603,7 +1603,7 @@ def claude_context_window(model):
     """
     if "[1m]" in model:
         return 1_000_000
-    if re.search(r"claude-(fable|mythos|opus|sonnet)-\d+$", model):
+    if re.search(r"claude-(fable|mythos|opus|sonnet)-\d+(?:-\d+)*$", model):
         return 1_000_000
     match = re.search(r"claude-(?:opus|sonnet)-(\d+)-(\d+)", model)
     if match and (int(match.group(1)), int(match.group(2))) >= (4, 6):

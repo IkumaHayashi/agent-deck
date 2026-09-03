@@ -19,6 +19,30 @@ server.DATA_DIR = TEST_RUNTIME_DIR.name
 server.SESSION_REGISTRY_PATH = os.path.join(TEST_RUNTIME_DIR.name, "sessions.json")
 
 
+class SessionContextTest(unittest.TestCase):
+    def test_fable_minor_version_uses_one_million_token_window(self):
+        self.assertEqual(1_000_000, server.claude_context_window("claude-fable-5-1"))
+
+    def test_fable_context_percentage_uses_one_million_token_window(self):
+        record = {
+            "type": "assistant",
+            "message": {
+                "model": "claude-fable-5-1",
+                "usage": {
+                    "input_tokens": 86,
+                    "cache_creation_input_tokens": 603,
+                    "cache_read_input_tokens": 192_543,
+                    "output_tokens": 775,
+                },
+            },
+        }
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as log:
+            log.write(json.dumps(record) + "\n")
+            log.flush()
+
+            self.assertEqual(19, server.session_context(log.name, "claude"))
+
+
 class FrontendTemplateTest(unittest.TestCase):
     def test_new_page_uses_external_frontend_assets(self):
         page = server.render()
