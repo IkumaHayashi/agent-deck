@@ -1,5 +1,6 @@
 import importlib.util
 import base64
+import io
 import json
 import os
 import tempfile
@@ -39,6 +40,12 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('id="file-picker" multiple hidden', server.TERMINAL_PAGE)
         self.assertIn('id="attach"', server.TERMINAL_PAGE)
         self.assertIn("filePicker.click()", server.TERMINAL_PAGE)
+
+    def test_terminal_page_offers_custom_question_input(self):
+        self.assertIn('if (question.custom)', server.TERMINAL_PAGE)
+        self.assertIn('question.custom_prompt', server.TERMINAL_PAGE)
+        self.assertIn('custom.placeholder = "自由入力"', server.TERMINAL_PAGE)
+        self.assertIn('submit.textContent = "入力して送信"', server.TERMINAL_PAGE)
 
     def test_resume_conversation_can_be_filtered_by_id(self):
         conversation = {
@@ -1677,6 +1684,53 @@ to toggle, Enter to submit or Escape to cancel:
             ["絵文字が多すぎる", "2段階タップが面倒", "Other"],
             [choice["label"] for choice in result["choices"]],
         )
+
+    def test_parses_other_custom_answer_prompt(self):
+        screen = """\
+←   ☐ 自動化範囲   ☐ 起票先   ✔ Submit   →
+月次のタスクを、どの粒度で自動化しますか？
+1. issue自動起票のみ — 毎月1日に起票
+2. 費用サマリー付きで起票 — 前月比も記載
+3. Other
+4. Chat about this
+Enter text for option 3 (Other), or Escape for the list:
+"""
+
+        self.assertEqual({
+            "question": "月次のタスクを、どの粒度で自動化しますか？",
+            "choices": [],
+            "multi": False,
+            "custom": True,
+            "custom_prompt": "Other の内容を入力してください",
+        }, server.parse_question_screen(screen))
+
+    def test_quoted_other_custom_answer_prompt_is_not_a_question(self):
+        screen = """\
+Enter text for option 3 (Other), or Escape for the list:
+この表示が出ていました。
+"""
+
+        self.assertIsNone(server.parse_question_screen(screen))
+
+    def test_posts_other_custom_answer_as_question_text(self):
+        body = "text=cron%E3%81%A7%E5%AE%9F%E8%A1%8C".encode()
+        handler = object.__new__(server.Handler)
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Content-Length": str(len(body))}
+        handler.rfile = io.BytesIO(body)
+        handler.path = "/api/sessions/agent-test/answer"
+        screen = "Enter text for option 3 (Other), or Escape for the list:\n"
+
+        with (
+            mock.patch.object(server, "valid_session", return_value=True),
+            mock.patch.object(server, "capture_session", return_value=screen),
+            mock.patch.object(server, "send_session_text") as send,
+            mock.patch.object(handler, "_json") as response,
+        ):
+            handler.do_POST()
+
+        send.assert_called_once_with("agent-test", "cronで実行")
+        response.assert_called_once_with({"ok": True})
 
     def test_new_prompt_with_arrow_key_hint_is_parsed(self):
         screen = self.NEW_DIALOG.replace(

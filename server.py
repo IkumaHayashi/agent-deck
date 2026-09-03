@@ -1073,6 +1073,56 @@ def parse_confirm_screen(lines):
     return {"question": question, "choices": choices, "multi": False}
 
 
+def parse_custom_answer_screen(lines):
+    """Other 選択後の自由入力待ち画面を拾う。"""
+    prompt_index = next(
+        (
+            i for i in range(len(lines) - 1, -1, -1)
+            if re.search(
+                r"Enter text for option \d+ \((.+)\), or Escape for the list:",
+                lines[i],
+            )
+        ),
+        None,
+    )
+    if prompt_index is None or not dialog_is_foreground(lines, prompt_index):
+        return None
+    match = re.search(
+        r"Enter text for option \d+ \((.+)\), or Escape for the list:",
+        lines[prompt_index],
+    )
+    label = match.group(1).strip()
+    # 自由入力画面にも直前の選択肢は残る。1番の選択肢より上にある質問文を
+    # 一緒に返し、「何についての Other か」がチャット画面でも分かるようにする。
+    first_choice = next(
+        (
+            i for i in range(prompt_index - 1, -1, -1)
+            if re.match(r"^1\.\s+", lines[i].strip())
+        ),
+        None,
+    )
+    question_lines = []
+    if first_choice is not None:
+        row = first_choice - 1
+        while row >= 0 and not lines[row].strip():
+            row -= 1
+        while row >= 0 and lines[row].strip() and len(question_lines) < 4:
+            line = lines[row].strip()
+            if is_tab_bar(line):
+                break
+            question_lines.insert(0, line)
+            row -= 1
+    question = " ".join(question_lines)
+    custom_prompt = f"{label} の内容を入力してください"
+    return {
+        "question": question or custom_prompt,
+        "choices": [],
+        "multi": False,
+        "custom": True,
+        "custom_prompt": custom_prompt,
+    }
+
+
 def parse_question_screen(screen):
     """選択プロンプト画面から {question, choices} を組み立てる。失敗時は None。
 
@@ -1095,6 +1145,9 @@ def parse_question_screen(screen):
     バージョンが残っている環境のため、旧文言も引き続き受け付ける。
     """
     lines = screen.splitlines()
+    custom = parse_custom_answer_screen(lines)
+    if custom is not None:
+        return custom
     # 引用されたダイアログ風テキストが画面上部に残ることがあるため、
     # 下から探して最下部にあるものだけを本物として扱う。
     prompt_index = next(
@@ -4310,6 +4363,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     border: 0; border-radius: 9px; background: #d29922; color: #1c2128;
     font-weight: 700; cursor: pointer; }}
   .question-submit[disabled] {{ opacity: .45; cursor: default; }}
+  .question-custom {{ width: 100%; min-height: 88px; margin-top: 4px; resize: vertical; }}
   .message.activity::before {{ content: "✻"; animation: activity-pulse 1.3s ease-in-out infinite; }}
   .bubble p {{ margin: 0 0 12px; white-space: pre-wrap; }}
   .bubble p:last-child {{ margin-bottom: 0; }}
@@ -5612,37 +5666,66 @@ TERMINAL_PAGE = r"""<!doctype html>
       const panel = document.createElement("div"); panel.className = "message question";
       const title = document.createElement("p"); title.className = "question-title";
       title.textContent = question.question; panel.append(title);
-      // 複数選択の質問はタップで選び、まとめて送信する
-      const picked = new Set();
-      const submit = document.createElement("button");
-      for (const choice of question.choices) {{
-        const button = document.createElement("button"); button.type = "button";
-        button.className = "choice";
-        const label = document.createElement("strong");
-        label.textContent = choice.number + ". " + choice.label; button.append(label);
-        if (choice.description) {{
-          const detail = document.createElement("small");
-          detail.textContent = choice.description; button.append(detail);
+      if (question.custom) {{
+        if (question.custom_prompt && question.custom_prompt !== question.question) {{
+          const guide = document.createElement("p");
+          guide.className = "question-custom-guide";
+          guide.textContent = question.custom_prompt; panel.append(guide);
+        }}
+        const custom = document.createElement("textarea");
+        custom.className = "question-custom"; custom.placeholder = "自由入力";
+        const submit = document.createElement("button");
+        submit.type = "button"; submit.className = "question-submit";
+        submit.textContent = "入力して送信"; submit.disabled = true;
+        custom.addEventListener("input", () => {{
+          submit.disabled = !custom.value.trim();
+        }});
+        submit.addEventListener("click", async () => {{
+          const text = custom.value.trim();
+          if (!text) return;
+          submit.disabled = true;
+          try {{
+            await post("/api/sessions/" + encodeURIComponent(session) + "/answer", {{text}});
+            loadChat();
+          }} catch (error) {{
+            submit.disabled = false; status.textContent = error.message;
+          }}
+        }});
+        panel.append(custom, submit);
+        requestAnimationFrame(() => custom.focus());
+      }} else {{
+        // 複数選択の質問はタップで選び、まとめて送信する
+        const picked = new Set();
+        const submit = document.createElement("button");
+        for (const choice of question.choices) {{
+          const button = document.createElement("button"); button.type = "button";
+          button.className = "choice";
+          const label = document.createElement("strong");
+          label.textContent = choice.number + ". " + choice.label; button.append(label);
+          if (choice.description) {{
+            const detail = document.createElement("small");
+            detail.textContent = choice.description; button.append(detail);
+          }}
+          if (question.multi) {{
+            button.setAttribute("aria-pressed", "false");
+            button.addEventListener("click", () => {{
+              const on = !picked.has(choice);
+              if (on) picked.add(choice); else picked.delete(choice);
+              button.setAttribute("aria-pressed", on ? "true" : "false");
+              submit.disabled = picked.size === 0;
+            }});
+          }} else {{
+            button.addEventListener("click", () => answerQuestion([choice]));
+          }}
+          panel.append(button);
         }}
         if (question.multi) {{
-          button.setAttribute("aria-pressed", "false");
-          button.addEventListener("click", () => {{
-            const on = !picked.has(choice);
-            if (on) picked.add(choice); else picked.delete(choice);
-            button.setAttribute("aria-pressed", on ? "true" : "false");
-            submit.disabled = picked.size === 0;
-          }});
-        }} else {{
-          button.addEventListener("click", () => answerQuestion([choice]));
+          submit.type = "button"; submit.className = "question-submit";
+          submit.textContent = "選択して送信"; submit.disabled = true;
+          submit.addEventListener("click", () => answerQuestion(
+            question.choices.filter(choice => picked.has(choice))));
+          panel.append(submit);
         }}
-        panel.append(button);
-      }}
-      if (question.multi) {{
-        submit.type = "button"; submit.className = "question-submit";
-        submit.textContent = "選択して送信"; submit.disabled = true;
-        submit.addEventListener("click", () => answerQuestion(
-          question.choices.filter(choice => picked.has(choice))));
-        panel.append(submit);
       }}
       chat.append(panel);
     }}
@@ -6657,6 +6740,18 @@ class Handler(BaseHTTPRequestHandler):
                         "session": new_session,
                     })
                 elif action == "answer":
+                    text = qs.get("text", [""])[0].strip()
+                    if text:
+                        if len(text) > 20000:
+                            return self._json(
+                                {"error": "入力が長すぎます（20000文字まで）"}, 400
+                            )
+                        if parse_custom_answer_screen(capture_session(session).splitlines()) is None:
+                            return self._json(
+                                {"error": "自由入力待ちではありません"}, 409
+                            )
+                        send_session_text(session, text)
+                        return self._json({"ok": True})
                     # 複数選択の質問は "1,3" のようにカンマ区切りで届く。
                     number = qs.get("number", [""])[0]
                     if not re.fullmatch(r"[1-9yn]|[1-9](,[1-9])*", number):
