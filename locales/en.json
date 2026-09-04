@@ -244,6 +244,8 @@
   "再開する会話の指定が不正です": "Invalid conversation to resume",
   "再開する会話が見つかりません": "The conversation to resume was not found",
   "会話の作業ディレクトリを使用できません: ": "The conversation's working directory cannot be used: ",
+  "会話の作業ディレクトリを使用できません: ディレクトリが存在しません: ": "The conversation's working directory cannot be used because the directory does not exist: ",
+  "会話の作業ディレクトリを使用できません: ホームディレクトリ配下のみ指定できます": "The conversation's working directory cannot be used because it is outside the home directory",
   "プロンプトが長すぎます（8000文字まで）": "The prompt is too long (maximum 8,000 characters)",
   "タイムアウトしました": "The operation timed out",
   "起動したセッション名を取得できませんでした": "Could not determine the started session name",

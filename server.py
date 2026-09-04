@@ -127,9 +127,37 @@ def translate(text, language):
     return TRANSLATIONS.get(language, {}).get(text, text)
 
 
+ERROR_TRANSLATION_TEMPLATES = (
+    (
+        "会話の作業ディレクトリを使用できません: ディレクトリが存在しません: ",
+        "",
+    ),
+    ("比較対象ブランチ ", " がローカルに見つかりません"),
+    ("ディレクトリが存在しません: ", ""),
+    ("会話の作業ディレクトリを使用できません: ", ""),
+    ("セッションは終了しましたが、ワークツリーを削除できませんでした: ", ""),
+    ("ファイルを保存できませんでした: ", ""),
+    ("画像を保存できませんでした: ", ""),
+    ("Chatwork API エラー", ""),
+    ("失敗: ", ""),
+    ("", " の起動に失敗しました"),
+)
+
+
 def translate_error(text, language):
-    """例外の詳細を残しつつ、既知のエラー文言を翻訳する。"""
-    return localize_source(text, language)
+    """既知の固定部分だけを翻訳し、識別子や外部出力は保持する。"""
+    translated = translate(text, language)
+    if translated != text:
+        return translated
+    for prefix, suffix in ERROR_TRANSLATION_TEMPLATES:
+        if not text.startswith(prefix) or not text.endswith(suffix):
+            continue
+        detail_end = len(text) - len(suffix) if suffix else len(text)
+        detail = text[len(prefix) : detail_end]
+        if not detail:
+            continue
+        return f"{translate(prefix, language)}{detail}{translate(suffix, language)}"
+    return text
 
 
 def localize_source(source, language):
@@ -7733,35 +7761,33 @@ class Handler(BaseHTTPRequestHandler):
     ):
         language = self._language()
 
-        def launch_page(message):
-            return self._page(
-                render(localize_source(message, language), "new", language)
+        def launch_page(error):
+            message = (
+                f'<div class="msg err">❌ '
+                f"{html.escape(translate_error(error, language))}</div>"
             )
+            return self._page(render(message, "new", language))
 
         path, err = validate_dir(raw_dir)
         if err:
-            return launch_page(f'<div class="msg err">❌ {html.escape(err)}</div>')
+            return launch_page(err)
         if tool not in TOOLS:
-            return launch_page('<div class="msg err">❌ 不正なツール指定です</div>')
+            return launch_page("不正なツール指定です")
         if model not in {v for v, _ in MODELS_BY_TOOL[tool]}:
-            return launch_page('<div class="msg err">❌ 不正なモデル指定です</div>')
+            return launch_page("不正なモデル指定です")
         if bypass not in {"0", "1"}:
-            return launch_page('<div class="msg err">❌ 不正な権限指定です</div>')
+            return launch_page("不正な権限指定です")
         resume_log = ""
         if resume:
             if not re.fullmatch(r"[0-9a-f-]{36}", resume):
-                return launch_page(
-                    '<div class="msg err">❌ 再開する会話の指定が不正です</div>'
-                )
+                return launch_page("再開する会話の指定が不正です")
             resume_log = conversation_log_path(tool, path, resume)
             if not resume_log:
                 # 会話途中で cwd を移動すると、一覧が送った cwd と
                 # JSONLの保存先が食い違うことがある。IDで横断検索する。
                 resume_log = find_log_by_id(tool, resume)
             if not resume_log:
-                return launch_page(
-                    '<div class="msg err">❌ 再開する会話が見つかりません</div>'
-                )
+                return launch_page("再開する会話が見つかりません")
             if tool == "claude":
                 # ログが保持する最新 cwd で再開する。削除済みworktree
                 # など、使えない場所には暗黙に起動しない。
@@ -7770,14 +7796,13 @@ class Handler(BaseHTTPRequestHandler):
                     path, err = validate_dir(resume_cwd)
                     if err:
                         return launch_page(
-                            f'<div class="msg err">❌ 会話の作業ディレクトリを使用できません: '
-                            f"{html.escape(err)}</div>"
+                            f"会話の作業ディレクトリを使用できません: {err}"
                         )
         skip_permissions = bypass == "1"
         try:
             pull_request = normalize_pr_selector(pull_request)
         except ValueError as exc:
-            return launch_page(f'<div class="msg err">❌ {html.escape(str(exc))}</div>')
+            return launch_page(str(exc))
         if pull_request:
             # レビュー起動では対象PRを別途書き出すため、通常起動用の入力欄は引き継がない。
             prompt = ""
@@ -7786,14 +7811,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 path = pull_request_worktree(pull_request_target(pull_request))
             except (LookupError, RuntimeError, ValueError) as exc:
-                return launch_page(
-                    f'<div class="msg err">❌ {html.escape(str(exc))}</div>'
-                )
+                return launch_page(str(exc))
         prompt = prompt.strip()
         if len(prompt) > 8000:
-            return launch_page(
-                '<div class="msg err">❌ プロンプトが長すぎます（8000文字まで）</div>'
-            )
+            return launch_page("プロンプトが長すぎます（8000文字まで）")
         cmd = [*TOOLS[tool], path]
         if resume:
             cmd += ["--resume", resume] if tool == "claude" else ["resume", resume]
@@ -7813,7 +7834,7 @@ class Handler(BaseHTTPRequestHandler):
                 env={**os.environ},
             )
         except subprocess.TimeoutExpired:
-            return launch_page('<div class="msg err">❌ タイムアウトしました</div>')
+            return launch_page("タイムアウトしました")
         if r.returncode == 0:
             session_name = launcher_session_name(r.stdout)
             if resume:
@@ -7859,11 +7880,10 @@ class Handler(BaseHTTPRequestHandler):
                     + urllib.parse.quote(session_name)
                     + ("&review=1" if pull_request else "")
                 )
-            detail = "起動したセッション名を取得できませんでした"
+            detail = translate("起動したセッション名を取得できませんでした", language)
         else:
             detail = (r.stderr or r.stdout or "").strip()
-        msg = f'<div class="msg err">❌ 失敗: {html.escape(detail)}</div>'
-        launch_page(msg)
+        return launch_page(f"失敗: {detail}")
 
     def log_message(self, fmt, *args):
         pass  # launchd のログを汚さない

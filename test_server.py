@@ -130,7 +130,7 @@ class FrontendTemplateTest(unittest.TestCase):
 
         handler._json(
             {
-                "error": "比較対象ブランチ feature/example がローカルに見つかりません",
+                "error": "比較対象ブランチ feature/変更 がローカルに見つかりません",
                 "summary": "完了という名前の作業",
             },
             400,
@@ -138,10 +138,27 @@ class FrontendTemplateTest(unittest.TestCase):
 
         payload = json.loads(handler.wfile.getvalue())
         self.assertEqual(
-            "Comparison branch feature/example was not found locally",
+            "Comparison branch feature/変更 was not found locally",
             payload["error"],
         )
         self.assertEqual("完了という名前の作業", payload["summary"])
+
+    def test_error_translation_preserves_paths_and_external_output(self):
+        errors = {
+            "ディレクトリが存在しません: /Users/demo/完了": "Directory does not exist: /Users/demo/完了",
+            "会話の作業ディレクトリを使用できません: "
+            "ディレクトリが存在しません: /Users/demo/完了": (
+                "The conversation's working directory cannot be used because "
+                "the directory does not exist: /Users/demo/完了"
+            ),
+            "fatal: pathspec '削除' did not match any files": "fatal: pathspec '削除' did not match any files",
+            "失敗: fatal: branch '変更' was not found": "Failed: fatal: branch '変更' was not found",
+            "削除 の起動に失敗しました": "削除 failed to start",
+        }
+
+        for source, expected in errors.items():
+            with self.subTest(source=source):
+                self.assertEqual(expected, server.translate_error(source, "en"))
 
     def test_major_server_errors_have_english_translations(self):
         errors = {
