@@ -3794,7 +3794,8 @@ def sidebar_heading_html(language="ja", settings_active=False):
         'alt="">Agent Deck</a>'
         f'<a class="settings-link{active}" href="/settings" '
         f'aria-label="{translate("設定", language)}" '
-        f'title="{translate("設定", language)}">⚙</a></h2>'
+        f'title="{translate("設定", language)}">⚙ '
+        f"{translate('設定', language)}</a></h2>"
     )
 
 
@@ -4333,11 +4334,12 @@ SIDEBAR_CSS = r"""
   aside h2 > a { margin: 0; padding: 0; border: 0; border-radius: 7px; }
   aside h2 .sidebar-brand { min-width: 0; display: flex; align-items: center; gap: 8px;
     color: inherit; }
-  aside h2 .settings-link { flex: 0 0 34px; width: 34px; height: 34px;
-    margin-left: auto; display: grid; place-items: center; color: #8b949e;
-    font-size: 1rem; text-decoration: none; }
+  aside h2 .settings-link { flex: 0 0 auto; min-width: 68px; height: 34px;
+    margin-left: auto; padding: 0 9px; display: flex; align-items: center;
+    justify-content: center; border: 1px solid #30363d; background: #21262d;
+    color: #cdd9e5; font-size: .8rem; text-decoration: none; }
   aside h2 .settings-link:hover, aside h2 .settings-link.active {
-    color: #e6edf3; background: #30363d; }
+    color: #e6edf3; border-color: #6c5ce7; background: #6c5ce72e; }
   aside a { display: block; margin: 7px 0; padding: 10px; color: inherit; text-decoration: none;
     border: 1px solid #30363d; border-radius: 8px; overflow-wrap: anywhere; }
   aside a.active { border-color: #58a6ff; background: #1f6feb22; }

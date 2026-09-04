@@ -279,6 +279,7 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("Settings - Agent Deck", page)
         self.assertIn("/static/settings.css?v=", page)
         self.assertIn('class="settings-link active"', page)
+        self.assertIn(">⚙ Settings</a>", page)
         self.assertIn(
             'value="usage --json" placeholder="Not configured" readonly', page
         )
