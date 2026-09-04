@@ -1,6 +1,7 @@
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 20px; font-size: 18px; }
-  h1 { font-size: 1.65rem; }
+  h1 { display: flex; align-items: center; gap: 10px; font-size: 1.65rem; }
+  h1 .app-logo { width: 40px; height: 40px; border-radius: 9px; }
   h2 { font-size: 1.15rem; margin: 18px 0 10px; color: #aaa; }
   form.launch { margin: 0; }
   button.proj { display: block; width: 100%; padding: 14px; margin: 8px 0; font-size: 1rem;

@@ -8,6 +8,8 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from PIL import Image
+
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "server.py")
 SPEC = importlib.util.spec_from_file_location("launcher_server", MODULE_PATH)
@@ -49,9 +51,56 @@ class FrontendTemplateTest(unittest.TestCase):
 
         self.assertIn("/static/new.css?v=", page)
         self.assertIn("/static/new.js?v=", page)
+        self.assertIn("/apple-touch-icon.png?v=", page)
+        self.assertIn("/site.webmanifest?v=", page)
         self.assertIn('data-panel="reviews-panel"', page)
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
+
+    def test_all_pages_use_the_app_icon_assets(self):
+        for page in (server.LIST_PAGE, server.TERMINAL_PAGE):
+            self.assertIn("/favicon.svg?v={favicon_version}", page)
+            self.assertIn("/favicon.ico?v={favicon_version}", page)
+            self.assertIn("/apple-touch-icon.png?v={favicon_version}", page)
+            self.assertIn("/site.webmanifest?v={favicon_version}", page)
+            self.assertIn('name="theme-color" content="#171523"', page)
+            self.assertIn('class="app-logo"', page)
+
+        self.assertIn('class="app-logo"', server.render())
+
+    def test_static_file_supports_app_icon_formats(self):
+        handler = object.__new__(server.Handler)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.wfile = io.BytesIO()
+
+        for filename, content_type in (
+            ("favicon.svg", "image/svg+xml"),
+            ("favicon.ico", "image/x-icon"),
+            ("apple-touch-icon.png", "image/png"),
+            ("site.webmanifest", "application/manifest+json; charset=utf-8"),
+        ):
+            handler.wfile.seek(0)
+            handler.wfile.truncate()
+            handler.send_header.reset_mock()
+            handler._static_file(filename)
+            handler.send_header.assert_any_call("Content-Type", content_type)
+            self.assertGreater(len(handler.wfile.getvalue()), 0)
+
+    def test_raster_app_icons_can_be_decoded(self):
+        static_dir = os.path.join(os.path.dirname(__file__), "static")
+        expected = {
+            "favicon.ico": (48, 48),
+            "apple-touch-icon.png": (180, 180),
+            "icon-192.png": (192, 192),
+            "icon-512.png": (512, 512),
+        }
+
+        for filename, size in expected.items():
+            with Image.open(os.path.join(static_dir, filename)) as image:
+                image.load()
+                self.assertEqual(size, image.size)
 
     def test_new_page_offers_image_picker_for_touch_devices(self):
         page = server.render()
