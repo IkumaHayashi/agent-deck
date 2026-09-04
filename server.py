@@ -8,6 +8,7 @@
 設定は ~/.config/agent-deck/config.json から読む（AGENT_DECK_CONFIG で変更可）。
 設定ファイルが無くてもすべて既定値で動く。
 """
+
 import base64
 import binascii
 import datetime
@@ -34,7 +35,9 @@ HOME = os.path.expanduser("~")
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "templates")
 STATIC_DIR = os.path.join(SCRIPT_DIR, "static")
-CONFIG_PATH = os.environ.get("AGENT_DECK_CONFIG") or f"{HOME}/.config/agent-deck/config.json"
+CONFIG_PATH = (
+    os.environ.get("AGENT_DECK_CONFIG") or f"{HOME}/.config/agent-deck/config.json"
+)
 
 
 def read_version():
@@ -82,7 +85,12 @@ def find_bin(name, configured=None):
     found = shutil.which(name)
     if found:
         return found
-    for prefix in (f"{HOME}/.local/bin", "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"):
+    for prefix in (
+        f"{HOME}/.local/bin",
+        "/opt/homebrew/bin",
+        "/usr/local/bin",
+        "/usr/bin",
+    ):
         candidate = os.path.join(prefix, name)
         if os.path.exists(candidate):
             return candidate
@@ -98,8 +106,11 @@ def version_tuple(value):
 def latest_release(force=False):
     """GitHub Releases の最新版を1時間キャッシュして返す。取得失敗は非表示扱い。"""
     with UPDATE_LOCK:
-        if not force and UPDATE_CACHE["data"] is not None \
-                and UPDATE_CACHE["at"] + UPDATE_TTL > time.time():
+        if (
+            not force
+            and UPDATE_CACHE["data"] is not None
+            and UPDATE_CACHE["at"] + UPDATE_TTL > time.time()
+        ):
             return UPDATE_CACHE["data"]
     request = urllib.request.Request(
         f"https://api.github.com/repos/{UPDATE_REPO}/releases/latest",
@@ -130,23 +141,34 @@ def install_release(tag):
         raise ValueError("更新先のバージョンが不正です")
     git = find_bin("git")
     status = subprocess.run(
-        [git, "status", "--porcelain"], cwd=SCRIPT_DIR,
-        capture_output=True, text=True, timeout=10,
+        [git, "status", "--porcelain"],
+        cwd=SCRIPT_DIR,
+        capture_output=True,
+        text=True,
+        timeout=10,
     )
     if status.returncode != 0:
         raise RuntimeError(status.stderr.strip() or "Gitの状態を確認できませんでした")
     if status.stdout.strip():
-        raise RuntimeError("ローカル変更があるため更新できません。変更をcommitまたは退避してください")
+        raise RuntimeError(
+            "ローカル変更があるため更新できません。変更をcommitまたは退避してください"
+        )
     release_tag = f"v{tag.removeprefix('v')}"
     fetched = subprocess.run(
-        [git, "fetch", "--tags", "origin", release_tag], cwd=SCRIPT_DIR,
-        capture_output=True, text=True, timeout=60,
+        [git, "fetch", "--tags", "origin", release_tag],
+        cwd=SCRIPT_DIR,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     if fetched.returncode != 0:
         raise RuntimeError(fetched.stderr.strip() or "Releaseを取得できませんでした")
     merged = subprocess.run(
-        [git, "merge", "--ff-only", f"refs/tags/{release_tag}"], cwd=SCRIPT_DIR,
-        capture_output=True, text=True, timeout=30,
+        [git, "merge", "--ff-only", f"refs/tags/{release_tag}"],
+        cwd=SCRIPT_DIR,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if merged.returncode != 0:
         raise RuntimeError(merged.stderr.strip() or "Releaseへ更新できませんでした")
@@ -185,7 +207,9 @@ UPLOAD_DIR = f"{DATA_DIR}/uploads"
 # PRレビュー用に切り出す git worktree の置き場所
 WORKTREES_DIR = f"{DATA_DIR}/worktrees"
 # 過去ログに残る旧保存先の添付も表示できるよう、パス検出の対象に含める
-UPLOAD_PATH_PREFIXES = [DATA_DIR] + [_expand(p) for p in CONFIG.get("legacy_upload_dirs", [])]
+UPLOAD_PATH_PREFIXES = [DATA_DIR] + [
+    _expand(p) for p in CONFIG.get("legacy_upload_dirs", [])
+]
 # 会話ログ中の「添付画像: <パス>」等を検出する正規表現（Python 側）
 UPLOAD_MENTION_RE = re.compile(
     r"(?:添付画像[:：]|\[Image:(?:\s*source:)?)\s*"
@@ -290,7 +314,7 @@ FAVICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
     '<defs><linearGradient id="g" x1="12" y1="8" x2="88" y2="92" gradientUnits="userSpaceOnUse">'
     '<stop stop-color="#8B7CF6"/><stop offset="1" stop-color="#5546D7"/>'
-    '</linearGradient></defs>'
+    "</linearGradient></defs>"
     '<rect width="100" height="100" rx="23" fill="#171523"/>'
     '<rect x="19" y="16" width="58" height="68" rx="10" fill="#343047" '
     'transform="rotate(-8 48 50)"/>'
@@ -324,12 +348,15 @@ TOOL_ICONS = load_tool_icons()
 # 認証は無いので、信頼できる端末しかいない網以外へ広げないこと。
 ALLOWED_NETS = [
     ipaddress.ip_network(net)
-    for net in CONFIG.get("allowed_networks", [
-        "100.64.0.0/10",        # Tailscale CGNAT
-        "fd7a:115c:a1e0::/48",  # Tailscale IPv6
-        "127.0.0.0/8",
-        "::1/128",
-    ])
+    for net in CONFIG.get(
+        "allowed_networks",
+        [
+            "100.64.0.0/10",  # Tailscale CGNAT
+            "fd7a:115c:a1e0::/48",  # Tailscale IPv6
+            "127.0.0.0/8",
+            "::1/128",
+        ],
+    )
 ]
 
 
@@ -349,7 +376,11 @@ def list_other_projects():
             continue
         for name in sorted(os.listdir(base)):
             path = os.path.join(base, name)
-            if os.path.isdir(path) and not name.startswith(".") and path not in pinned_paths:
+            if (
+                os.path.isdir(path)
+                and not name.startswith(".")
+                and path not in pinned_paths
+            ):
                 items.append((name, path))
     for name, path in EXTRA_PROJECTS:
         if os.path.isdir(path) and path not in pinned_paths:
@@ -368,8 +399,15 @@ def launch_shell_command(cwd, command):
         raise ValueError(error)
     session = f"agent-shell-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
     result = tmux_run(
-        "new-session", "-d", "-s", session, "-c", cwd, "--",
-        "/bin/zsh", "-lic",
+        "new-session",
+        "-d",
+        "-s",
+        session,
+        "-c",
+        cwd,
+        "--",
+        "/bin/zsh",
+        "-lic",
         f"{{\n{command}\n}}\nprintf '\\n[コマンドが終了しました]\\n'\nexec /bin/zsh -l",
     )
     if result.returncode != 0:
@@ -394,9 +432,23 @@ def argv_model(argv):
 # TUI として動かない codex のサブコマンド。初期プロンプトの位置引数
 # （codex "..."）はサブコマンドではなく TUI 起動なので、既知の名前だけ除外する。
 CODEX_NON_TUI_SUBCOMMANDS = {
-    "exec", "e", "review", "apply", "a", "cloud", "login", "logout",
-    "mcp", "mcp-server", "app-server", "completion", "debug", "sandbox",
-    "proto", "features", "help",
+    "exec",
+    "e",
+    "review",
+    "apply",
+    "a",
+    "cloud",
+    "login",
+    "logout",
+    "mcp",
+    "mcp-server",
+    "app-server",
+    "completion",
+    "debug",
+    "sandbox",
+    "proto",
+    "features",
+    "help",
 }
 
 
@@ -408,7 +460,9 @@ def pane_agent(pane):
     try:
         result = subprocess.run(
             ["/bin/ps", "-t", tty, "-o", "pid=,ppid=,command="],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -425,10 +479,18 @@ def pane_agent(pane):
         executable = os.path.basename(argv[0])
         if executable not in {"claude", "codex"}:
             continue
-        if executable == "codex" and len(argv) > 1 and argv[1] in CODEX_NON_TUI_SUBCOMMANDS:
+        if (
+            executable == "codex"
+            and len(argv) > 1
+            and argv[1] in CODEX_NON_TUI_SUBCOMMANDS
+        ):
             continue
         explicit_id = next(
-            (arg for arg in argv[1:] if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27,}", arg)),
+            (
+                arg
+                for arg in argv[1:]
+                if re.fullmatch(r"[0-9a-f]{8}-[0-9a-f-]{27,}", arg)
+            ),
             "",
         )
         open_ids = None
@@ -443,12 +505,17 @@ def pane_agent(pane):
                     for session_id in open_ids:
                         path = find_log_by_id("codex", session_id)
                         head = codex_session_head(path) if path else {}
-                        if head.get("thread_source") != "subagent" and not head.get("subagent"):
+                        if head.get("thread_source") != "subagent" and not head.get(
+                            "subagent"
+                        ):
                             explicit_id = session_id
                             break
         return {
-            "tool": executable, "pid": int(parts[0]), "command": parts[2],
-            "explicit_id": explicit_id, "model": argv_model(argv),
+            "tool": executable,
+            "pid": int(parts[0]),
+            "command": parts[2],
+            "explicit_id": explicit_id,
+            "model": argv_model(argv),
             "open_ids": open_ids,
         }
     return None
@@ -458,7 +525,10 @@ def codex_open_thread_ids(pid):
     """codexプロセスが現在開いているrolloutログの会話ID一覧を返す。"""
     try:
         opened = subprocess.run(
-            ["/usr/sbin/lsof", "-p", str(pid)], capture_output=True, text=True, timeout=5
+            ["/usr/sbin/lsof", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
@@ -480,8 +550,11 @@ def codex_live_session_id(open_ids):
         if not path:
             continue
         head = codex_session_head(path)
-        if not head.get("id") or head.get("subagent") \
-                or head.get("thread_source") == "subagent":
+        if (
+            not head.get("id")
+            or head.get("subagent")
+            or head.get("thread_source") == "subagent"
+        ):
             continue
         try:
             mtime = os.path.getmtime(path)
@@ -523,8 +596,10 @@ def user_message_raw(item, tool):
             return ""
         # 画像を添えて送ると [画像, テキスト] の配列になる。文面だけ拾う。
         return "\n".join(
-            part.get("text", "").strip() for part in prompt
-            if isinstance(part, dict) and part.get("type") == "text"
+            part.get("text", "").strip()
+            for part in prompt
+            if isinstance(part, dict)
+            and part.get("type") == "text"
             and part.get("text", "").strip()
         )
     if tool == "claude" and item.get("type") == "user":
@@ -532,12 +607,23 @@ def user_message_raw(item, tool):
         if isinstance(content, str):
             text = content
         elif isinstance(content, list):
-            text = next((part.get("text", "") for part in content if part.get("type") == "text"), "")
+            text = next(
+                (
+                    part.get("text", "")
+                    for part in content
+                    if part.get("type") == "text"
+                ),
+                "",
+            )
     elif tool == "codex" and item.get("type") == "response_item":
         payload = item.get("payload", {})
         if payload.get("role") == "user":
             text = next(
-                (part.get("text", "") for part in payload.get("content", []) if part.get("type") == "input_text"),
+                (
+                    part.get("text", "")
+                    for part in payload.get("content", [])
+                    if part.get("type") == "input_text"
+                ),
                 "",
             )
     text = text.strip()
@@ -551,11 +637,15 @@ def user_message_raw(item, tool):
         and text.endswith("original image.]")
     ):
         return ""
-    if text and not text.startswith((
-        "# AGENTS.md instructions", "<environment_context>",
-        "The following is the Codex agent history", "<task-notification>",
-        "<codex_internal_context",
-    )):
+    if text and not text.startswith(
+        (
+            "# AGENTS.md instructions",
+            "<environment_context>",
+            "The following is the Codex agent history",
+            "<task-notification>",
+            "<codex_internal_context",
+        )
+    ):
         return text
     return ""
 
@@ -601,7 +691,9 @@ def slash_log_text(text, limit=2000):
         args = re.search(r"<command-args>(.*?)</command-args>", text, re.S)
         command = name.group(1).strip()
         return f"{command} {args.group(1).strip()}".strip() if args else command
-    output = re.search(r"<local-command-stdout>(.*?)</local-command-stdout>", text, re.S)
+    output = re.search(
+        r"<local-command-stdout>(.*?)</local-command-stdout>", text, re.S
+    )
     if output:
         # TUI の出力には色付けのエスケープが混ざる。
         plain = re.sub(r"\x1b\[[0-9;]*m", "", output.group(1)).strip()
@@ -623,7 +715,10 @@ def user_message_entry(item, tool):
         if not body:
             return None
         # コマンド自体は発言側、その出力は結果側に置く。
-        return {"role": "user" if text.startswith("<command-name>") else "assistant", "text": body}
+        return {
+            "role": "user" if text.startswith("<command-name>") else "assistant",
+            "text": body,
+        }
     if text.startswith("<user_shell_command>"):
         body = user_shell_log_text(text)
         return {"role": "user", "text": body} if body else None
@@ -632,7 +727,10 @@ def user_message_entry(item, tool):
     body = bash_log_text(text)
     if not body:
         return None
-    return {"role": "user" if text.startswith("<bash-input>") else "assistant", "text": body}
+    return {
+        "role": "user" if text.startswith("<bash-input>") else "assistant",
+        "text": body,
+    }
 
 
 def user_summary_text(item, tool):
@@ -674,7 +772,8 @@ def assistant_message_text(item, tool):
         text = content.strip()
     else:
         text = "\n".join(
-            part.get("text", "").strip() for part in content
+            part.get("text", "").strip()
+            for part in content
             if part.get("type") in kinds and part.get("text", "").strip()
         )
     return materialize_codex_file_citations(text) if tool == "codex" else text
@@ -690,8 +789,11 @@ def codex_tool_images_text(item):
     payload = item.get("payload") or {}
     if item.get("type") == "event_msg" and payload.get("type") == "mcp_tool_call_end":
         result = payload.get("result") or {}
-        content = ((result.get("Ok") or {}).get("content") or [])
-    elif item.get("type") == "response_item" and payload.get("type") == "custom_tool_call_output":
+        content = (result.get("Ok") or {}).get("content") or []
+    elif (
+        item.get("type") == "response_item"
+        and payload.get("type") == "custom_tool_call_output"
+    ):
         # functions.exec の image(...) / view_image はこの形式で保存される。
         content = payload.get("output") or []
     else:
@@ -711,11 +813,17 @@ def codex_tool_images_text(item):
             encoded = part.get("data")
         elif part.get("type") in {"input_image", "output_image"}:
             image_url = part.get("image_url") or ""
-            match = re.fullmatch(r"data:image/[a-zA-Z0-9.+-]+;base64,(.+)", image_url, re.S)
+            match = re.fullmatch(
+                r"data:image/[a-zA-Z0-9.+-]+;base64,(.+)", image_url, re.S
+            )
             encoded = match.group(1) if match else ""
         else:
             continue
-        if not isinstance(encoded, str) or not encoded or len(encoded) > 20 * 1024 * 1024:
+        if (
+            not isinstance(encoded, str)
+            or not encoded
+            or len(encoded) > 20 * 1024 * 1024
+        ):
             continue
         try:
             data = base64.b64decode(encoded, validate=True)
@@ -788,12 +896,15 @@ def resolve_local_image(path):
         raise FileNotFoundError("画像が見つかりません")
     with open(resolved, "rb") as source:
         header = source.read(12)
-    content_type = next((
-        candidate_type
-        for candidate_type, signatures in LOCAL_IMAGE_TYPES.values()
-        if any(header.startswith(signature) for signature in signatures)
-        and (candidate_type != "image/webp" or header[8:12] == b"WEBP")
-    ), "")
+    content_type = next(
+        (
+            candidate_type
+            for candidate_type, signatures in LOCAL_IMAGE_TYPES.values()
+            if any(header.startswith(signature) for signature in signatures)
+            and (candidate_type != "image/webp" or header[8:12] == b"WEBP")
+        ),
+        "",
+    )
     if not content_type:
         raise ValueError("画像データが不正です")
     return resolved, content_type
@@ -820,7 +931,9 @@ def sent_files_text(payload):
             except OSError:
                 lines.append(f"📎 {basename}（元ファイルは削除済みで表示できません）")
                 continue
-        prefix = "添付画像" if dest.lower().endswith(IMAGE_EXTENSIONS) else "添付ファイル"
+        prefix = (
+            "添付画像" if dest.lower().endswith(IMAGE_EXTENSIONS) else "添付ファイル"
+        )
         lines.append(f"{prefix}: {dest}")
     caption = (payload.get("caption") or "").strip()
     if caption and lines:
@@ -830,6 +943,7 @@ def sent_files_text(payload):
 
 def materialize_codex_file_citations(text):
     """Codex の出力ファイル参照を Web UI から配信できる添付へ変換する。"""
+
     def replace(match):
         source = os.path.realpath(os.path.expanduser(match.group(1)))
         if not os.path.isfile(source):
@@ -864,7 +978,9 @@ def assistant_parts(item, tool):
         return [{"role": "assistant", "text": text}] if text else []
     content = (item.get("message") or {}).get("content", [])
     if isinstance(content, str):
-        return [{"role": "assistant", "text": content.strip()}] if content.strip() else []
+        return (
+            [{"role": "assistant", "text": content.strip()}] if content.strip() else []
+        )
     parts = []
     for part in content or []:
         kind = part.get("type")
@@ -901,7 +1017,8 @@ def session_messages(path, tool, limit=300, history=()):
                 # 逆順に読んでいるので、1エントリ内のパーツも逆順に積む。
                 # ツール実行は履歴に残さず、実行中のものだけ session_activity で見せる。
                 messages.extend(
-                    part for part in reversed(assistant_parts(item, tool))
+                    part
+                    for part in reversed(assistant_parts(item, tool))
                     if part["role"] != "tool"
                 )
             if len(messages) >= limit:
@@ -920,7 +1037,8 @@ def queued_inputs(path, limit=400):
     発言は attachment や user として別に残るので、ここでは待機分だけを見る。
     """
     events = [
-        item for item in read_json_lines_reverse(path, max_lines=limit)
+        item
+        for item in read_json_lines_reverse(path, max_lines=limit)
         if item.get("type") == "queue-operation"
     ]
     waiting = []
@@ -947,17 +1065,22 @@ def screen_is_running(screen, tool=None):
     if tool == "codex":
         lines = screen.splitlines()
         boundary = max(
-            (index for index, line in enumerate(lines)
-             if re.fullmatch(r"\s*─{10,}\s*", line)),
+            (
+                index
+                for index, line in enumerate(lines)
+                if re.fullmatch(r"\s*─{10,}\s*", line)
+            ),
             default=-1,
         )
         return any(
             re.search(r"^\s*•\s+.*\besc to interrupt\b", line, re.I)
-            for line in lines[boundary + 1:]
+            for line in lines[boundary + 1 :]
         )
     if "esc to interrupt" in screen.lower():
         return True
-    return any(re.fullmatch(r"\s*[A-Za-z]+ing…\s*", line) for line in screen.splitlines())
+    return any(
+        re.fullmatch(r"\s*[A-Za-z]+ing…\s*", line) for line in screen.splitlines()
+    )
 
 
 def screen_background_label(screen):
@@ -971,10 +1094,14 @@ def screen_background_label(screen):
     lines = screen.splitlines()
     while lines and not lines[-1].strip():
         lines.pop()
-    return "監視中" if re.search(
-        r"\b\d+\s+monitors?(?:\s+running)?\b",
-        "\n".join(lines[-8:]),
-    ) else ""
+    return (
+        "監視中"
+        if re.search(
+            r"\b\d+\s+monitors?(?:\s+running)?\b",
+            "\n".join(lines[-8:]),
+        )
+        else ""
+    )
 
 
 def session_running(name):
@@ -1020,13 +1147,17 @@ def dialog_is_foreground(lines, prompt_index):
     下は空行か「Enter to confirm · Esc to cancel」のキー案内、折り返された
     プロンプト末尾（「Then Enter to submit or Escape to cancel:」等）だけ。
     """
-    for line in lines[prompt_index + 1:]:
+    for line in lines[prompt_index + 1 :]:
         text = line.strip()
         if text and not any(
             marker in text
             for marker in (
-                "Enter to confirm", "Esc to cancel", "Escape to cancel",
-                "Enter to submit", "Space to toggle", "bare Enter for defaults",
+                "Enter to confirm",
+                "Esc to cancel",
+                "Escape to cancel",
+                "Enter to submit",
+                "Space to toggle",
+                "bare Enter for defaults",
                 "up / down arrow keys",
             )
         ):
@@ -1045,8 +1176,11 @@ def parse_confirm_screen(lines):
         Enter y/n:
     """
     prompt_index = next(
-        (i for i in range(len(lines) - 1, -1, -1)
-         if lines[i].strip().startswith("Enter y/n")),
+        (
+            i
+            for i in range(len(lines) - 1, -1, -1)
+            if lines[i].strip().startswith("Enter y/n")
+        ),
         None,
     )
     if prompt_index is None or not dialog_is_foreground(lines, prompt_index):
@@ -1055,10 +1189,13 @@ def parse_confirm_screen(lines):
     for row in range(max(0, prompt_index - 6), prompt_index):
         match = re.match(r"^([yn])\.\s+(.+)$", lines[row].strip())
         if match:
-            choices.append({
-                "number": match.group(1), "label": match.group(2).strip(),
-                "description": "",
-            })
+            choices.append(
+                {
+                    "number": match.group(1),
+                    "label": match.group(2).strip(),
+                    "description": "",
+                }
+            )
     if len(choices) != 2:
         return None
     question = next(
@@ -1077,7 +1214,8 @@ def parse_custom_answer_screen(lines):
     """Other 選択後の自由入力待ち画面を拾う。"""
     prompt_index = next(
         (
-            i for i in range(len(lines) - 1, -1, -1)
+            i
+            for i in range(len(lines) - 1, -1, -1)
             if re.search(
                 r"Enter text for option \d+ \((.+)\), or Escape for the list:",
                 lines[i],
@@ -1096,7 +1234,8 @@ def parse_custom_answer_screen(lines):
     # 一緒に返し、「何についての Other か」がチャット画面でも分かるようにする。
     first_choice = next(
         (
-            i for i in range(prompt_index - 1, -1, -1)
+            i
+            for i in range(prompt_index - 1, -1, -1)
             if re.match(r"^1\.\s+", lines[i].strip())
         ),
         None,
@@ -1151,8 +1290,7 @@ def parse_question_screen(screen):
     # 引用されたダイアログ風テキストが画面上部に残ることがあるため、
     # 下から探して最下部にあるものだけを本物として扱う。
     prompt_index = next(
-        (i for i in range(len(lines) - 1, -1, -1)
-         if match_selection_prompt(lines[i])),
+        (i for i in range(len(lines) - 1, -1, -1) if match_selection_prompt(lines[i])),
         None,
     )
     if prompt_index is None:
@@ -1170,10 +1308,13 @@ def parse_question_screen(screen):
         if numbered:
             text = " ".join([numbered.group(1).strip()] + wrapped).strip()
             label, _, description = text.partition(" — ")
-            choices.append({
-                "number": expected, "label": label.strip(),
-                "description": description.strip(),
-            })
+            choices.append(
+                {
+                    "number": expected,
+                    "label": label.strip(),
+                    "description": description.strip(),
+                }
+            )
             wrapped = []
             expected -= 1
         elif line:
@@ -1223,7 +1364,8 @@ def parse_codex_question_screen(screen):
     lines = screen.splitlines()
     prompt_index = next(
         (
-            i for i in range(len(lines) - 1, -1, -1)
+            i
+            for i in range(len(lines) - 1, -1, -1)
             if "enter to submit" in lines[i].lower()
             or re.search(r"\benter to select\b", lines[i], re.I)
         ),
@@ -1233,21 +1375,27 @@ def parse_codex_question_screen(screen):
         return None
     # 会話中に表示された過去の選択画面ではなく、現在フォアグラウンドで
     # 入力を待っているダイアログだけを扱う。
-    if any(line.strip() for line in lines[prompt_index + 1:]):
+    if any(line.strip() for line in lines[prompt_index + 1 :]):
         return None
 
     field_index = next(
-        (i for i in range(prompt_index - 1, -1, -1)
-         if re.fullmatch(r"Field\s+\d+/\d+", lines[i].strip(), re.I)),
+        (
+            i
+            for i in range(prompt_index - 1, -1, -1)
+            if re.fullmatch(r"Field\s+\d+/\d+", lines[i].strip(), re.I)
+        ),
         None,
     )
-    scan_start = field_index + 1 if field_index is not None else max(0, prompt_index - 30)
+    scan_start = (
+        field_index + 1 if field_index is not None else max(0, prompt_index - 30)
+    )
     if field_index is None:
         # App connector のサインイン画面には Field 行がない。直前の Calling
         # 表示を質問へ混ぜないよう、最後のイベント行より後をダイアログとする。
         event_index = next(
             (
-                i for i in range(prompt_index - 1, scan_start - 1, -1)
+                i
+                for i in range(prompt_index - 1, scan_start - 1, -1)
                 if re.match(r"^\s*•\s+(?:Calling|Called|Opened)\b", lines[i], re.I)
             ),
             None,
@@ -1278,11 +1426,15 @@ def parse_codex_question_screen(screen):
     if not choices or first_choice is None:
         return None
 
-    question_lines = [line.strip() for line in lines[scan_start:first_choice] if line.strip()]
+    question_lines = [
+        line.strip() for line in lines[scan_start:first_choice] if line.strip()
+    ]
     if not question_lines:
         return None
     return {
-        "question": " ".join(question_lines), "choices": choices, "multi": False,
+        "question": " ".join(question_lines),
+        "choices": choices,
+        "multi": False,
     }
 
 
@@ -1318,17 +1470,19 @@ def pending_question(name, tool):
 
 def parse_shell_auth_screen(screen):
     """実行中の GitHub CLI デバイス認証案内を Markdown へ変換する。"""
-    matches = list(re.finditer(
-        r"First copy your one-time code:\s*([A-Z0-9-]+).*?"
-        r"Open this URL to continue in your web browser:\s*"
-        r"(https://github\.com/login/device)",
-        screen,
-        re.S,
-    ))
+    matches = list(
+        re.finditer(
+            r"First copy your one-time code:\s*([A-Z0-9-]+).*?"
+            r"Open this URL to continue in your web browser:\s*"
+            r"(https://github\.com/login/device)",
+            screen,
+            re.S,
+        )
+    )
     if not matches:
         return ""
     match = matches[-1]
-    if "Authentication complete" in screen[match.end():]:
+    if "Authentication complete" in screen[match.end() :]:
         return ""
     code, url = match.groups()
     return (
@@ -1409,7 +1563,10 @@ def run_wait_classifier(path, tool, key):
             # cwd をホーム外にして、-p のログが「最近の会話を再開」に混ざらないようにする
             result = subprocess.run(
                 [CLAUDE_BIN, "-p", "--model", WAIT_CLASS_MODEL, prompt],
-                capture_output=True, text=True, timeout=90, cwd="/tmp",
+                capture_output=True,
+                text=True,
+                timeout=90,
+                cwd="/tmp",
             )
             answer = result.stdout.strip() if result.returncode == 0 else ""
             label = next(
@@ -1419,7 +1576,8 @@ def run_wait_classifier(path, tool, key):
         pass
     with WAIT_CLASS_LOCK:
         WAIT_CLASS_CACHE[path] = {
-            "key": key, "label": label,
+            "key": key,
+            "label": label,
             "retry": 0 if label else time.time() + WAIT_CLASS_RETRY,
         }
         for old in list(WAIT_CLASS_CACHE)[: len(WAIT_CLASS_CACHE) - LOG_META_LIMIT]:
@@ -1459,7 +1617,9 @@ def sidebar_status(item):
     if item.get("running"):
         text = "考え中"
         if item.get("log_path"):
-            text = session_activity(item["name"], item["log_path"], item["tool"]) or text
+            text = (
+                session_activity(item["name"], item["log_path"], item["tool"]) or text
+            )
         if len(text) > 24:
             text = text[:24] + "…"
         return text, "run"
@@ -1480,7 +1640,7 @@ def sidebar_status(item):
 def session_transcript(path, tool, history=()):
     labels = {"user": "あなた", "assistant": tool, "tool": "ツール"}
     return "\n\n".join(
-        f'── {labels[item["role"]]} ──\n{item["text"]}'
+        f"── {labels[item['role']]} ──\n{item['text']}"
         for item in session_messages(path, tool, history=history)
     )
 
@@ -1583,10 +1743,15 @@ def session_context(path, tool):
                 continue
             message = item.get("message") or {}
             usage = message.get("usage") or {}
-            used = sum(usage.get(key) or 0 for key in (
-                "input_tokens", "cache_read_input_tokens",
-                "cache_creation_input_tokens", "output_tokens",
-            ))
+            used = sum(
+                usage.get(key) or 0
+                for key in (
+                    "input_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                    "output_tokens",
+                )
+            )
             # エラー時の合成レスポンス（model が "<synthetic>"）は usage が空
             if not used or message.get("model", "").startswith("<"):
                 continue
@@ -1613,7 +1778,7 @@ def claude_context_window(model):
 
 def short_path(path):
     """ヘッダー表示用に ~/…/親/カレント へ縮める。末尾が切れると何のプロジェクトか分からなくなる。"""
-    display = f"~{path[len(HOME):]}" if path.startswith(HOME) else path
+    display = f"~{path[len(HOME) :]}" if path.startswith(HOME) else path
     parts = display.split("/")
     if len(parts) > 3:
         display = "/".join([parts[0], "…", *parts[-2:]])
@@ -1666,8 +1831,13 @@ def log_meta(path, tool):
     try:
         stat = os.stat(path)
     except OSError:
-        return {"summary": "", "last_message": "", "model": "", "model_at": 0.0,
-                "context": None}
+        return {
+            "summary": "",
+            "last_message": "",
+            "model": "",
+            "model_at": 0.0,
+            "context": None,
+        }
     key = (stat.st_mtime, stat.st_size, tool)
     with LOG_META_LOCK:
         cached = LOG_META_CACHE.get(path)
@@ -1719,9 +1889,16 @@ def _fetch_artifact_state(url, number):
         # PRも issues エンドポイントで引ける。PRのマージ判定は
         # pull_request.merged_at（issueには無いキーなので空になる）
         result = subprocess.run(
-            [GH_BIN, "api", f"repos/{owner_repo}/issues/{number}",
-             "--jq", '.state + " " + (.pull_request.merged_at // "")'],
-            capture_output=True, text=True, timeout=30,
+            [
+                GH_BIN,
+                "api",
+                f"repos/{owner_repo}/issues/{number}",
+                "--jq",
+                '.state + " " + (.pull_request.merged_at // "")',
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if result.returncode == 0:
             state_word, _, merged_at = result.stdout.strip().partition(" ")
@@ -1763,7 +1940,10 @@ def _artifact_add(state, match, kinds):
         return False
     url = match.group(0)
     state["items"][url] = {
-        "kind": kind, "repo": match.group(1), "number": int(match.group(3)), "url": url,
+        "kind": kind,
+        "repo": match.group(1),
+        "number": int(match.group(3)),
+        "url": url,
     }
     return True
 
@@ -1880,7 +2060,13 @@ def session_artifacts(path, tool):
     with ARTIFACT_CACHE_LOCK:
         state = ARTIFACT_CACHE.get(path)
         if state is None:
-            state = {"lock": threading.Lock(), "pos": 0, "pending": {}, "kinds": [], "items": {}}
+            state = {
+                "lock": threading.Lock(),
+                "pos": 0,
+                "pending": {},
+                "kinds": [],
+                "items": {},
+            }
             ARTIFACT_CACHE[path] = state
     scan = _artifact_scan_codex if tool == "codex" else _artifact_scan_claude
     with state["lock"]:
@@ -1926,7 +2112,7 @@ def artifact_chips(items):
 def _art_class(item):
     """チップのcssクラス。状態が取れていれば状態色が種別色を上書きする。"""
     state = item.get("state") or ""
-    return f'art art-{item["kind"]}' + (f" art-{state}" if state else "")
+    return f"art art-{item['kind']}" + (f" art-{state}" if state else "")
 
 
 def artifact_links(items):
@@ -1938,9 +2124,7 @@ def artifact_links(items):
     )
 
 
-PR_SELECTOR_RE = re.compile(
-    r"(?:https://github\.com/[\w.-]+/[\w.-]+/pull/)?(\d+)/?"
-)
+PR_SELECTOR_RE = re.compile(r"(?:https://github\.com/[\w.-]+/[\w.-]+/pull/)?(\d+)/?")
 GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/pull/(?P<number>\d+)/?"
 )
@@ -1960,8 +2144,11 @@ def normalize_pr_selector(value):
 def _verified_git_ref(git, cwd, ref):
     """ローカルに存在する Git ref だけを返す。"""
     result = subprocess.run(
-        [git, "rev-parse", "--verify", "--quiet", ref], cwd=cwd,
-        capture_output=True, text=True, timeout=5,
+        [git, "rev-parse", "--verify", "--quiet", ref],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     return ref if result.returncode == 0 else ""
 
@@ -1972,21 +2159,31 @@ def git_default_branch(cwd):
         raise ValueError("セッションの作業ディレクトリが見つかりません")
     git = find_bin("git")
     inside = subprocess.run(
-        [git, "rev-parse", "--is-inside-work-tree"], cwd=cwd,
-        capture_output=True, text=True, timeout=5,
+        [git, "rev-parse", "--is-inside-work-tree"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     if inside.returncode != 0 or inside.stdout.strip() != "true":
         raise LookupError("作業ディレクトリはGitリポジトリではありません")
 
     remotes_result = subprocess.run(
-        [git, "remote"], cwd=cwd, capture_output=True, text=True, timeout=5,
+        [git, "remote"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     remotes = remotes_result.stdout.split() if remotes_result.returncode == 0 else []
     remotes.sort(key=lambda remote: remote != "origin")
     for remote in remotes:
         symbolic = subprocess.run(
             [git, "symbolic-ref", "--quiet", "--short", f"refs/remotes/{remote}/HEAD"],
-            cwd=cwd, capture_output=True, text=True, timeout=5,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         ref = symbolic.stdout.strip() if symbolic.returncode == 0 else ""
         if ref.startswith(f"{remote}/") and _verified_git_ref(git, cwd, ref):
@@ -1997,12 +2194,17 @@ def git_default_branch(cwd):
     for remote in remotes:
         try:
             remote_head = subprocess.run(
-                [git, "ls-remote", "--symref", remote, "HEAD"], cwd=cwd,
-                capture_output=True, text=True, timeout=10,
+                [git, "ls-remote", "--symref", remote, "HEAD"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
         except subprocess.TimeoutExpired:
             continue
-        match = re.search(r"^ref: refs/heads/(.+)\tHEAD$", remote_head.stdout, re.MULTILINE)
+        match = re.search(
+            r"^ref: refs/heads/(.+)\tHEAD$", remote_head.stdout, re.MULTILINE
+        )
         if not match:
             continue
         branch = match.group(1)
@@ -2012,7 +2214,10 @@ def git_default_branch(cwd):
             return branch, ref
 
     for branch in ("main", "master"):
-        for ref in [*(f"{remote}/{branch}" for remote in remotes), f"refs/heads/{branch}"]:
+        for ref in [
+            *(f"{remote}/{branch}" for remote in remotes),
+            f"refs/heads/{branch}",
+        ]:
             if _verified_git_ref(git, cwd, ref):
                 return branch, ref
     raise LookupError("デフォルトブランチを特定できません")
@@ -2024,7 +2229,11 @@ def git_branch_ref(cwd, branch):
         raise ValueError("比較対象のブランチが指定されていません")
     git = find_bin("git")
     remotes_result = subprocess.run(
-        [git, "remote"], cwd=cwd, capture_output=True, text=True, timeout=5,
+        [git, "remote"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     remotes = remotes_result.stdout.split() if remotes_result.returncode == 0 else []
     remotes.sort(key=lambda remote: remote != "origin")
@@ -2056,11 +2265,13 @@ def _parse_git_numstat(output):
             index += 1
             path = entries[index]
             index += 1
-        files.append({
-            "path": path,
-            "additions": int(additions) if additions.isdigit() else 0,
-            "deletions": int(deletions) if deletions.isdigit() else 0,
-        })
+        files.append(
+            {
+                "path": path,
+                "additions": int(additions) if additions.isdigit() else 0,
+                "deletions": int(deletions) if deletions.isdigit() else 0,
+            }
+        )
     return files
 
 
@@ -2094,35 +2305,55 @@ def directory_diff(cwd, base_branch=""):
         branch, base_ref = git_default_branch(cwd)
     git = find_bin("git")
     current = subprocess.run(
-        [git, "branch", "--show-current"], cwd=cwd,
-        capture_output=True, text=True, timeout=5,
+        [git, "branch", "--show-current"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     if current.returncode != 0:
-        raise RuntimeError(current.stderr.strip() or "現在のブランチを取得できませんでした")
+        raise RuntimeError(
+            current.stderr.strip() or "現在のブランチを取得できませんでした"
+        )
     head = current.stdout.strip() or "HEAD (detached)"
     merge_base = subprocess.run(
-        [git, "merge-base", base_ref, "HEAD"], cwd=cwd,
-        capture_output=True, text=True, timeout=5,
+        [git, "merge-base", base_ref, "HEAD"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
     )
     if merge_base.returncode != 0 or not merge_base.stdout.strip():
-        raise RuntimeError(merge_base.stderr.strip() or "比較対象ブランチとの分岐点を取得できませんでした")
+        raise RuntimeError(
+            merge_base.stderr.strip()
+            or "比較対象ブランチとの分岐点を取得できませんでした"
+        )
     # 比較対象ブランチ側だけで進んだ変更は除外し、分岐後の作業ツリー全体
     # （コミット済み・staged・unstaged）をレビュー対象にする。
     common_args = ["--no-ext-diff", "--find-renames", merge_base.stdout.strip(), "--"]
     stats = subprocess.run(
-        [git, "diff", "--numstat", "-z", *common_args], cwd=cwd,
-        capture_output=True, text=True, timeout=20,
+        [git, "diff", "--numstat", "-z", *common_args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
     if stats.returncode != 0:
         raise RuntimeError(stats.stderr.strip() or "変更ファイルを取得できませんでした")
     names = subprocess.run(
-        [git, "diff", "--name-status", "-z", *common_args], cwd=cwd,
-        capture_output=True, text=True, timeout=20,
+        [git, "diff", "--name-status", "-z", *common_args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=20,
     )
     statuses = _parse_git_name_status(names.stdout) if names.returncode == 0 else {}
     diff = subprocess.run(
-        [git, "diff", "--patch", *common_args], cwd=cwd,
-        capture_output=True, text=True, timeout=30,
+        [git, "diff", "--patch", *common_args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if diff.returncode != 0:
         raise RuntimeError(diff.stderr.strip() or "差分を取得できませんでした")
@@ -2163,8 +2394,11 @@ def local_github_repositories():
     for path in local_projects():
         try:
             result = subprocess.run(
-                [git, "remote", "get-url", "origin"], cwd=path,
-                capture_output=True, text=True, timeout=5,
+                [git, "remote", "get-url", "origin"],
+                cwd=path,
+                capture_output=True,
+                text=True,
+                timeout=5,
             )
         except (OSError, subprocess.SubprocessError):
             continue
@@ -2179,21 +2413,37 @@ def github_review_requests():
     gh = find_bin("gh")
     fields = "number,title,url,repository,author,updatedAt,isDraft"
     result = subprocess.run(
-        [gh, "search", "prs", "--review-requested=@me", "--state=open",
-         "--limit=50", "--json", fields],
-        capture_output=True, text=True, timeout=30,
+        [
+            gh,
+            "search",
+            "prs",
+            "--review-requested=@me",
+            "--state=open",
+            "--limit=50",
+            "--json",
+            fields,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
         env={**os.environ, "NO_COLOR": "1"},
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() or "レビュー依頼を取得できませんでした")
+        raise RuntimeError(
+            result.stderr.strip() or "レビュー依頼を取得できませんでした"
+        )
     try:
         items = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
-        raise RuntimeError("GitHubから返されたレビュー依頼を読み取れませんでした") from exc
+        raise RuntimeError(
+            "GitHubから返されたレビュー依頼を読み取れませんでした"
+        ) from exc
     repositories = local_github_repositories()
     for item in items:
         repository = item.get("repository") or {}
-        name = repository.get("nameWithOwner", "") if isinstance(repository, dict) else ""
+        name = (
+            repository.get("nameWithOwner", "") if isinstance(repository, dict) else ""
+        )
         item["repositoryName"] = name
         item["cwd"] = repositories.get(name.lower(), "")
     return items
@@ -2211,8 +2461,11 @@ def pull_request_target(selector):
     gh = find_bin("gh")
     fields = "number,title,url,state,baseRefName,headRefName"
     result = subprocess.run(
-        [gh, "pr", "view", selector, "--json", fields], cwd=cwd,
-        capture_output=True, text=True, timeout=20,
+        [gh, "pr", "view", selector, "--json", fields],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=20,
         env={**os.environ, "NO_COLOR": "1"},
     )
     if result.returncode != 0:
@@ -2234,26 +2487,34 @@ def pull_request_worktree(target):
     PRごとのworktreeでPR headをチェックアウトして、そこでセッションを起動する。
     """
     repo = target["cwd"]
-    dirname = f'{os.path.basename(repo.rstrip("/"))}-pr-{target["number"]}'
+    dirname = f"{os.path.basename(repo.rstrip('/'))}-pr-{target['number']}"
     path = os.path.join(WORKTREES_DIR, dirname)
     fresh = not os.path.isdir(path)
     if fresh:
         os.makedirs(WORKTREES_DIR, exist_ok=True)
         git = find_bin("git")
         add = subprocess.run(
-            [git, "worktree", "add", "--detach", path], cwd=repo,
-            capture_output=True, text=True, timeout=30,
+            [git, "worktree", "add", "--detach", path],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if add.returncode != 0:
             raise RuntimeError(add.stderr.strip() or "worktreeを作成できませんでした")
     # --detach ならPRブランチが本体でチェックアウト済みでも衝突しない。
     checkout = subprocess.run(
         [find_bin("gh"), "pr", "checkout", str(target["number"]), "--detach"],
-        cwd=path, capture_output=True, text=True, timeout=60,
+        cwd=path,
+        capture_output=True,
+        text=True,
+        timeout=60,
         env={**os.environ, "NO_COLOR": "1"},
     )
     if checkout.returncode != 0 and fresh:
-        raise RuntimeError(checkout.stderr.strip() or "PRブランチを取得できませんでした")
+        raise RuntimeError(
+            checkout.stderr.strip() or "PRブランチを取得できませんでした"
+        )
     # 既存worktreeの更新失敗（レビュー中の修正で作業ツリーが汚れている等）は
     # 手元の状態を壊さないことを優先し、そのまま続行する。
     return path
@@ -2334,8 +2595,8 @@ def claude_session_started(path):
     if started:
         with CLAUDE_START_LOCK:
             CLAUDE_START_CACHE[path] = started
-            for old in list(CLAUDE_START_CACHE)[:
-                len(CLAUDE_START_CACHE) - LOG_META_LIMIT
+            for old in list(CLAUDE_START_CACHE)[
+                : len(CLAUDE_START_CACHE) - LOG_META_LIMIT
             ]:
                 CLAUDE_START_CACHE.pop(old, None)
     return started
@@ -2347,8 +2608,10 @@ def stat_entry(path, session_id):
     except OSError:
         return None
     return {
-        "id": session_id, "mtime": stat.st_mtime,
-        "created": getattr(stat, "st_birthtime", stat.st_ctime), "path": path,
+        "id": session_id,
+        "mtime": stat.st_mtime,
+        "created": getattr(stat, "st_birthtime", stat.st_ctime),
+        "path": path,
     }
 
 
@@ -2405,9 +2668,15 @@ def resume_candidates(tool, cwd, explicit_id=""):
         # cwd フィルターに合致しなくても、IDが分かっていればログ本体を直接探す
         path = find_log_by_id(tool, explicit_id)
         entry = stat_entry(path, explicit_id) if path else None
-        entries.append(entry or {
-            "id": explicit_id, "mtime": time.time(), "created": time.time(), "path": "",
-        })
+        entries.append(
+            entry
+            or {
+                "id": explicit_id,
+                "mtime": time.time(),
+                "created": time.time(),
+                "path": "",
+            }
+        )
     if explicit_id:
         entries.sort(key=lambda item: item["id"] != explicit_id)
     candidates = entries[:10]
@@ -2486,11 +2755,15 @@ def recent_conversations(limit=24):
         if not summary:
             # 起動して即終了した空セッションは再開する意味がないので出さない
             continue
-        items.append({
-            "tool": entry["tool"], "id": entry["id"], "cwd": cwd,
-            "summary": summary,
-            "label": time.strftime("%m/%d %H:%M", time.localtime(entry["mtime"])),
-        })
+        items.append(
+            {
+                "tool": entry["tool"],
+                "id": entry["id"],
+                "cwd": cwd,
+                "summary": summary,
+                "label": time.strftime("%m/%d %H:%M", time.localtime(entry["mtime"])),
+            }
+        )
     return items
 
 
@@ -2502,8 +2775,17 @@ def resume_group_dir(cwd):
     """
     try:
         result = subprocess.run(
-            ["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True, text=True, timeout=3,
+            [
+                "git",
+                "-C",
+                cwd,
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
     except (OSError, subprocess.SubprocessError):
         return cwd
@@ -2511,7 +2793,9 @@ def resume_group_dir(cwd):
     if not common_dir:
         return cwd
     common_dir = os.path.realpath(common_dir)
-    return os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git" else cwd
+    return (
+        os.path.dirname(common_dir) if os.path.basename(common_dir) == ".git" else cwd
+    )
 
 
 def linked_worktree_info(cwd):
@@ -2519,10 +2803,18 @@ def linked_worktree_info(cwd):
     try:
         result = subprocess.run(
             [
-                find_bin("git"), "-C", cwd, "rev-parse", "--path-format=absolute",
-                "--show-toplevel", "--absolute-git-dir", "--git-common-dir",
+                find_bin("git"),
+                "-C",
+                cwd,
+                "rev-parse",
+                "--path-format=absolute",
+                "--show-toplevel",
+                "--absolute-git-dir",
+                "--git-common-dir",
             ],
-            capture_output=True, text=True, timeout=3,
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -2560,10 +2852,16 @@ def remove_session_worktree(cwd, other_cwds=()):
         return False
     result = subprocess.run(
         [
-            find_bin("git"), "--git-dir", info["git_common_dir"],
-            "worktree", "remove", info["path"],
+            find_bin("git"),
+            "--git-dir",
+            info["git_common_dir"],
+            "worktree",
+            "remove",
+            info["path"],
         ],
-        capture_output=True, text=True, timeout=30,
+        capture_output=True,
+        text=True,
+        timeout=30,
     )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
@@ -2608,7 +2906,8 @@ def _restorable_session(item):
     position = session_position(item)
     raw_history = item.get("thread_history")
     thread_history = [
-        thread_id for thread_id in (raw_history if isinstance(raw_history, list) else [])
+        thread_id
+        for thread_id in (raw_history if isinstance(raw_history, list) else [])
         if isinstance(thread_id, str) and re.fullmatch(r"[0-9a-f-]{36}", thread_id)
     ][-THREAD_HISTORY_LIMIT:]
     return {
@@ -2690,7 +2989,8 @@ def upsert_registered_session(item):
         items = _read_session_registry_unlocked()
         identity = (normalized["tool"], normalized["session_id"])
         items = [
-            old for old in items
+            old
+            for old in items
             if old["name"] != normalized["name"]
             and (old["tool"], old["session_id"]) != identity
         ]
@@ -2721,9 +3021,7 @@ def forget_registered_session(name):
 
 def live_registered_sessions():
     """重複復元を避けるため、現在の tmux セッションの名前と会話IDを返す。"""
-    result = tmux_run(
-        "list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}"
-    )
+    result = tmux_run("list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}")
     if result.returncode != 0:
         return []
     items = []
@@ -2733,7 +3031,9 @@ def live_registered_sessions():
         if not separator or not name.startswith("agent-") or name in seen:
             continue
         seen.add(name)
-        tool = tmux_run("show-option", "-qv", "-t", name, "@launcher_tool").stdout.strip()
+        tool = tmux_run(
+            "show-option", "-qv", "-t", name, "@launcher_tool"
+        ).stdout.strip()
         session_id = tmux_run(
             "show-option", "-qv", "-t", name, "@launcher_session_id"
         ).stdout.strip()
@@ -2752,11 +3052,13 @@ def restore_registered_sessions():
     live_names = {item["name"] for item in live}
     live_ids = {
         (item["tool"], item["session_id"])
-        for item in live if item["tool"] in TOOLS and item["session_id"]
+        for item in live
+        if item["tool"] in TOOLS and item["session_id"]
     }
     live_by_id = {
         (item["tool"], item["session_id"]): item
-        for item in live if item["tool"] in TOOLS and item["session_id"]
+        for item in live
+        if item["tool"] in TOOLS and item["session_id"]
     }
     resulting = []
     restored = []
@@ -2770,15 +3072,20 @@ def restore_registered_sessions():
             continue
         if not os.path.isdir(item["cwd"]):
             resulting.append(item)
-            failed.append({"name": item["name"], "error": "作業ディレクトリがありません"})
+            failed.append(
+                {"name": item["name"], "error": "作業ディレクトリがありません"}
+            )
             continue
         if not conversation_log_path(item["tool"], item["cwd"], item["session_id"]):
             resulting.append(item)
             failed.append({"name": item["name"], "error": "会話ログがありません"})
             continue
         cmd = [*TOOLS[item["tool"]], item["cwd"]]
-        cmd += (["--resume", item["session_id"]] if item["tool"] == "claude"
-                else ["resume", item["session_id"]])
+        cmd += (
+            ["--resume", item["session_id"]]
+            if item["tool"] == "claude"
+            else ["resume", item["session_id"]]
+        )
         if item.get("model") and item["model"] != "default":
             cmd += ["--model", item["model"]]
         if item.get("bypass"):
@@ -2794,9 +3101,15 @@ def restore_registered_sessions():
             if not new_name:
                 raise RuntimeError("復元したセッション名を取得できませんでした")
             set_session_metadata(
-                new_name, item["summary"], item["session_id"], item["bypass"],
-                item["note"], item["position"] == "top", item["pull_request"],
-                item["position"], item.get("model", ""),
+                new_name,
+                item["summary"],
+                item["session_id"],
+                item["bypass"],
+                item["note"],
+                item["position"] == "top",
+                item["pull_request"],
+                item["position"],
+                item.get("model", ""),
                 thread_history=item.get("thread_history") or (),
             )
             restored_item = {**item, "name": new_name}
@@ -2818,9 +3131,15 @@ def first_prompt_from_screen(output):
         if not match:
             continue
         prompt = " ".join(match.group(1).strip().split())
-        if prompt and prompt not in {
-            "Explain this codebase", "Improve documentation in @filename",
-        } and not prompt.startswith("/"):
+        if (
+            prompt
+            and prompt
+            not in {
+                "Explain this codebase",
+                "Improve documentation in @filename",
+            }
+            and not prompt.startswith("/")
+        ):
             return prompt[:100]
     return ""
 
@@ -2832,9 +3151,15 @@ def last_prompt_from_screen(output):
         if not match:
             continue
         prompt = " ".join(match.group(1).strip().split())
-        if prompt and prompt not in {
-            "Explain this codebase", "Improve documentation in @filename",
-        } and not prompt.startswith("/"):
+        if (
+            prompt
+            and prompt
+            not in {
+                "Explain this codebase",
+                "Improve documentation in @filename",
+            }
+            and not prompt.startswith("/")
+        ):
             return prompt[:140]
     return ""
 
@@ -2851,7 +3176,9 @@ def requested_model(name):
 
 def current_model(name, exact, agent):
     """ログ・Webからの切替指示・起動オプションのうち、いちばん新しい情報を採る。"""
-    logged, logged_at = (exact.get("model", ""), exact.get("model_at", 0.0)) if exact else ("", 0.0)
+    logged, logged_at = (
+        (exact.get("model", ""), exact.get("model_at", 0.0)) if exact else ("", 0.0)
+    )
     # TUI 側で /model された場合はログの方が新しくなり、暫定値は自然に捨てられる。
     requested, requested_at = requested_model(name)
     if requested and requested_at > logged_at:
@@ -2863,8 +3190,10 @@ def load_managed_sessions(persist=True):
     """ランチャーが作成した tmux セッションの一覧を返す。"""
     try:
         result = tmux_run(
-            "list-panes", "-a",
-            "-F", "#{session_name}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_tty}",
+            "list-panes",
+            "-a",
+            "-F",
+            "#{session_name}\t#{pane_id}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_tty}",
         )
         if result.returncode != 0:
             return []
@@ -2875,22 +3204,33 @@ def load_managed_sessions(persist=True):
             if len(parts) != 5 or not parts[0].startswith("agent-") or parts[0] in seen:
                 continue
             seen.add(parts[0])
-            tool = tmux_run("show-option", "-qv", "-t", parts[0], "@launcher_tool").stdout.strip()
-            bypass = tmux_run(
-                "show-option", "-qv", "-t", parts[0], "@launcher_bypass"
-            ).stdout.strip() == "1"
-            ephemeral = tmux_run(
-                "show-option", "-qv", "-t", parts[0], "@launcher_ephemeral"
-            ).stdout.strip() == "1"
+            tool = tmux_run(
+                "show-option", "-qv", "-t", parts[0], "@launcher_tool"
+            ).stdout.strip()
+            bypass = (
+                tmux_run(
+                    "show-option", "-qv", "-t", parts[0], "@launcher_bypass"
+                ).stdout.strip()
+                == "1"
+            )
+            ephemeral = (
+                tmux_run(
+                    "show-option", "-qv", "-t", parts[0], "@launcher_ephemeral"
+                ).stdout.strip()
+                == "1"
+            )
             summary = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_summary"
             ).stdout.strip()
             note = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_note"
             ).stdout.strip()
-            pinned = tmux_run(
-                "show-option", "-qv", "-t", parts[0], "@launcher_pinned"
-            ).stdout.strip() == "1"
+            pinned = (
+                tmux_run(
+                    "show-option", "-qv", "-t", parts[0], "@launcher_pinned"
+                ).stdout.strip()
+                == "1"
+            )
             position = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_position"
             ).stdout.strip()
@@ -2911,24 +3251,37 @@ def load_managed_sessions(persist=True):
             if not session_id and agent:
                 session_id = agent["explicit_id"]
             thread_history = [
-                thread_id for thread_id in tmux_run(
+                thread_id
+                for thread_id in tmux_run(
                     "show-option", "-qv", "-t", parts[0], "@launcher_thread_history"
-                ).stdout.strip().split(",") if thread_id
+                )
+                .stdout.strip()
+                .split(",")
+                if thread_id
             ]
-            if agent and agent["tool"] == "codex" and session_id and agent.get("open_ids"):
+            if (
+                agent
+                and agent["tool"] == "codex"
+                and session_id
+                and agent.get("open_ids")
+            ):
                 # codex 0.151以降はターンごとに別スレッドへ書くことがある。
                 # 現在書かれているスレッドが変わったら追従し、以前のスレッドは
                 # 履歴として残してチャット表示でつなげる。
                 live_id = codex_live_session_id(agent["open_ids"])
                 if live_id and live_id != session_id:
                     thread_history = [
-                        thread_id for thread_id in thread_history
+                        thread_id
+                        for thread_id in thread_history
                         if thread_id not in (session_id, live_id)
                     ] + [session_id]
                     thread_history = thread_history[-THREAD_HISTORY_LIMIT:]
                     tmux_run(
-                        "set-option", "-t", parts[0],
-                        "@launcher_thread_history", ",".join(thread_history),
+                        "set-option",
+                        "-t",
+                        parts[0],
+                        "@launcher_thread_history",
+                        ",".join(thread_history),
                     )
                     session_id = live_id
                     tmux_run(
@@ -2943,17 +3296,31 @@ def load_managed_sessions(persist=True):
                 )
                 if not session_id:
                     try:
-                        started = time.mktime(time.strptime(
-                            parts[0].split("-", 3)[1] + "-" + parts[0].split("-", 3)[2],
-                            "%Y%m%d-%H%M%S",
-                        ))
-                        nearest = min(candidates, key=lambda item: abs(item["created"] - started))
+                        started = time.mktime(
+                            time.strptime(
+                                parts[0].split("-", 3)[1]
+                                + "-"
+                                + parts[0].split("-", 3)[2],
+                                "%Y%m%d-%H%M%S",
+                            )
+                        )
+                        nearest = min(
+                            candidates, key=lambda item: abs(item["created"] - started)
+                        )
                         if abs(nearest["created"] - started) <= 120:
                             session_id = nearest["id"]
-                            tmux_run("set-option", "-t", parts[0], "@launcher_session_id", session_id)
+                            tmux_run(
+                                "set-option",
+                                "-t",
+                                parts[0],
+                                "@launcher_session_id",
+                                session_id,
+                            )
                     except (ValueError, IndexError):
                         pass
-                exact = next((item for item in candidates if item["id"] == session_id), None)
+                exact = next(
+                    (item for item in candidates if item["id"] == session_id), None
+                )
             if exact:
                 if not summary:
                     summary = exact["summary"]
@@ -2970,45 +3337,57 @@ def load_managed_sessions(persist=True):
                 last_message = summary
             log_path = exact.get("path", "") if exact else ""
             history_paths = [
-                found for found in (
+                found
+                for found in (
                     find_log_by_id(tool or parts[3], thread_id)
-                    for thread_id in thread_history if thread_id != session_id
-                ) if found and found != log_path
+                    for thread_id in thread_history
+                    if thread_id != session_id
+                )
+                if found and found != log_path
             ]
             running = screen_is_running(screen, tool or parts[3])
-            sessions.append({
-                "name": parts[0], "pane_id": parts[1], "cwd": parts[2],
-                "command": parts[3], "tool": tool or parts[3], "summary": summary,
-                "last_message": last_message, "log_path": log_path,
-                "thread_history": thread_history,
-                "history_paths": history_paths,
-                "note": note,
-                "pinned": pinned,
-                "position": position,
-                "pull_request": pull_request,
-                "session_id": session_id, "bypass": bypass,
-                "ephemeral": ephemeral,
-                "running": running,
-                "background": "" if running else screen_background_label(screen),
-                "model": current_model(parts[0], exact, agent),
-                "restore_model": restore_model,
-                "context": exact.get("context") if exact else None,
-                "artifacts": session_artifacts(log_path, tool or parts[3]),
-            })
+            sessions.append(
+                {
+                    "name": parts[0],
+                    "pane_id": parts[1],
+                    "cwd": parts[2],
+                    "command": parts[3],
+                    "tool": tool or parts[3],
+                    "summary": summary,
+                    "last_message": last_message,
+                    "log_path": log_path,
+                    "thread_history": thread_history,
+                    "history_paths": history_paths,
+                    "note": note,
+                    "pinned": pinned,
+                    "position": position,
+                    "pull_request": pull_request,
+                    "session_id": session_id,
+                    "bypass": bypass,
+                    "ephemeral": ephemeral,
+                    "running": running,
+                    "background": "" if running else screen_background_label(screen),
+                    "model": current_model(parts[0], exact, agent),
+                    "restore_model": restore_model,
+                    "context": exact.get("context") if exact else None,
+                    "artifacts": session_artifacts(log_path, tool or parts[3]),
+                }
+            )
         # 動いていないセッションは返事を待っている。新しい順のまま上へ寄せる。
         # バックグラウンド監視中は返事を求めていないので実行中と同じ扱い。
         sessions.sort(key=lambda item: item["name"], reverse=True)
         sessions.sort(key=lambda item: bool(item["running"] or item["background"]))
-        sessions.sort(
-            key=lambda item: SESSION_POSITION_ORDER[session_position(item)]
-        )
+        sessions.sort(key=lambda item: SESSION_POSITION_ORDER[session_position(item)])
         if persist:
             try:
                 save_session_registry(sessions)
             except OSError as exc:
                 # 永続化に失敗しても、動いているセッション一覧は表示し続ける。
-                print(f"[registry] セッションを保存できませんでした: {exc}",
-                      file=sys.stderr, flush=True)
+                print(
+                    f"[registry] セッションを保存できませんでした: {exc}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         return sessions
     except (OSError, subprocess.SubprocessError):
         return []
@@ -3089,9 +3468,7 @@ def valid_session(name):
 
 def other_tmux_cwds(name):
     """終了対象以外の tmux pane が使っているディレクトリを返す。"""
-    result = tmux_run(
-        "list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}"
-    )
+    result = tmux_run("list-panes", "-a", "-F", "#{session_name}\t#{pane_current_path}")
     if result.returncode != 0:
         raise RuntimeError(
             result.stderr.strip() or "他のセッションの作業場所を確認できませんでした"
@@ -3186,7 +3563,7 @@ def build_sidebar(active):
             heading_keep = " f-keep" if later_keep else ""
             sidebar += (
                 f'<div class="deferred-heading{heading_keep}">'
-                f'<span>後回し</span><small>{later_count}件</small></div>'
+                f"<span>後回し</span><small>{later_count}件</small></div>"
             )
             later_started = True
         # 最初のプロンプトでセッションを識別し、最終メッセージは同じでなければ添える。
@@ -3203,17 +3580,17 @@ def build_sidebar(active):
             f'data-session="{html.escape(other["name"])}">'
             f'<a class="{"active" if other["name"] == active else ""}" '
             f'href="/terminal?session={urllib.parse.quote(other["name"])}">'
-            f'<strong>{tool_label(other["tool"])}'
+            f"<strong>{tool_label(other['tool'])}"
             f'<span class="dir">{html.escape(dir_label(other["cwd"]))}</span>'
             f'<span class="st st-{status_class}">{html.escape(status_text)}</span>'
-            f'{context_chip(other.get("context"))}</strong>'
-            f'{lines}</a>{position_button_html(other)}</div>'
+            f"{context_chip(other.get('context'))}</strong>"
+            f"{lines}</a>{position_button_html(other)}</div>"
         )
     sidebar += "</div>"
     # バージョンとAI使用量は一覧が短いときもサイドバー最下部へ置く。
     sidebar += (
         '<div id="sidebar-footer"><div id="app-meta">'
-        f'<span>Agent Deck v{html.escape(VERSION)}</span>'
+        f"<span>Agent Deck v{html.escape(VERSION)}</span>"
         '<button type="button" id="app-update" hidden>アップデート</button>'
         '<small id="update-status"></small></div>'
         '<div id="ai-usage" hidden></div></div>'
@@ -3236,7 +3613,10 @@ def usage_data():
     if not USAGE_COMMAND:
         return None
     with USAGE_LOCK:
-        if USAGE_CACHE["data"] is not None and time.time() - USAGE_CACHE["at"] < USAGE_TTL_SEC:
+        if (
+            USAGE_CACHE["data"] is not None
+            and time.time() - USAGE_CACHE["at"] < USAGE_TTL_SEC
+        ):
             return USAGE_CACHE["data"]
         try:
             result = subprocess.run(
@@ -3269,7 +3649,9 @@ def pasted_upload_image_paths(value):
         if not match:
             continue
         path = match.group(1)
-        if any(path.startswith(prefix + "/uploads/") for prefix in UPLOAD_PATH_PREFIXES):
+        if any(
+            path.startswith(prefix + "/uploads/") for prefix in UPLOAD_PATH_PREFIXES
+        ):
             paths.append(path)
     return paths
 
@@ -3289,7 +3671,9 @@ def wait_for_claude_image_paste(name, paths, before_screen):
             break
         raw_path_visible = any(path in screen for path in paths)
         saw_raw_path = saw_raw_path or raw_path_visible
-        image_numbers = [int(value) for value in re.findall(r"\[Image #(\d+)\]", screen)]
+        image_numbers = [
+            int(value) for value in re.findall(r"\[Image #(\d+)\]", screen)
+        ]
         converted = max(image_numbers, default=0) > before_max
         # 変換前のパス表示を一度観測できた場合と、変換が速くて観測できなかった
         # 場合（新しい Image トークンが現れた）の両方を扱う。
@@ -3433,12 +3817,15 @@ def save_uploaded_image(data, content_type, session_name):
     if media_type not in image_types:
         # OSやブラウザによっては、写真のD&D時にContent-Typeが空または
         # application/octet-streamになる。対応画像なら実データから形式を補う。
-        media_type = next((
-            candidate
-            for candidate, (_, signatures) in image_types.items()
-            if any(data.startswith(signature) for signature in signatures)
-            and (candidate != "image/webp" or data[8:12] == b"WEBP")
-        ), "")
+        media_type = next(
+            (
+                candidate
+                for candidate, (_, signatures) in image_types.items()
+                if any(data.startswith(signature) for signature in signatures)
+                and (candidate != "image/webp" or data[8:12] == b"WEBP")
+            ),
+            "",
+        )
         if not media_type:
             raise ValueError("PNG・JPEG・GIF・WebP画像のみ添付できます")
     if not data or len(data) > 15 * 1024 * 1024:
@@ -3509,8 +3896,16 @@ def launcher_session_name(output):
 
 
 def set_session_metadata(
-    name, summary="", session_id="", bypass=False, note="", pinned=False,
-    pull_request="", position="", model="", thread_history=(),
+    name,
+    summary="",
+    session_id="",
+    bypass=False,
+    note="",
+    pinned=False,
+    pull_request="",
+    position="",
+    model="",
+    thread_history=(),
 ):
     if not name:
         return
@@ -3520,7 +3915,10 @@ def set_session_metadata(
         tmux_run("set-option", "-t", name, "@launcher_session_id", session_id)
     if thread_history:
         tmux_run(
-            "set-option", "-t", name, "@launcher_thread_history",
+            "set-option",
+            "-t",
+            name,
+            "@launcher_thread_history",
             ",".join(thread_history[-THREAD_HISTORY_LIMIT:]),
         )
     if bypass:
@@ -3535,9 +3933,7 @@ def set_session_metadata(
     if position == "top" or (not position and pinned):
         tmux_run("set-option", "-t", name, "@launcher_pinned", "1")
     if pull_request:
-        tmux_run(
-            "set-option", "-t", name, "@launcher_pull_request", pull_request
-        )
+        tmux_run("set-option", "-t", name, "@launcher_pull_request", pull_request)
     if model and model != "default":
         tmux_run("set-option", "-t", name, "@launcher_restore_model", model)
 
@@ -3583,9 +3979,7 @@ def cw_get(endpoint):
         token = f.read().strip()
     if not token:
         raise RuntimeError("Chatwork token が空です")
-    req = urllib.request.Request(
-        CW_API + endpoint, headers={"X-ChatWorkToken": token}
-    )
+    req = urllib.request.Request(CW_API + endpoint, headers={"X-ChatWorkToken": token})
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -3623,8 +4017,10 @@ def refresh_chatwork(force=False):
         cached_messages = cache.get("messages", {})
         if old_updates:
             targets = [
-                room for room in rooms
-                if room_updated_at(room) > int(old_updates.get(str(room["room_id"]), -1))
+                room
+                for room in rooms
+                if room_updated_at(room)
+                > int(old_updates.get(str(room["room_id"]), -1))
             ]
         else:
             targets = rooms[:CW_INITIAL_ROOM_LIMIT]
@@ -3635,7 +4031,8 @@ def refresh_chatwork(force=False):
             try:
                 messages = cw_get(f"/rooms/{room_id}/messages?force=1")
                 cached_messages[room_id] = [
-                    message_item(message, room) for message in messages[-CW_MESSAGE_LIMIT:]
+                    message_item(message, room)
+                    for message in messages[-CW_MESSAGE_LIMIT:]
                 ]
             except Exception as exc:
                 errors.append(f"room {room_id}: {type(exc).__name__}")
@@ -6146,14 +6543,17 @@ def render(message="", view="new"):
     )
     inbox_prompt_button = (
         '<button class="cw-set" id="inbox-open" type="button">📥 受信箱から選ぶ</button>'
-        if CW_ENABLED else ""
+        if CW_ENABLED
+        else ""
     )
+
     def model_radios(tool):
         return "\n".join(
             f'<label><input type="radio" name="model-{tool}" value="{v}"'
-            f'{" checked" if v == "default" else ""}><span>{label}</span></label>'
+            f"{' checked' if v == 'default' else ''}><span>{label}</span></label>"
             for v, label in MODELS_BY_TOOL[tool]
         )
+
     resume_groups = {}
     for item in recent_conversations():
         resume_groups.setdefault(resume_group_dir(item["cwd"]), []).append(item)
@@ -6169,24 +6569,30 @@ def render(message="", view="new"):
                 f'<input type="hidden" name="resume" value="{item["id"]}">'
                 f'<button class="proj" type="submit">'
                 f'<span class="resume-summary">🕘 {html.escape(item["summary"])}</span>'
-                f'<small>{html.escape(short_path(item["cwd"]))} · {item["tool"]}'
-                f' · {item["label"]}</small>'
+                f"<small>{html.escape(short_path(item['cwd']))} · {item['tool']}"
+                f" · {item['label']}</small>"
                 f'<small class="resume-id">ID: {html.escape(item["id"])}</small>'
-                f'</button></form>'
+                f"</button></form>"
             )
         rendered_groups.append(
             f'<details class="resume-group"{" open" if index == 0 else ""}>'
-            f'<summary>📁 {html.escape(short_path(group_dir))} '
-            f'<small>({len(items)}件)</small></summary>'
+            f"<summary>📁 {html.escape(short_path(group_dir))} "
+            f"<small>({len(items)}件)</small></summary>"
             f'<div class="resume-grid">{"".join(forms)}</div></details>'
         )
-    resume_items = "\n".join(rendered_groups) \
+    resume_items = (
+        "\n".join(rendered_groups)
         or '<div class="cw-empty">再開できる会話が見つかりません</div>'
+    )
     return load_template(NEW_PAGE_TEMPLATE).format(
         favicon_version=urllib.parse.quote(VERSION),
         static_version=urllib.parse.quote(BOOT_ID),
-        message=message, buttons=buttons, options=options, resume_items=resume_items,
-        models_claude=model_radios("claude"), models_codex=model_radios("codex"),
+        message=message,
+        buttons=buttons,
+        options=options,
+        resume_items=resume_items,
+        models_claude=model_radios("claude"),
+        models_codex=model_radios("codex"),
         inbox_prompt_button=inbox_prompt_button,
         chatwork_panel=CHATWORK_PANEL if CW_ENABLED else "",
     )
@@ -6291,85 +6697,102 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path in {"/", "/sessions"}:
             # デフォルトはセッション一覧。PCは右ペインで選択か新規起動を促し、
             # SPは一覧のみを全画面表示する。0件でもランチャーへ自動遷移しない。
-            return self._page(LIST_PAGE.format(
-                favicon_version=urllib.parse.quote(VERSION),
-                sessions_sidebar=build_sidebar(None),
-                boot_json=json.dumps(BOOT_ID),
-                sidebar_css=SIDEBAR_CSS,
-                sidebar_js=SIDEBAR_JS,
-            ))
+            return self._page(
+                LIST_PAGE.format(
+                    favicon_version=urllib.parse.quote(VERSION),
+                    sessions_sidebar=build_sidebar(None),
+                    boot_json=json.dumps(BOOT_ID),
+                    sidebar_css=SIDEBAR_CSS,
+                    sidebar_js=SIDEBAR_JS,
+                )
+            )
         if parsed.path == "/terminal":
             terminal_qs = urllib.parse.parse_qs(parsed.query)
             session = terminal_qs.get("session", [""])[0]
             diff_open = "always" if terminal_qs.get("review") == ["1"] else DIFF_OPEN
             if not valid_session(session):
-                return self._page(render('<div class="msg err">❌ セッションが見つかりません</div>'), 404)
+                return self._page(
+                    render('<div class="msg err">❌ セッションが見つかりません</div>'),
+                    404,
+                )
             item = next(item for item in managed_sessions() if item["name"] == session)
             model = model_label(item.get("model", ""), item["tool"])
             choices = switchable_models(item["tool"])
             if choices:
                 badge = (
                     '<button type="button" class="model" id="model">'
-                    f'{html.escape(model) or "モデル"}</button>'
+                    f"{html.escape(model) or 'モデル'}</button>"
                 )
             else:
-                badge = f'<span class="model">{html.escape(model)}</span>' if model else ""
-            return self._page(TERMINAL_PAGE.format(
-                favicon_version=urllib.parse.quote(VERSION),
-                title=html.escape(f'{item["tool"]} - {item["name"]}'),
-                tool_html=tool_label(item["tool"]),
-                cwd=html.escape(short_path(item["cwd"])), cwd_full=html.escape(item["cwd"]),
-                model_badge=badge,
-                context_badge=context_badge_html(item.get("context")),
-                model_choices="".join(
-                    f'<button type="button" class="model-choice" data-model="{html.escape(value)}">'
-                    f'{html.escape(label)}</button>'
-                    for value, label in MODELS_BY_TOOL.get(item["tool"], [])
-                    if value in choices
-                ),
-                session_json=json.dumps(session), boot_json=json.dumps(BOOT_ID),
-                diff_open_json=json.dumps(diff_open),
-                pr_selector_json=json.dumps(item.get("pull_request", "")),
-                upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
-                note_json=json.dumps(item.get("note", "")),
-                pinned_json=json.dumps(bool(item.get("pinned"))),
-                pin_button="",
-                note_button=(
-                    '<button type="button" class="note-button" id="note" title="'
-                    f'{html.escape(item.get("note") or "メモを追加")}">'
-                    '<span class="label">メモ</span><span class="icon">📝</span>'
-                    '<span class="menu-label">📝 メモを編集</span></button>'
-                ),
-                sessions_sidebar=build_sidebar(session),
-                sidebar_css=SIDEBAR_CSS, sidebar_js=SIDEBAR_JS,
-                restart_button=(
-                    (
-                        '<button type="button" data-restart="keep">'
-                        '<span class="label">再起動</span><span class="icon">↻</span>'
-                        '<span class="menu-label">↻ セッションを再起動</span></button>'
-                        if item["session_id"] else ""
-                    )
-                    + (
-                        f'<button type="button" id="handoff" data-target="'
-                        f'{"Codex" if item["tool"] == "claude" else "Claude"}">'
-                        f'<span class="label">→ {"Codex" if item["tool"] == "claude" else "Claude"}</span>'
-                        '<span class="icon">⇄</span>'
-                        f'<span class="menu-label">⇄ {"Codex" if item["tool"] == "claude" else "Claude"}'
-                        'へ切り替え</span></button>'
-                        if item["tool"] in TOOLS else ""
-                    )
-                    + (
-                        '<button type="button" class="warn" data-restart="bypass">'
-                        '<span class="label">⚠️ バイパス</span><span class="icon">⚠️</span>'
-                        '<span class="menu-label">⚠️ バイパスで再起動</span></button>'
-                        if item["session_id"] else ""
-                    )
-                ),
-                body_class=(
-                    ' class="review-closed"' if diff_open != "always" else ' class="review-open"'
-                ),
-                artifacts_html=artifact_links(item.get("artifacts", [])),
-            ))
+                badge = (
+                    f'<span class="model">{html.escape(model)}</span>' if model else ""
+                )
+            return self._page(
+                TERMINAL_PAGE.format(
+                    favicon_version=urllib.parse.quote(VERSION),
+                    title=html.escape(f"{item['tool']} - {item['name']}"),
+                    tool_html=tool_label(item["tool"]),
+                    cwd=html.escape(short_path(item["cwd"])),
+                    cwd_full=html.escape(item["cwd"]),
+                    model_badge=badge,
+                    context_badge=context_badge_html(item.get("context")),
+                    model_choices="".join(
+                        f'<button type="button" class="model-choice" data-model="{html.escape(value)}">'
+                        f"{html.escape(label)}</button>"
+                        for value, label in MODELS_BY_TOOL.get(item["tool"], [])
+                        if value in choices
+                    ),
+                    session_json=json.dumps(session),
+                    boot_json=json.dumps(BOOT_ID),
+                    diff_open_json=json.dumps(diff_open),
+                    pr_selector_json=json.dumps(item.get("pull_request", "")),
+                    upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
+                    note_json=json.dumps(item.get("note", "")),
+                    pinned_json=json.dumps(bool(item.get("pinned"))),
+                    pin_button="",
+                    note_button=(
+                        '<button type="button" class="note-button" id="note" title="'
+                        f'{html.escape(item.get("note") or "メモを追加")}">'
+                        '<span class="label">メモ</span><span class="icon">📝</span>'
+                        '<span class="menu-label">📝 メモを編集</span></button>'
+                    ),
+                    sessions_sidebar=build_sidebar(session),
+                    sidebar_css=SIDEBAR_CSS,
+                    sidebar_js=SIDEBAR_JS,
+                    restart_button=(
+                        (
+                            '<button type="button" data-restart="keep">'
+                            '<span class="label">再起動</span><span class="icon">↻</span>'
+                            '<span class="menu-label">↻ セッションを再起動</span></button>'
+                            if item["session_id"]
+                            else ""
+                        )
+                        + (
+                            f'<button type="button" id="handoff" data-target="'
+                            f'{"Codex" if item["tool"] == "claude" else "Claude"}">'
+                            f'<span class="label">→ {"Codex" if item["tool"] == "claude" else "Claude"}</span>'
+                            '<span class="icon">⇄</span>'
+                            f'<span class="menu-label">⇄ {"Codex" if item["tool"] == "claude" else "Claude"}'
+                            "へ切り替え</span></button>"
+                            if item["tool"] in TOOLS
+                            else ""
+                        )
+                        + (
+                            '<button type="button" class="warn" data-restart="bypass">'
+                            '<span class="label">⚠️ バイパス</span><span class="icon">⚠️</span>'
+                            '<span class="menu-label">⚠️ バイパスで再起動</span></button>'
+                            if item["session_id"]
+                            else ""
+                        )
+                    ),
+                    body_class=(
+                        ' class="review-closed"'
+                        if diff_open != "always"
+                        else ' class="review-open"'
+                    ),
+                    artifacts_html=artifact_links(item.get("artifacts", [])),
+                )
+            )
         if parsed.path == "/api/usage":
             return self._json(usage_data() or {"providers": []})
         if parsed.path == "/api/review-requests":
@@ -6378,7 +6801,9 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 return self._json({"error": "gh CLIが見つかりません"}, 503)
             except subprocess.TimeoutExpired:
-                return self._json({"error": "GitHubからの取得がタイムアウトしました"}, 504)
+                return self._json(
+                    {"error": "GitHubからの取得がタイムアウトしました"}, 504
+                )
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
         if parsed.path == "/api/pull-request":
@@ -6392,7 +6817,9 @@ class Handler(BaseHTTPRequestHandler):
             except FileNotFoundError:
                 return self._json({"error": "gh CLIが見つかりません"}, 503)
             except subprocess.TimeoutExpired:
-                return self._json({"error": "GitHubからの取得がタイムアウトしました"}, 504)
+                return self._json(
+                    {"error": "GitHubからの取得がタイムアウトしました"}, 504
+                )
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
         if parsed.path == "/api/version":
@@ -6404,22 +6831,27 @@ class Handler(BaseHTTPRequestHandler):
             items = []
             for entry in managed_sessions():
                 status_text, status_class = sidebar_status(entry)
-                items.append({
-                    "name": entry["name"], "tool": entry["tool"],
-                    "tool_icon": (
-                        f'/tool-icon/{entry["tool"]}.png'
-                        if entry["tool"] in TOOL_ICONS else ""
-                    ),
-                    "dir": dir_label(entry["cwd"]),
-                    "status": status_text, "status_class": status_class,
-                    "context": entry.get("context"),
-                    "summary": entry["summary"],
-                    "last_message": entry["last_message"],
-                    "note": entry.get("note", ""),
-                    "pinned": bool(entry.get("pinned")),
-                    "position": session_position(entry),
-                    "artifacts": entry.get("artifacts", []),
-                })
+                items.append(
+                    {
+                        "name": entry["name"],
+                        "tool": entry["tool"],
+                        "tool_icon": (
+                            f"/tool-icon/{entry['tool']}.png"
+                            if entry["tool"] in TOOL_ICONS
+                            else ""
+                        ),
+                        "dir": dir_label(entry["cwd"]),
+                        "status": status_text,
+                        "status_class": status_class,
+                        "context": entry.get("context"),
+                        "summary": entry["summary"],
+                        "last_message": entry["last_message"],
+                        "note": entry.get("note", ""),
+                        "pinned": bool(entry.get("pinned")),
+                        "position": session_position(entry),
+                        "artifacts": entry.get("artifacts", []),
+                    }
+                )
             return self._json({"items": items, "boot": BOOT_ID})
         diff_match = re.fullmatch(
             r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/diff", parsed.path
@@ -6427,7 +6859,8 @@ class Handler(BaseHTTPRequestHandler):
         if diff_match:
             session = diff_match.group(1)
             item = next(
-                (entry for entry in managed_sessions() if entry["name"] == session), None
+                (entry for entry in managed_sessions() if entry["name"] == session),
+                None,
             )
             cwd = item.get("cwd", "") if item else ""
             if not cwd:
@@ -6455,7 +6888,8 @@ class Handler(BaseHTTPRequestHandler):
                     # 無限スピナー問題の追跡用。通常は数秒で返るので遅い時だけ残す
                     print(
                         f"[diff] {session} took {elapsed:.1f}s",
-                        file=sys.stderr, flush=True,
+                        file=sys.stderr,
+                        flush=True,
                     )
         if parsed.path.startswith("/uploads/"):
             return self._upload_file(parsed.path)
@@ -6465,7 +6899,8 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             session, view = match.groups()
             item = next(
-                (entry for entry in managed_sessions() if entry["name"] == session), None
+                (entry for entry in managed_sessions() if entry["name"] == session),
+                None,
             )
             if not item:
                 return self._json({"error": "セッションが見つかりません"}, 404)
@@ -6475,47 +6910,62 @@ class Handler(BaseHTTPRequestHandler):
                         # 起動直後はJSONLがまだ無いが、MCP承認や信頼確認などの
                         # 起動時ダイアログはこの段階で出る。画面から拾った選択肢
                         # だけでも返し、チャット画面から回答できるようにする。
-                        return self._json({
-                            "messages": [],
-                            "queued": [],
+                        return self._json(
+                            {
+                                "messages": [],
+                                "queued": [],
+                                "question": pending_question(session, item["tool"]),
+                                "auth": pending_shell_auth(session, item["tool"]),
+                                "boot": BOOT_ID,
+                                "model": model_label(
+                                    item.get("model", ""), item["tool"]
+                                ),
+                                "context": item.get("context"),
+                                "activity": "",
+                                "output": "",
+                                "artifacts": [],
+                            }
+                        )
+                    history_paths = item.get("history_paths") or ()
+                    return self._json(
+                        {
+                            "messages": session_messages(
+                                item["log_path"], item["tool"], history=history_paths
+                            ),
+                            "queued": queued_inputs(item["log_path"]),
                             "question": pending_question(session, item["tool"]),
                             "auth": pending_shell_auth(session, item["tool"]),
                             "boot": BOOT_ID,
                             "model": model_label(item.get("model", ""), item["tool"]),
                             "context": item.get("context"),
-                            "activity": "",
-                            "output": "",
-                            "artifacts": [],
-                        })
-                    history_paths = item.get("history_paths") or ()
-                    return self._json({
-                        "messages": session_messages(
-                            item["log_path"], item["tool"], history=history_paths
-                        ),
-                        "queued": queued_inputs(item["log_path"]),
-                        "question": pending_question(session, item["tool"]),
-                        "auth": pending_shell_auth(session, item["tool"]),
-                        "boot": BOOT_ID,
-                        "model": model_label(item.get("model", ""), item["tool"]),
-                        "context": item.get("context"),
-                        "activity": session_activity(session, item["log_path"], item["tool"]),
-                        "output": session_transcript(
-                            item["log_path"], item["tool"], history_paths
-                        ),
-                        "artifacts": session_artifacts(item["log_path"], item["tool"]),
-                    })
+                            "activity": session_activity(
+                                session, item["log_path"], item["tool"]
+                            ),
+                            "output": session_transcript(
+                                item["log_path"], item["tool"], history_paths
+                            ),
+                            "artifacts": session_artifacts(
+                                item["log_path"], item["tool"]
+                            ),
+                        }
+                    )
                 return self._json({"output": capture_session(session)})
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
-        if parsed.path == "/api/mentions" or parsed.path == "/api/rooms" \
-                or re.fullmatch(r"/api/rooms/(\d+)/messages", parsed.path):
+        if (
+            parsed.path == "/api/mentions"
+            or parsed.path == "/api/rooms"
+            or re.fullmatch(r"/api/rooms/(\d+)/messages", parsed.path)
+        ):
             if not CW_ENABLED:
                 return self._json({"error": "Chatwork連携が設定されていません"}, 404)
         if parsed.path == "/api/mentions":
             try:
                 force = urllib.parse.parse_qs(parsed.query).get("refresh") == ["1"]
                 cache = refresh_chatwork(force=force)
-                return self._json({"items": recent_mentions(cache), "errors": cache.get("errors", [])})
+                return self._json(
+                    {"items": recent_mentions(cache), "errors": cache.get("errors", [])}
+                )
             except Exception as exc:
                 return self._chatwork_error(exc)
         if parsed.path == "/api/rooms":
@@ -6523,8 +6973,11 @@ class Handler(BaseHTTPRequestHandler):
                 force = urllib.parse.parse_qs(parsed.query).get("refresh") == ["1"]
                 cache = refresh_chatwork(force=force)
                 rooms = [
-                    {"room_id": room.get("room_id"), "name": room.get("name", ""),
-                     "last_update_time": room_updated_at(room)}
+                    {
+                        "room_id": room.get("room_id"),
+                        "name": room.get("name", ""),
+                        "last_update_time": room_updated_at(room),
+                    }
                     for room in cache.get("rooms", [])
                 ]
                 return self._json({"items": rooms})
@@ -6537,11 +6990,18 @@ class Handler(BaseHTTPRequestHandler):
                 with CW_LOCK:
                     cache = load_cw_cache()
                     room = next(
-                        (r for r in cache.get("rooms", []) if str(r.get("room_id")) == room_id),
+                        (
+                            r
+                            for r in cache.get("rooms", [])
+                            if str(r.get("room_id")) == room_id
+                        ),
                         {"room_id": int(room_id), "name": ""},
                     )
                     messages = cw_get(f"/rooms/{room_id}/messages?force=1")
-                    items = [message_item(message, room) for message in messages[-CW_MESSAGE_LIMIT:]]
+                    items = [
+                        message_item(message, room)
+                        for message in messages[-CW_MESSAGE_LIMIT:]
+                    ]
                     cache.setdefault("messages", {})[room_id] = items
                     save_cw_cache(cache)
                 return self._json({"items": list(reversed(items))})
@@ -6612,7 +7072,9 @@ class Handler(BaseHTTPRequestHandler):
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
             except OSError as exc:
-                return self._json({"error": f"ファイルを保存できませんでした: {exc}"}, 500)
+                return self._json(
+                    {"error": f"ファイルを保存できませんでした: {exc}"}, 500
+                )
         try:
             qs = urllib.parse.parse_qs(body.decode("utf-8"))
         except UnicodeDecodeError:
@@ -6644,13 +7106,17 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "input":
                     value = qs.get("text", [""])[0]
                     if len(value) > 20000:
-                        return self._json({"error": "入力が長すぎます（20000文字まで）"}, 400)
+                        return self._json(
+                            {"error": "入力が長すぎます（20000文字まで）"}, 400
+                        )
                     message = send_session_text(
                         session, value, qs.get("enter", ["1"])[0] == "1"
                     )
                     return self._json({"ok": True, "message": message})
                 elif action == "shell":
-                    item = next(item for item in managed_sessions() if item["name"] == session)
+                    item = next(
+                        item for item in managed_sessions() if item["name"] == session
+                    )
                     shell_session = launch_shell_command(
                         item["cwd"], qs.get("command", [""])[0]
                     )
@@ -6658,33 +7124,45 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "note":
                     value = qs.get("note", [""])[0].strip()
                     if len(value) > 1000:
-                        return self._json({"error": "メモが長すぎます（1000文字まで）"}, 400)
+                        return self._json(
+                            {"error": "メモが長すぎます（1000文字まで）"}, 400
+                        )
                     # 空文字も明示的に保存し、既存メモを削除できるようにする。
                     result = (
                         tmux_run("set-option", "-t", session, "@launcher_note", value)
-                        if value else tmux_run("set-option", "-u", "-t", session, "@launcher_note")
+                        if value
+                        else tmux_run(
+                            "set-option", "-u", "-t", session, "@launcher_note"
+                        )
                     )
                     if result.returncode != 0:
-                        raise RuntimeError(result.stderr.strip() or "メモを保存できませんでした")
+                        raise RuntimeError(
+                            result.stderr.strip() or "メモを保存できませんでした"
+                        )
                     update_registered_session(session, note=value)
                     invalidate_session_cache()
                     return self._json({"ok": True, "note": value})
                 elif action == "pin":
                     pinned = qs.get("pinned", ["0"])[0] == "1"
                     position = "top" if pinned else "normal"
-                    result = (
-                        tmux_run("set-option", "-t", session, "@launcher_position", position)
+                    result = tmux_run(
+                        "set-option", "-t", session, "@launcher_position", position
                     )
                     if result.returncode != 0:
-                        raise RuntimeError(result.stderr.strip() or "ピン留めを変更できませんでした")
+                        raise RuntimeError(
+                            result.stderr.strip() or "ピン留めを変更できませんでした"
+                        )
                     legacy = (
                         tmux_run("set-option", "-t", session, "@launcher_pinned", "1")
-                        if pinned else tmux_run(
+                        if pinned
+                        else tmux_run(
                             "set-option", "-u", "-t", session, "@launcher_pinned"
                         )
                     )
                     if legacy.returncode != 0:
-                        raise RuntimeError(legacy.stderr.strip() or "ピン留めを変更できませんでした")
+                        raise RuntimeError(
+                            legacy.stderr.strip() or "ピン留めを変更できませんでした"
+                        )
                     update_registered_session(session, position=position)
                     invalidate_session_cache()
                     return self._json({"ok": True, "pinned": pinned})
@@ -6696,15 +7174,20 @@ class Handler(BaseHTTPRequestHandler):
                         "set-option", "-t", session, "@launcher_position", position
                     )
                     if result.returncode != 0:
-                        raise RuntimeError(result.stderr.strip() or "並び位置を変更できませんでした")
+                        raise RuntimeError(
+                            result.stderr.strip() or "並び位置を変更できませんでした"
+                        )
                     legacy = (
                         tmux_run("set-option", "-t", session, "@launcher_pinned", "1")
-                        if position == "top" else tmux_run(
+                        if position == "top"
+                        else tmux_run(
                             "set-option", "-u", "-t", session, "@launcher_pinned"
                         )
                     )
                     if legacy.returncode != 0:
-                        raise RuntimeError(legacy.stderr.strip() or "並び位置を変更できませんでした")
+                        raise RuntimeError(
+                            legacy.stderr.strip() or "並び位置を変更できませんでした"
+                        )
                     update_registered_session(session, position=position)
                     invalidate_session_cache()
                     return self._json({"ok": True, "position": position})
@@ -6714,11 +7197,18 @@ class Handler(BaseHTTPRequestHandler):
                         value = normalize_pr_selector(value)
                     result = (
                         tmux_run(
-                            "set-option", "-t", session,
-                            "@launcher_pull_request", value,
+                            "set-option",
+                            "-t",
+                            session,
+                            "@launcher_pull_request",
+                            value,
                         )
-                        if value else tmux_run(
-                            "set-option", "-u", "-t", session,
+                        if value
+                        else tmux_run(
+                            "set-option",
+                            "-u",
+                            "-t",
+                            session,
                             "@launcher_pull_request",
                         )
                     )
@@ -6731,33 +7221,48 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"ok": True, "pull_request": value})
                 elif action == "model":
                     value = qs.get("model", [""])[0]
-                    item = next(item for item in managed_sessions() if item["name"] == session)
+                    item = next(
+                        item for item in managed_sessions() if item["name"] == session
+                    )
                     if value not in switchable_models(item["tool"]):
                         return self._json({"error": "指定できないモデルです"}, 400)
                     if not item["session_id"]:
-                        return self._json({"error": "resumeできる会話IDが見つかりません"}, 400)
+                        return self._json(
+                            {"error": "resumeできる会話IDが見つかりません"}, 400
+                        )
                     # /model <名前> の打ち込みはグローバルデフォルトまで書き換えてしまう
                     # （saved as your default for new sessions）ため、--model 付きの
                     # resume 再起動でセッション限定の切り替えにする。
                     new_session = self._restart_session(
-                        session, item, bool(item.get("bypass")), ["--model", value],
+                        session,
+                        item,
+                        bool(item.get("bypass")),
+                        ["--model", value],
                     )
                     # ログに新しいモデルが現れるのは次の応答時なので、それまでの
                     # 表示用に送信時刻とセットで覚えておく。
                     tmux_run(
-                        "set-option", "-t", new_session, "@launcher_model",
+                        "set-option",
+                        "-t",
+                        new_session,
+                        "@launcher_model",
                         f"{value} {time.time():.3f}",
                     )
                     tmux_run(
-                        "set-option", "-t", new_session,
-                        "@launcher_restore_model", value,
+                        "set-option",
+                        "-t",
+                        new_session,
+                        "@launcher_restore_model",
+                        value,
                     )
                     update_registered_session(new_session, model=value)
-                    return self._json({
-                        "ok": True,
-                        "model": model_label(value, item["tool"]),
-                        "session": new_session,
-                    })
+                    return self._json(
+                        {
+                            "ok": True,
+                            "model": model_label(value, item["tool"]),
+                            "session": new_session,
+                        }
+                    )
                 elif action == "answer":
                     text = qs.get("text", [""])[0].strip()
                     if text:
@@ -6765,7 +7270,12 @@ class Handler(BaseHTTPRequestHandler):
                             return self._json(
                                 {"error": "入力が長すぎます（20000文字まで）"}, 400
                             )
-                        if parse_custom_answer_screen(capture_session(session).splitlines()) is None:
+                        if (
+                            parse_custom_answer_screen(
+                                capture_session(session).splitlines()
+                            )
+                            is None
+                        ):
                             return self._json(
                                 {"error": "自由入力待ちではありません"}, 409
                             )
@@ -6781,7 +7291,9 @@ class Handler(BaseHTTPRequestHandler):
                     # プロンプトが残っていたら追送する。
                     result = tmux_run("send-keys", "-t", session, number)
                     if result.returncode != 0:
-                        raise RuntimeError(result.stderr.strip() or "キーを送信できませんでした")
+                        raise RuntimeError(
+                            result.stderr.strip() or "キーを送信できませんでした"
+                        )
                     time.sleep(0.5)
                     screen = capture_session(session)
                     if (
@@ -6794,26 +7306,45 @@ class Handler(BaseHTTPRequestHandler):
                         tmux_run("send-keys", "-t", session, "Enter")
                 elif action == "key":
                     key = qs.get("key", [""])[0]
-                    if key not in {"Enter", "Escape", "C-c", "Up", "Down", "Left", "Right"}:
+                    if key not in {
+                        "Enter",
+                        "Escape",
+                        "C-c",
+                        "Up",
+                        "Down",
+                        "Left",
+                        "Right",
+                    }:
                         return self._json({"error": "許可されていないキーです"}, 400)
                     result = tmux_run("send-keys", "-t", session, key)
                     if result.returncode != 0:
-                        raise RuntimeError(result.stderr.strip() or "キーを送信できませんでした")
+                        raise RuntimeError(
+                            result.stderr.strip() or "キーを送信できませんでした"
+                        )
                 elif action == "kill":
                     items = managed_sessions()
                     item = next(item for item in items if item["name"] == session)
                     worktree_removed = terminate_session(session, item["cwd"])
-                    return self._json({
-                        "ok": True, "worktree_removed": worktree_removed,
-                    })
+                    return self._json(
+                        {
+                            "ok": True,
+                            "worktree_removed": worktree_removed,
+                        }
+                    )
                 elif action == "handoff":
-                    item = next(item for item in managed_sessions() if item["name"] == session)
+                    item = next(
+                        item for item in managed_sessions() if item["name"] == session
+                    )
                     new_session = self._handoff_session(session, item)
                     return self._json({"ok": True, "session": new_session})
                 else:
-                    item = next(item for item in managed_sessions() if item["name"] == session)
+                    item = next(
+                        item for item in managed_sessions() if item["name"] == session
+                    )
                     if not item["session_id"] or item["tool"] not in TOOLS:
-                        return self._json({"error": "resumeできる会話IDが見つかりません"}, 400)
+                        return self._json(
+                            {"error": "resumeできる会話IDが見つかりません"}, 400
+                        )
                     # 指定がなければ元の権限モードのまま resume する
                     bypass = item.get("bypass") or qs.get("bypass", ["0"])[0] == "1"
                     new_session = self._restart_session(session, item, bypass)
@@ -6835,13 +7366,30 @@ class Handler(BaseHTTPRequestHandler):
 
     def _upload_file(self, url_path):
         """アップロード済みファイルをサムネイル/プレビュー用に配信する。"""
-        inline_types = {".png": "image/png", ".jpg": "image/jpeg",
-                        ".gif": "image/gif", ".webp": "image/webp",
-                        ".pdf": "application/pdf"}
+        inline_types = {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".gif": "image/gif",
+            ".webp": "image/webp",
+            ".pdf": "application/pdf",
+        }
         # テキスト系はスクリプト実行され得ない text/plain 固定でインライン表示する
-        text_types = {".json", ".txt", ".md", ".log", ".csv", ".tsv", ".xml",
-                      ".yaml", ".yml", ".toml", ".ini", ".diff", ".patch"}
-        rel = urllib.parse.unquote(url_path[len("/uploads/"):])
+        text_types = {
+            ".json",
+            ".txt",
+            ".md",
+            ".log",
+            ".csv",
+            ".tsv",
+            ".xml",
+            ".yaml",
+            ".yml",
+            ".toml",
+            ".ini",
+            ".diff",
+            ".patch",
+        }
+        rel = urllib.parse.unquote(url_path[len("/uploads/") :])
         path = os.path.realpath(os.path.join(UPLOAD_DIR, rel))
         if not path.startswith(UPLOAD_DIR + "/") or not os.path.isfile(path):
             return self._json({"error": "ファイルが見つかりません"}, 404)
@@ -6863,8 +7411,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         if attachment:
             quoted = urllib.parse.quote(os.path.basename(path))
-            self.send_header("Content-Disposition",
-                             f"attachment; filename*=UTF-8''{quoted}")
+            self.send_header(
+                "Content-Disposition", f"attachment; filename*=UTF-8''{quoted}"
+            )
         self.send_header("Cache-Control", "private, max-age=86400")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -6896,8 +7445,11 @@ class Handler(BaseHTTPRequestHandler):
         if result.returncode != 0:
             raise RuntimeError(result.stderr.strip() or "終了できませんでした")
         cmd = [*TOOLS[item["tool"]], item["cwd"]]
-        cmd += (["--resume", item["session_id"]] if item["tool"] == "claude"
-                else ["resume", item["session_id"]])
+        cmd += (
+            ["--resume", item["session_id"]]
+            if item["tool"] == "claude"
+            else ["resume", item["session_id"]]
+        )
         cmd += list(extra_args)
         restore_model = argv_model(extra_args) or item.get("restore_model", "")
         if restore_model and restore_model != "default" and not argv_model(extra_args):
@@ -6905,7 +7457,10 @@ class Handler(BaseHTTPRequestHandler):
         if bypass:
             cmd += BYPASS_FLAGS[item["tool"]]
         resumed = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=20,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=20,
             env={**os.environ},
         )
         if resumed.returncode != 0:
@@ -6915,16 +7470,26 @@ class Handler(BaseHTTPRequestHandler):
         if not new_session:
             raise RuntimeError("再起動したセッション名を取得できませんでした")
         set_session_metadata(
-            new_session, item["summary"], item["session_id"], bypass, item.get("note", ""),
-            bool(item.get("pinned")), item.get("pull_request", ""),
-            session_position(item), restore_model,
+            new_session,
+            item["summary"],
+            item["session_id"],
+            bypass,
+            item.get("note", ""),
+            bool(item.get("pinned")),
+            item.get("pull_request", ""),
+            session_position(item),
+            restore_model,
             thread_history=item.get("thread_history") or (),
         )
         forget_registered_session(session)
-        upsert_registered_session({
-            **item, "name": new_session, "bypass": bypass,
-            "restore_model": restore_model,
-        })
+        upsert_registered_session(
+            {
+                **item,
+                "name": new_session,
+                "bypass": bypass,
+                "restore_model": restore_model,
+            }
+        )
         invalidate_session_cache()
         return new_session
 
@@ -6944,7 +7509,10 @@ class Handler(BaseHTTPRequestHandler):
         cmd.append(prompt)
         started_at = time.time()
         launched = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=20,
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=20,
             env={**os.environ},
         )
         if launched.returncode != 0:
@@ -6955,46 +7523,84 @@ class Handler(BaseHTTPRequestHandler):
             raise RuntimeError("引き継ぎ先のセッション名を取得できませんでした")
         session_id = wait_for_new_session_id(target, item["cwd"], started_at)
         set_session_metadata(
-            new_session, item.get("summary") or prompt, session_id,
-            bool(item.get("bypass")), item.get("note", ""), bool(item.get("pinned")),
-            item.get("pull_request", ""), session_position(item),
+            new_session,
+            item.get("summary") or prompt,
+            session_id,
+            bool(item.get("bypass")),
+            item.get("note", ""),
+            bool(item.get("pinned")),
+            item.get("pull_request", ""),
+            session_position(item),
         )
         result = tmux_run("kill-session", "-t", session)
         if result.returncode != 0:
             tmux_run("kill-session", "-t", new_session)
-            raise RuntimeError(result.stderr.strip() or "引き継ぎ元を終了できませんでした")
+            raise RuntimeError(
+                result.stderr.strip() or "引き継ぎ元を終了できませんでした"
+            )
         forget_registered_session(session)
-        upsert_registered_session({
-            **item, "name": new_session, "tool": target,
-            "session_id": session_id, "summary": item.get("summary") or prompt,
-            "restore_model": "", "model": "",
-        })
+        upsert_registered_session(
+            {
+                **item,
+                "name": new_session,
+                "tool": target,
+                "session_id": session_id,
+                "summary": item.get("summary") or prompt,
+                "restore_model": "",
+                "model": "",
+            }
+        )
         invalidate_session_cache()
         return new_session
 
-    def _launch(self, raw_dir: str, model: str = "default", tool: str = "claude",
-                prompt: str = "", bypass: str = "0",
-                resume: str = "", pull_request: str = ""):
+    def _launch(
+        self,
+        raw_dir: str,
+        model: str = "default",
+        tool: str = "claude",
+        prompt: str = "",
+        bypass: str = "0",
+        resume: str = "",
+        pull_request: str = "",
+    ):
         path, err = validate_dir(raw_dir)
         if err:
-            return self._page(render(f'<div class="msg err">❌ {html.escape(err)}</div>', "new"))
+            return self._page(
+                render(f'<div class="msg err">❌ {html.escape(err)}</div>', "new")
+            )
         if tool not in TOOLS:
-            return self._page(render('<div class="msg err">❌ 不正なツール指定です</div>', "new"))
+            return self._page(
+                render('<div class="msg err">❌ 不正なツール指定です</div>', "new")
+            )
         if model not in {v for v, _ in MODELS_BY_TOOL[tool]}:
-            return self._page(render('<div class="msg err">❌ 不正なモデル指定です</div>', "new"))
+            return self._page(
+                render('<div class="msg err">❌ 不正なモデル指定です</div>', "new")
+            )
         if bypass not in {"0", "1"}:
-            return self._page(render('<div class="msg err">❌ 不正な権限指定です</div>', "new"))
+            return self._page(
+                render('<div class="msg err">❌ 不正な権限指定です</div>', "new")
+            )
         resume_log = ""
         if resume:
             if not re.fullmatch(r"[0-9a-f-]{36}", resume):
-                return self._page(render('<div class="msg err">❌ 再開する会話の指定が不正です</div>', "new"))
+                return self._page(
+                    render(
+                        '<div class="msg err">❌ 再開する会話の指定が不正です</div>',
+                        "new",
+                    )
+                )
             resume_log = conversation_log_path(tool, path, resume)
             if not resume_log:
                 # 会話途中で cwd を移動すると、一覧が送った cwd と
                 # JSONLの保存先が食い違うことがある。IDで横断検索する。
                 resume_log = find_log_by_id(tool, resume)
             if not resume_log:
-                return self._page(render('<div class="msg err">❌ 再開する会話が見つかりません</div>', "new"))
+                return self._page(
+                    render(
+                        '<div class="msg err">❌ 再開する会話が見つかりません</div>',
+                        "new",
+                    )
+                )
             if tool == "claude":
                 # ログが保持する最新 cwd で再開する。削除済みworktree
                 # など、使えない場所には暗黙に起動しない。
@@ -7002,15 +7608,20 @@ class Handler(BaseHTTPRequestHandler):
                 if resume_cwd and os.path.realpath(resume_cwd) != path:
                     path, err = validate_dir(resume_cwd)
                     if err:
-                        return self._page(render(
-                            f'<div class="msg err">❌ 会話の作業ディレクトリを使用できません: '
-                            f'{html.escape(err)}</div>', "new"
-                        ))
+                        return self._page(
+                            render(
+                                f'<div class="msg err">❌ 会話の作業ディレクトリを使用できません: '
+                                f"{html.escape(err)}</div>",
+                                "new",
+                            )
+                        )
         skip_permissions = bypass == "1"
         try:
             pull_request = normalize_pr_selector(pull_request)
         except ValueError as exc:
-            return self._page(render(f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"))
+            return self._page(
+                render(f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new")
+            )
         if pull_request:
             # レビュー起動では対象PRを別途書き出すため、通常起動用の入力欄は引き継がない。
             prompt = ""
@@ -7019,12 +7630,19 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 path = pull_request_worktree(pull_request_target(pull_request))
             except (LookupError, RuntimeError, ValueError) as exc:
-                return self._page(render(
-                    f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"
-                ))
+                return self._page(
+                    render(
+                        f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"
+                    )
+                )
         prompt = prompt.strip()
         if len(prompt) > 8000:
-            return self._page(render('<div class="msg err">❌ プロンプトが長すぎます（8000文字まで）</div>', "new"))
+            return self._page(
+                render(
+                    '<div class="msg err">❌ プロンプトが長すぎます（8000文字まで）</div>',
+                    "new",
+                )
+            )
         cmd = [*TOOLS[tool], path]
         if resume:
             cmd += ["--resume", resume] if tool == "claude" else ["resume", resume]
@@ -7037,39 +7655,59 @@ class Handler(BaseHTTPRequestHandler):
         started_at = time.time()
         try:
             r = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=20,
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=20,
                 env={**os.environ},
             )
         except subprocess.TimeoutExpired:
-            return self._page(render('<div class="msg err">❌ タイムアウトしました</div>', "new"))
+            return self._page(
+                render('<div class="msg err">❌ タイムアウトしました</div>', "new")
+            )
         if r.returncode == 0:
             session_name = launcher_session_name(r.stdout)
             if resume:
                 # 再開時は会話IDが分かっているので探索せず、元の要約を引き継ぐ
                 summary = log_meta(resume_log, tool).get("summary", "")
                 set_session_metadata(
-                    session_name, summary, resume, skip_permissions,
-                    pull_request=pull_request, model=model,
+                    session_name,
+                    summary,
+                    resume,
+                    skip_permissions,
+                    pull_request=pull_request,
+                    model=model,
                 )
                 session_id = resume
             else:
                 session_id = wait_for_new_session_id(tool, path, started_at)
                 set_session_metadata(
-                    session_name, prompt, session_id, skip_permissions,
-                    pull_request=pull_request, model=model,
+                    session_name,
+                    prompt,
+                    session_id,
+                    skip_permissions,
+                    pull_request=pull_request,
+                    model=model,
                 )
             if session_name:
-                upsert_registered_session({
-                    "name": session_name, "tool": tool, "cwd": path,
-                    "session_id": session_id,
-                    "summary": summary if resume else prompt,
-                    "note": "", "position": "normal",
-                    "pull_request": pull_request, "bypass": skip_permissions,
-                    "restore_model": model,
-                })
+                upsert_registered_session(
+                    {
+                        "name": session_name,
+                        "tool": tool,
+                        "cwd": path,
+                        "session_id": session_id,
+                        "summary": summary if resume else prompt,
+                        "note": "",
+                        "position": "normal",
+                        "pull_request": pull_request,
+                        "bypass": skip_permissions,
+                        "restore_model": model,
+                    }
+                )
                 invalidate_session_cache()
                 return self._redirect(
-                    "/terminal?session=" + urllib.parse.quote(session_name)
+                    "/terminal?session="
+                    + urllib.parse.quote(session_name)
                     + ("&review=1" if pull_request else "")
                 )
             detail = "起動したセッション名を取得できませんでした"
@@ -7089,7 +7727,8 @@ if __name__ == "__main__":
         description="Agent Deck — AI コーディング CLI の Web ランチャー & セッションマネージャ"
     )
     parser.add_argument(
-        "--port", type=int,
+        "--port",
+        type=int,
         help="待ち受けポート（省略時: AGENT_DECK_PORT か設定ファイルの port、既定 8787）",
     )
     cli_args = parser.parse_args()
@@ -7101,7 +7740,8 @@ if __name__ == "__main__":
         if registered:
             print(
                 f"[registry] 起動中の{registered}件を復元対象として保存しました",
-                file=sys.stderr, flush=True,
+                file=sys.stderr,
+                flush=True,
             )
         restore_report = restore_registered_sessions()
     except Exception as exc:
@@ -7111,11 +7751,13 @@ if __name__ == "__main__":
     if restore_report["restored"]:
         print(
             f"[restore] {len(restore_report['restored'])}件のセッションを復元しました",
-            file=sys.stderr, flush=True,
+            file=sys.stderr,
+            flush=True,
         )
     for failure in restore_report["failed"]:
         print(
             f"[restore] {failure['name']}: {failure['error']}",
-            file=sys.stderr, flush=True,
+            file=sys.stderr,
+            flush=True,
         )
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()

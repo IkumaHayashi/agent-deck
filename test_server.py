@@ -47,8 +47,8 @@ class FrontendTemplateTest(unittest.TestCase):
     def test_new_page_uses_external_frontend_assets(self):
         page = server.render()
 
-        self.assertIn('/static/new.css?v=', page)
-        self.assertIn('/static/new.js?v=', page)
+        self.assertIn("/static/new.css?v=", page)
+        self.assertIn("/static/new.js?v=", page)
         self.assertIn('data-panel="reviews-panel"', page)
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
@@ -66,8 +66,8 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("filePicker.click()", server.TERMINAL_PAGE)
 
     def test_terminal_page_offers_custom_question_input(self):
-        self.assertIn('if (question.custom)', server.TERMINAL_PAGE)
-        self.assertIn('question.custom_prompt', server.TERMINAL_PAGE)
+        self.assertIn("if (question.custom)", server.TERMINAL_PAGE)
+        self.assertIn("question.custom_prompt", server.TERMINAL_PAGE)
         self.assertIn('custom.placeholder = "自由入力"', server.TERMINAL_PAGE)
         self.assertIn('submit.textContent = "入力して送信"', server.TERMINAL_PAGE)
 
@@ -80,14 +80,18 @@ class FrontendTemplateTest(unittest.TestCase):
             "label": "08/19 12:34",
         }
         with (
-            mock.patch.object(server, "recent_conversations", return_value=[conversation]),
-            mock.patch.object(server, "resume_group_dir", return_value=conversation["cwd"]),
+            mock.patch.object(
+                server, "recent_conversations", return_value=[conversation]
+            ),
+            mock.patch.object(
+                server, "resume_group_dir", return_value=conversation["cwd"]
+            ),
         ):
             page = server.render()
 
         self.assertIn('id="resume-id-filter"', page)
         self.assertIn(f'data-resume-id="{conversation["id"]}"', page)
-        self.assertIn(f'ID: {conversation["id"]}', page)
+        self.assertIn(f"ID: {conversation['id']}", page)
         self.assertIn('class="resume-group"', page)
 
     def test_worktree_conversations_are_grouped_by_common_git_directory(self):
@@ -110,7 +114,7 @@ class FrontendTemplateTest(unittest.TestCase):
 
         self.assertEqual(1, page.count('id="inbox-open"'))
         self.assertIn('class="prompt-actions"', page)
-        self.assertIn('📥 受信箱から選ぶ', page)
+        self.assertIn("📥 受信箱から選ぶ", page)
         self.assertNotIn('id="inbox-project-select"', page)
         self.assertNotIn('data-panel="inbox-panel"', page)
 
@@ -123,24 +127,34 @@ class FrontendTemplateTest(unittest.TestCase):
 
     def test_github_review_ignores_prompt_on_server(self):
         handler = object.__new__(server.Handler)
-        result = SimpleNamespace(returncode=0, stdout="Started session agent-review\n", stderr="")
+        result = SimpleNamespace(
+            returncode=0, stdout="Started session agent-review\n", stderr=""
+        )
         with (
-            mock.patch.object(server, "validate_dir", return_value=("/tmp/project", "")),
+            mock.patch.object(
+                server, "validate_dir", return_value=("/tmp/project", "")
+            ),
             mock.patch.object(server.subprocess, "run", return_value=result) as run,
-            mock.patch.object(server, "wait_for_new_session_id", return_value="session-id"),
+            mock.patch.object(
+                server, "wait_for_new_session_id", return_value="session-id"
+            ),
             mock.patch.object(server, "set_session_metadata"),
             mock.patch.object(server, "invalidate_session_cache"),
             mock.patch.object(
-                server, "pull_request_target",
+                server,
+                "pull_request_target",
                 return_value={"cwd": "/tmp/project", "number": 42},
             ),
             mock.patch.object(
-                server, "pull_request_worktree", return_value="/tmp/worktrees/project-pr-42"
+                server,
+                "pull_request_worktree",
+                return_value="/tmp/worktrees/project-pr-42",
             ) as worktree,
             mock.patch.object(handler, "_redirect"),
         ):
             handler._launch(
-                "/tmp/project", prompt="通常起動用の指示",
+                "/tmp/project",
+                prompt="通常起動用の指示",
                 pull_request="https://github.com/example/repo/pull/42",
             )
 
@@ -160,13 +174,19 @@ class FrontendTemplateTest(unittest.TestCase):
             return path, ""
 
         with (
-            mock.patch.object(server, "validate_dir", side_effect=validate) as validate_mock,
+            mock.patch.object(
+                server, "validate_dir", side_effect=validate
+            ) as validate_mock,
             mock.patch.object(server, "conversation_log_path", return_value=""),
-            mock.patch.object(server, "find_log_by_id", return_value="/tmp/moved.jsonl"),
+            mock.patch.object(
+                server, "find_log_by_id", return_value="/tmp/moved.jsonl"
+            ),
             mock.patch.object(
                 server, "claude_session_cwd", return_value="/tmp/project-worktree"
             ),
-            mock.patch.object(server, "log_meta", return_value={"summary": "再開テスト"}),
+            mock.patch.object(
+                server, "log_meta", return_value={"summary": "再開テスト"}
+            ),
             mock.patch.object(server.subprocess, "run", return_value=result) as run,
             mock.patch.object(server, "set_session_metadata"),
             mock.patch.object(server, "upsert_registered_session"),
@@ -187,7 +207,7 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("seedReviewContext()", server.TERMINAL_PAGE)
         self.assertIn("をレビューしています。", server.TERMINAL_PAGE)
         self.assertIn(
-            'localStorage.getItem(reviewSeedKey) === linkedPullRequest',
+            "localStorage.getItem(reviewSeedKey) === linkedPullRequest",
             server.TERMINAL_PAGE,
         )
 
@@ -198,9 +218,7 @@ class FrontendTemplateTest(unittest.TestCase):
         )
 
     def test_diff_fetches_directory_comparison_without_pr_picker(self):
-        self.assertIn(
-            'encodeURIComponent(session) + "/diff"', server.TERMINAL_PAGE
-        )
+        self.assertIn('encodeURIComponent(session) + "/diff"', server.TERMINAL_PAGE)
         self.assertNotIn('id="review-picker"', server.TERMINAL_PAGE)
         self.assertIn("デフォルトブランチとの差分", server.TERMINAL_PAGE)
         self.assertIn('linkedPullRequest ? "PRベースブランチ"', server.TERMINAL_PAGE)
@@ -245,7 +263,9 @@ class FrontendTemplateTest(unittest.TestCase):
             server.TERMINAL_PAGE,
         )
         self.assertIn("appendQuoteToInput(text)", server.TERMINAL_PAGE)
-        self.assertIn('document.addEventListener("selectionchange"', server.TERMINAL_PAGE)
+        self.assertIn(
+            'document.addEventListener("selectionchange"', server.TERMINAL_PAGE
+        )
         self.assertNotIn("selectedQuoteText || item.text", server.TERMINAL_PAGE)
         self.assertIn('line ? "> " + line : ">"', server.TERMINAL_PAGE)
 
@@ -257,11 +277,13 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('id="lightbox-path"', page)
         self.assertIn('id="lightbox-description"', page)
         self.assertIn('id="lightbox-context"', page)
-        self.assertIn('"/api/local-image?path=" + encodeURIComponent(markdownImagePath)', page)
-        self.assertIn('fullPath.textContent = path', page)
-        self.assertIn('img.dataset.description = alt', page)
-        self.assertIn('img.dataset.context = context', page)
-        self.assertIn('normalized.length > 160', page)
+        self.assertIn(
+            '"/api/local-image?path=" + encodeURIComponent(markdownImagePath)', page
+        )
+        self.assertIn("fullPath.textContent = path", page)
+        self.assertIn("img.dataset.description = alt", page)
+        self.assertIn("img.dataset.context = context", page)
+        self.assertIn("normalized.length > 160", page)
         self.assertIn('contextLine.textContent = "文章: " + context', page)
         self.assertIn('description.textContent = "説明: " + alt', page)
         self.assertIn('event.key === "ArrowRight"', page)
@@ -297,10 +319,13 @@ class FrontendTemplateTest(unittest.TestCase):
 
     def test_uploaded_image_uses_signature_when_content_type_is_missing(self):
         image = b"\xff\xd8\xffjpeg-data"
-        with tempfile.TemporaryDirectory() as upload_dir, mock.patch.object(
-            server, "UPLOAD_DIR", upload_dir
+        with (
+            tempfile.TemporaryDirectory() as upload_dir,
+            mock.patch.object(server, "UPLOAD_DIR", upload_dir),
         ):
-            path = server.save_uploaded_image(image, "application/octet-stream", "agent-test")
+            path = server.save_uploaded_image(
+                image, "application/octet-stream", "agent-test"
+            )
 
             with open(path, "rb") as saved:
                 self.assertEqual(image, saved.read())
@@ -328,7 +353,7 @@ class FrontendTemplateTest(unittest.TestCase):
     def test_quote_places_cursor_below_quoted_text(self):
         # removeAllRanges を引用より後に呼ぶと入力欄のカーソルが先頭へ戻る（Chrome）
         handler = server.TERMINAL_PAGE[
-            server.TERMINAL_PAGE.index('selectionQuote.addEventListener("click"'):
+            server.TERMINAL_PAGE.index('selectionQuote.addEventListener("click"') :
         ]
         self.assertLess(
             handler.index("window.getSelection()?.removeAllRanges()"),
@@ -342,7 +367,7 @@ class FrontendTemplateTest(unittest.TestCase):
         # 新着のたびにずれて「全文を表示」した吹き出しが畳み直されてしまう
         self.assertNotIn('"|" + index + "|"', server.TERMINAL_PAGE)
         self.assertIn(
-            'item.text.slice(0, 80) + item.text.slice(-80)', server.TERMINAL_PAGE
+            "item.text.slice(0, 80) + item.text.slice(-80)", server.TERMINAL_PAGE
         )
         # 最新の回答は全文のまま出る。新着で「最新」でなくなった瞬間に畳まれると
         # 読んでいる本文が閉じてしまうので、展開済みとして記録しておく
@@ -390,7 +415,9 @@ class SessionInputTest(unittest.TestCase):
         path = f"{server.UPLOAD_PATH_PREFIXES[0]}/uploads/agent-example/photo.jpg"
         screens = [f"入力中 {path}", "入力中 [Image #8]"]
         with (
-            mock.patch.object(server, "capture_session", side_effect=screens) as capture,
+            mock.patch.object(
+                server, "capture_session", side_effect=screens
+            ) as capture,
             mock.patch.object(server.time, "monotonic", side_effect=[0.0, 0.1, 0.2]),
             mock.patch.object(server.time, "sleep") as sleep,
         ):
@@ -435,8 +462,15 @@ class WorktreeCleanupTest(unittest.TestCase):
             output.write("test\n")
         self.git("-C", self.repo, "add", "README.md")
         self.git(
-            "-C", self.repo, "-c", "user.name=Agent Deck",
-            "-c", "user.email=agent-deck@example.com", "commit", "-m", "初期化",
+            "-C",
+            self.repo,
+            "-c",
+            "user.name=Agent Deck",
+            "-c",
+            "user.email=agent-deck@example.com",
+            "commit",
+            "-m",
+            "初期化",
         )
 
     def tearDown(self):
@@ -445,8 +479,10 @@ class WorktreeCleanupTest(unittest.TestCase):
     @staticmethod
     def git(*args):
         return server.subprocess.run(
-            [server.find_bin("git"), *args], check=True,
-            capture_output=True, text=True,
+            [server.find_bin("git"), *args],
+            check=True,
+            capture_output=True,
+            text=True,
         )
 
     def add_worktree(self, name="feature"):
@@ -498,13 +534,12 @@ class WorktreeCleanupTest(unittest.TestCase):
         )
         killed = SimpleNamespace(returncode=0, stdout="", stderr="")
         with (
-            mock.patch.object(
-                server, "tmux_run", side_effect=[panes, killed]
-            ) as tmux,
+            mock.patch.object(server, "tmux_run", side_effect=[panes, killed]) as tmux,
             mock.patch.object(server, "invalidate_session_cache") as invalidate,
             mock.patch.object(server, "forget_registered_session") as forget,
             mock.patch.object(
-                server, "remove_session_worktree",
+                server,
+                "remove_session_worktree",
                 side_effect=RuntimeError("変更があります"),
             ),
         ):
@@ -535,7 +570,8 @@ class SessionRestoreTest(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.data_dir_patch = mock.patch.object(server, "DATA_DIR", self.temp_dir.name)
         self.registry_patch = mock.patch.object(
-            server, "SESSION_REGISTRY_PATH",
+            server,
+            "SESSION_REGISTRY_PATH",
             os.path.join(self.temp_dir.name, "sessions.json"),
         )
         self.data_dir_patch.start()
@@ -564,11 +600,13 @@ class SessionRestoreTest(unittest.TestCase):
         return item
 
     def test_registry_keeps_only_resumable_non_ephemeral_sessions(self):
-        server.save_session_registry([
-            self.session(),
-            self.session(name="agent-ephemeral", ephemeral=True),
-            self.session(name="agent-shell", tool="shell", session_id=""),
-        ])
+        server.save_session_registry(
+            [
+                self.session(),
+                self.session(name="agent-ephemeral", ephemeral=True),
+                self.session(name="agent-shell", tool="shell", session_id=""),
+            ]
+        )
 
         items = server.load_session_registry()
 
@@ -586,7 +624,9 @@ class SessionRestoreTest(unittest.TestCase):
         )
         with (
             mock.patch.object(server, "live_registered_sessions", return_value=[]),
-            mock.patch.object(server, "conversation_log_path", return_value="/tmp/log.jsonl"),
+            mock.patch.object(
+                server, "conversation_log_path", return_value="/tmp/log.jsonl"
+            ),
             mock.patch.object(server.subprocess, "run", return_value=launched) as run,
             mock.patch.object(server, "set_session_metadata") as metadata,
             mock.patch.object(server, "invalidate_session_cache"),
@@ -612,7 +652,9 @@ class SessionRestoreTest(unittest.TestCase):
         server.save_session_registry([item])
         current = {**item, "name": "agent-20260828-140000-789"}
         with (
-            mock.patch.object(server, "live_registered_sessions", return_value=[current]),
+            mock.patch.object(
+                server, "live_registered_sessions", return_value=[current]
+            ),
             mock.patch.object(server.subprocess, "run") as run,
             mock.patch.object(server, "invalidate_session_cache"),
         ):
@@ -628,7 +670,9 @@ class SessionRestoreTest(unittest.TestCase):
         failed = SimpleNamespace(returncode=1, stdout="", stderr="一時的な起動失敗")
         with (
             mock.patch.object(server, "live_registered_sessions", return_value=[]),
-            mock.patch.object(server, "conversation_log_path", return_value="/tmp/log.jsonl"),
+            mock.patch.object(
+                server, "conversation_log_path", return_value="/tmp/log.jsonl"
+            ),
             mock.patch.object(server.subprocess, "run", return_value=failed),
             mock.patch.object(server, "invalidate_session_cache"),
         ):
@@ -652,7 +696,8 @@ class SessionRestoreTest(unittest.TestCase):
         ephemeral = self.session(name="agent-ephemeral", ephemeral=True)
         with (
             mock.patch.object(
-                server, "load_managed_sessions",
+                server,
+                "load_managed_sessions",
                 return_value=[restorable, ephemeral],
             ) as load,
             mock.patch.object(server, "upsert_registered_session") as upsert,
@@ -671,15 +716,20 @@ class CodexSessionTest(unittest.TestCase):
     def test_incomplete_session_head_is_not_cached(self):
         with tempfile.NamedTemporaryFile(mode="w+", suffix=".jsonl") as source:
             self.assertEqual("", server.codex_session_head(source.name)["id"])
-            source.write(json.dumps({
-                "type": "session_meta",
-                "payload": {
-                    "id": "019fd08a-e352-7a22-9aa5-0b5d0de94eba",
-                    "cwd": "/tmp/project",
-                    "source": "cli",
-                    "thread_source": "user",
-                },
-            }) + "\n")
+            source.write(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {
+                            "id": "019fd08a-e352-7a22-9aa5-0b5d0de94eba",
+                            "cwd": "/tmp/project",
+                            "source": "cli",
+                            "thread_source": "user",
+                        },
+                    }
+                )
+                + "\n"
+            )
             source.flush()
             self.assertEqual(
                 "019fd08a-e352-7a22-9aa5-0b5d0de94eba",
@@ -692,18 +742,26 @@ class CodexSessionTest(unittest.TestCase):
         ps_result = SimpleNamespace(
             stdout="123 1 /Users/demo/.local/bin/codex prompt\n"
         )
-        lsof_result = SimpleNamespace(stdout=(
-            f"codex 123 1u REG /tmp/rollout-now-{guardian}.jsonl\n"
-            f"codex 123 2u REG /tmp/rollout-now-{main}.jsonl\n"
-        ))
+        lsof_result = SimpleNamespace(
+            stdout=(
+                f"codex 123 1u REG /tmp/rollout-now-{guardian}.jsonl\n"
+                f"codex 123 2u REG /tmp/rollout-now-{main}.jsonl\n"
+            )
+        )
         heads = {
             guardian: {"thread_source": "subagent", "subagent": True},
             main: {"thread_source": "user", "subagent": False},
         }
         with (
-            mock.patch.object(server.subprocess, "run", side_effect=[ps_result, lsof_result]),
-            mock.patch.object(server, "find_log_by_id", side_effect=lambda _tool, sid: sid),
-            mock.patch.object(server, "codex_session_head", side_effect=lambda path: heads[path]),
+            mock.patch.object(
+                server.subprocess, "run", side_effect=[ps_result, lsof_result]
+            ),
+            mock.patch.object(
+                server, "find_log_by_id", side_effect=lambda _tool, sid: sid
+            ),
+            mock.patch.object(
+                server, "codex_session_head", side_effect=lambda path: heads[path]
+            ),
         ):
             agent = server.pane_agent({"tty_name": "ttys001"})
         self.assertEqual(main, agent["explicit_id"])
@@ -723,15 +781,18 @@ class CodexSessionTest(unittest.TestCase):
             os.utime(guardian, (3000, 3000))
             os.utime(pending, (4000, 4000))
             paths = {
-                "older-id": older, "newer-id": newer,
-                "guardian-id": guardian, "pending-id": pending,
+                "older-id": older,
+                "newer-id": newer,
+                "guardian-id": guardian,
+                "pending-id": pending,
             }
             heads = {
                 older: {"id": "older-id", "thread_source": "user", "subagent": False},
                 newer: {"id": "newer-id", "thread_source": "user", "subagent": False},
                 # 新形式のguardianはthread_sourceがguardian_reviewでsubagent扱い
                 guardian: {
-                    "id": "guardian-id", "thread_source": "guardian_review",
+                    "id": "guardian-id",
+                    "thread_source": "guardian_review",
                     "subagent": True,
                 },
                 # session_metaがまだ書かれていないスレッドは候補にしない
@@ -739,7 +800,8 @@ class CodexSessionTest(unittest.TestCase):
             }
             with (
                 mock.patch.object(
-                    server, "find_log_by_id",
+                    server,
+                    "find_log_by_id",
                     side_effect=lambda _tool, sid: paths.get(sid, ""),
                 ),
                 mock.patch.object(
@@ -753,17 +815,26 @@ class CodexSessionTest(unittest.TestCase):
 
     def test_session_messages_merges_previous_thread_logs(self):
         def message(role, text):
-            return json.dumps({
-                "type": "response_item",
-                "payload": {
-                    "type": "message",
-                    "role": role,
-                    "content": [{
-                        "type": "input_text" if role == "user" else "output_text",
-                        "text": text,
-                    }],
-                },
-            }) + "\n"
+            return (
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": role,
+                            "content": [
+                                {
+                                    "type": "input_text"
+                                    if role == "user"
+                                    else "output_text",
+                                    "text": text,
+                                }
+                            ],
+                        },
+                    }
+                )
+                + "\n"
+            )
 
         with tempfile.TemporaryDirectory() as base:
             first = os.path.join(base, "first.jsonl")
@@ -788,14 +859,16 @@ class CodexSessionTest(unittest.TestCase):
             "payload": {
                 "type": "message",
                 "role": "user",
-                "content": [{
-                    "type": "input_text",
-                    "text": (
-                        '<codex_internal_context source="goal">\n'
-                        "Continue working toward the active thread goal.\n"
-                        "</codex_internal_context>"
-                    ),
-                }],
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": (
+                            '<codex_internal_context source="goal">\n'
+                            "Continue working toward the active thread goal.\n"
+                            "</codex_internal_context>"
+                        ),
+                    }
+                ],
             },
         }
         user = {
@@ -819,15 +892,22 @@ class CodexSessionTest(unittest.TestCase):
             "type": "event_msg",
             "payload": {
                 "type": "mcp_tool_call_end",
-                "result": {"Ok": {"content": [{
-                    "type": "image",
-                    "data": base64.b64encode(image).decode(),
-                    "detail": "original",
-                }]}},
+                "result": {
+                    "Ok": {
+                        "content": [
+                            {
+                                "type": "image",
+                                "data": base64.b64encode(image).decode(),
+                                "detail": "original",
+                            }
+                        ]
+                    }
+                },
             },
         }
-        with tempfile.TemporaryDirectory() as upload_dir, mock.patch.object(
-            server, "UPLOAD_DIR", upload_dir
+        with (
+            tempfile.TemporaryDirectory() as upload_dir,
+            mock.patch.object(server, "UPLOAD_DIR", upload_dir),
         ):
             first = server.assistant_parts(item, "codex")
             second = server.assistant_parts(item, "codex")
@@ -846,14 +926,22 @@ class CodexSessionTest(unittest.TestCase):
             "type": "event_msg",
             "payload": {
                 "type": "mcp_tool_call_end",
-                "result": {"Ok": {"content": [
-                    {"type": "image", "data": base64.b64encode(b"not-image").decode()},
-                    {"type": "image", "data": "invalid-base64"},
-                ]}},
+                "result": {
+                    "Ok": {
+                        "content": [
+                            {
+                                "type": "image",
+                                "data": base64.b64encode(b"not-image").decode(),
+                            },
+                            {"type": "image", "data": "invalid-base64"},
+                        ]
+                    }
+                },
             },
         }
-        with tempfile.TemporaryDirectory() as upload_dir, mock.patch.object(
-            server, "UPLOAD_DIR", upload_dir
+        with (
+            tempfile.TemporaryDirectory() as upload_dir,
+            mock.patch.object(server, "UPLOAD_DIR", upload_dir),
         ):
             self.assertEqual([], server.assistant_parts(item, "codex"))
         self.assertFalse(os.path.exists(os.path.join(upload_dir, "codex-images")))
@@ -864,14 +952,18 @@ class CodexSessionTest(unittest.TestCase):
             "type": "response_item",
             "payload": {
                 "type": "custom_tool_call_output",
-                "output": [{
-                    "type": "input_image",
-                    "image_url": "data:image/png;base64," + base64.b64encode(image).decode(),
-                }],
+                "output": [
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,"
+                        + base64.b64encode(image).decode(),
+                    }
+                ],
             },
         }
-        with tempfile.TemporaryDirectory() as upload_dir, mock.patch.object(
-            server, "UPLOAD_DIR", upload_dir
+        with (
+            tempfile.TemporaryDirectory() as upload_dir,
+            mock.patch.object(server, "UPLOAD_DIR", upload_dir),
         ):
             parts = server.assistant_parts(item, "codex")
             files = os.listdir(os.path.join(upload_dir, "codex-images"))
@@ -884,7 +976,10 @@ class CodexSessionTest(unittest.TestCase):
         )
 
     def test_codex_file_citation_is_saved_for_chat_rendering(self):
-        with tempfile.TemporaryDirectory() as source_dir, tempfile.TemporaryDirectory() as upload_dir:
+        with (
+            tempfile.TemporaryDirectory() as source_dir,
+            tempfile.TemporaryDirectory() as upload_dir,
+        ):
             source = os.path.join(source_dir, "確認用 PDF.pdf")
             with open(source, "wb") as output:
                 output.write(b"%PDF-1.4\ntest")
@@ -892,13 +987,15 @@ class CodexSessionTest(unittest.TestCase):
                 "type": "response_item",
                 "payload": {
                     "role": "assistant",
-                    "content": [{
-                        "type": "output_text",
-                        "text": (
-                            "確認用PDF："
-                            f':codex-file-citation{{path="{source}" purpose="output"}}'
-                        ),
-                    }],
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": (
+                                "確認用PDF："
+                                f':codex-file-citation{{path="{source}" purpose="output"}}'
+                            ),
+                        }
+                    ],
                 },
             }
             with mock.patch.object(server, "UPLOAD_DIR", upload_dir):
@@ -947,10 +1044,7 @@ class ShellCommandTest(unittest.TestCase):
 
 class SessionArtifactTest(unittest.TestCase):
     def test_create_command_with_environment_variable_is_detected(self):
-        command = (
-            "cd /tmp/repo && SKIP_REVIEW_GATE=1 "
-            "gh pr create --base develop"
-        )
+        command = "cd /tmp/repo && SKIP_REVIEW_GATE=1 gh pr create --base develop"
 
         self.assertEqual(["pr"], server.GH_CREATE_RE.findall(command))
 
@@ -978,7 +1072,9 @@ class DirectoryDiffTest(unittest.TestCase):
             SimpleNamespace(returncode=0, stdout="base123\n", stderr=""),
             SimpleNamespace(returncode=0, stdout="10\t2\tserver.py\0", stderr=""),
             SimpleNamespace(returncode=0, stdout="M\0server.py\0", stderr=""),
-            SimpleNamespace(returncode=0, stdout="diff --git a/server.py b/server.py\n", stderr=""),
+            SimpleNamespace(
+                returncode=0, stdout="diff --git a/server.py b/server.py\n", stderr=""
+            ),
         ]
         with (
             tempfile.TemporaryDirectory() as cwd,
@@ -1002,13 +1098,28 @@ class DirectoryDiffTest(unittest.TestCase):
             run.call_args_list[0].args[0],
         )
         self.assertEqual(
-            ["/usr/bin/git", "diff", "--name-status", "-z", "--no-ext-diff",
-             "--find-renames", "base123", "--"],
+            [
+                "/usr/bin/git",
+                "diff",
+                "--name-status",
+                "-z",
+                "--no-ext-diff",
+                "--find-renames",
+                "base123",
+                "--",
+            ],
             run.call_args_list[3].args[0],
         )
         self.assertEqual(
-            ["/usr/bin/git", "diff", "--patch", "--no-ext-diff", "--find-renames",
-             "base123", "--"],
+            [
+                "/usr/bin/git",
+                "diff",
+                "--patch",
+                "--no-ext-diff",
+                "--find-renames",
+                "base123",
+                "--",
+            ],
             run.call_args_list[4].args[0],
         )
 
@@ -1091,8 +1202,13 @@ class DirectoryDiffTest(unittest.TestCase):
 
         self.assertEqual(("develop", "origin/develop"), result)
         self.assertEqual(
-            ["/usr/bin/git", "symbolic-ref", "--quiet", "--short",
-             "refs/remotes/origin/HEAD"],
+            [
+                "/usr/bin/git",
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
             run.call_args_list[2].args[0],
         )
 
@@ -1120,9 +1236,7 @@ class DirectoryDiffTest(unittest.TestCase):
     def test_numstat_uses_new_path_for_renamed_file(self):
         result = server._parse_git_numstat("3\t1\t\0old.py\0new.py\0")
 
-        self.assertEqual(
-            [{"path": "new.py", "additions": 3, "deletions": 1}], result
-        )
+        self.assertEqual([{"path": "new.py", "additions": 3, "deletions": 1}], result)
 
     def test_name_status_maps_paths_and_uses_new_path_for_renames(self):
         result = server._parse_git_name_status(
@@ -1174,9 +1288,7 @@ class DirectoryDiffTest(unittest.TestCase):
         ):
             existing = os.path.join(data_dir, "repo-pr-7")
             os.makedirs(existing)
-            path = server.pull_request_worktree(
-                {"cwd": "/home/user/repo", "number": 7}
-            )
+            path = server.pull_request_worktree({"cwd": "/home/user/repo", "number": 7})
         self.assertEqual(existing, path)
         # 既存worktreeなら worktree add は走らず、checkout失敗でもそのまま使う
         self.assertEqual(1, run.call_count)
@@ -1196,28 +1308,32 @@ class DirectoryDiffTest(unittest.TestCase):
             "example/repo", server.github_repo_name("git@github.com:Example/Repo.git")
         )
         self.assertEqual(
-            "example/repo", server.github_repo_name("https://github.com/Example/Repo.git")
+            "example/repo",
+            server.github_repo_name("https://github.com/Example/Repo.git"),
         )
-        self.assertEqual("", server.github_repo_name("https://gitlab.com/example/repo.git"))
+        self.assertEqual(
+            "", server.github_repo_name("https://gitlab.com/example/repo.git")
+        )
 
     def test_review_requests_include_matching_local_project(self):
-        payload = [{
-            "number": 7,
-            "title": "レビュー対象",
-            "url": "https://github.com/example/repo/pull/7",
-            "repository": {"nameWithOwner": "Example/Repo"},
-            "author": {"login": "octocat"},
-            "updatedAt": "2026-08-17T00:00:00Z",
-            "isDraft": False,
-        }]
-        completed = SimpleNamespace(
-            returncode=0, stdout=json.dumps(payload), stderr=""
-        )
+        payload = [
+            {
+                "number": 7,
+                "title": "レビュー対象",
+                "url": "https://github.com/example/repo/pull/7",
+                "repository": {"nameWithOwner": "Example/Repo"},
+                "author": {"login": "octocat"},
+                "updatedAt": "2026-08-17T00:00:00Z",
+                "isDraft": False,
+            }
+        ]
+        completed = SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
         with (
             mock.patch.object(server, "find_bin", return_value="/usr/bin/gh"),
             mock.patch.object(server.subprocess, "run", return_value=completed) as run,
             mock.patch.object(
-                server, "local_github_repositories",
+                server,
+                "local_github_repositories",
                 return_value={"example/repo": "/tmp/repo"},
             ),
         ):
@@ -1288,21 +1404,21 @@ class SessionPositionTest(unittest.TestCase):
     def test_pinned_metadata_is_restored_on_restarted_session(self):
         calls = []
         with mock.patch.object(
-            server, "tmux_run",
+            server,
+            "tmux_run",
             side_effect=lambda *args: calls.append(args) or SimpleNamespace(),
         ):
             server.set_session_metadata(
                 "agent-new", "summary", "session-id", False, "note", True
             )
 
-        self.assertIn(
-            ("set-option", "-t", "agent-new", "@launcher_pinned", "1"), calls
-        )
+        self.assertIn(("set-option", "-t", "agent-new", "@launcher_pinned", "1"), calls)
 
     def test_deferred_metadata_is_restored_on_restarted_session(self):
         calls = []
         with mock.patch.object(
-            server, "tmux_run",
+            server,
+            "tmux_run",
             side_effect=lambda *args: calls.append(args) or SimpleNamespace(),
         ):
             server.set_session_metadata("agent-new", position="later")
@@ -1318,7 +1434,8 @@ class SessionPositionTest(unittest.TestCase):
     def test_pull_request_metadata_is_saved(self):
         calls = []
         with mock.patch.object(
-            server, "tmux_run",
+            server,
+            "tmux_run",
             side_effect=lambda *args: calls.append(args) or SimpleNamespace(),
         ):
             server.set_session_metadata(
@@ -1327,7 +1444,10 @@ class SessionPositionTest(unittest.TestCase):
 
         self.assertIn(
             (
-                "set-option", "-t", "agent-new", "@launcher_pull_request",
+                "set-option",
+                "-t",
+                "agent-new",
+                "@launcher_pull_request",
                 "https://github.com/example/repo/pull/42",
             ),
             calls,
@@ -1336,17 +1456,27 @@ class SessionPositionTest(unittest.TestCase):
     @staticmethod
     def _session(name, pinned=False, position=None):
         return {
-            "name": name, "tool": "codex", "cwd": "/tmp/project",
-            "summary": "summary", "last_message": "summary", "note": "",
-            "running": False, "background": "", "context": None,
-            "artifacts": [], "pinned": pinned, "position": position,
+            "name": name,
+            "tool": "codex",
+            "cwd": "/tmp/project",
+            "summary": "summary",
+            "last_message": "summary",
+            "note": "",
+            "running": False,
+            "background": "",
+            "context": None,
+            "artifacts": [],
+            "pinned": pinned,
+            "position": position,
         }
 
 
 class VersionUpdateTest(unittest.TestCase):
     def test_semver_is_compared_numerically(self):
         self.assertEqual((1, 10, 2), server.version_tuple("v1.10.2"))
-        self.assertGreater(server.version_tuple("0.10.0"), server.version_tuple("0.9.9"))
+        self.assertGreater(
+            server.version_tuple("0.10.0"), server.version_tuple("0.9.9")
+        )
         self.assertIsNone(server.version_tuple("latest"))
 
     def test_update_is_rejected_when_worktree_has_local_changes(self):
@@ -1397,8 +1527,9 @@ class ClaudeProjectDirTest(unittest.TestCase):
     def test_conversation_log_path_uses_encoded_project_dir(self):
         session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
         cwd = "/Users/xxx/Dropbox (個人)"
-        with tempfile.TemporaryDirectory() as home, mock.patch.object(
-            server, "HOME", home
+        with (
+            tempfile.TemporaryDirectory() as home,
+            mock.patch.object(server, "HOME", home),
         ):
             project = os.path.join(
                 home, ".claude", "projects", server.claude_project_dir(cwd)
@@ -1416,9 +1547,11 @@ class ClaudeProjectDirTest(unittest.TestCase):
     def test_resume_candidates_uses_encoded_project_dir(self):
         session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
         cwd = "/Users/xxx/Dropbox (個人)"
-        with tempfile.TemporaryDirectory() as home, (
-            mock.patch.object(server, "HOME", home)
-        ), mock.patch.object(server, "log_meta", return_value={}):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            mock.patch.object(server, "HOME", home),
+            mock.patch.object(server, "log_meta", return_value={}),
+        ):
             project = os.path.join(
                 home, ".claude", "projects", server.claude_project_dir(cwd)
             )
@@ -1437,20 +1570,27 @@ class ClaudeProjectDirTest(unittest.TestCase):
         cwd = "/Users/xxx/project"
         started_at = "2026-08-20T08:03:21.000Z"
         expected = server.parse_timestamp(started_at)
-        with tempfile.TemporaryDirectory() as home, (
-            mock.patch.object(server, "HOME", home)
-        ), mock.patch.object(server, "log_meta", return_value={}):
+        with (
+            tempfile.TemporaryDirectory() as home,
+            mock.patch.object(server, "HOME", home),
+            mock.patch.object(server, "log_meta", return_value={}),
+        ):
             project = os.path.join(
                 home, ".claude", "projects", server.claude_project_dir(cwd)
             )
             os.makedirs(project)
             log_path = os.path.join(project, f"{session_id}.jsonl")
             with open(log_path, "w", encoding="utf-8") as output:
-                output.write(json.dumps({
-                    "type": "attachment",
-                    "timestamp": started_at,
-                    "sessionId": session_id,
-                }) + "\n")
+                output.write(
+                    json.dumps(
+                        {
+                            "type": "attachment",
+                            "timestamp": started_at,
+                            "sessionId": session_id,
+                        }
+                    )
+                    + "\n"
+                )
             delayed_file_time = expected + 180
             os.utime(log_path, (delayed_file_time, delayed_file_time))
 
@@ -1475,27 +1615,34 @@ class ClaudeShellCommandTest(unittest.TestCase):
         self.assertIsNone(server.user_message_entry(item, "claude"))
         self.assertEqual(
             {"role": "user", "text": text},
-            server.user_message_entry({"type": "user", "message": {"content": text}}, "claude"),
+            server.user_message_entry(
+                {"type": "user", "message": {"content": text}}, "claude"
+            ),
         )
 
     def test_user_shell_command_is_rendered_as_markdown(self):
         item = {
             "type": "user",
-            "message": {"content": (
-                "<user_shell_command>\n"
-                "<command>gh auth login --web</command>\n"
-                "<result>Exit code: 0\nOutput:\nAuthentication complete.</result>\n"
-                "</user_shell_command>"
-            )},
+            "message": {
+                "content": (
+                    "<user_shell_command>\n"
+                    "<command>gh auth login --web</command>\n"
+                    "<result>Exit code: 0\nOutput:\nAuthentication complete.</result>\n"
+                    "</user_shell_command>"
+                )
+            },
         }
 
-        self.assertEqual({
-            "role": "user",
-            "text": (
-                "```sh\n$ gh auth login --web\n```\n\n"
-                "```\nExit code: 0\nOutput:\nAuthentication complete.\n```"
-            ),
-        }, server.user_message_entry(item, "claude"))
+        self.assertEqual(
+            {
+                "role": "user",
+                "text": (
+                    "```sh\n$ gh auth login --web\n```\n\n"
+                    "```\nExit code: 0\nOutput:\nAuthentication complete.\n```"
+                ),
+            },
+            server.user_message_entry(item, "claude"),
+        )
         self.assertEqual(
             "$ gh auth login --web",
             server.user_summary_text(item, "claude"),
@@ -1552,19 +1699,30 @@ class CodexQuestionTest(unittest.TestCase):
     3. Cancel        Cancel this tool call
   enter to submit | esc to cancel
 """
-        self.assertEqual({
-            "question": "Allow Browser use to use full CDP access on http://localhost:3005",
-            "choices": [
-                {"number": 1, "label": "Allow", "description": "Run the tool and continue."},
-                {
-                    "number": 2,
-                    "label": "Always allow",
-                    "description": "Run the tool and remember this choice for future tool calls.",
-                },
-                {"number": 3, "label": "Cancel", "description": "Cancel this tool call"},
-            ],
-            "multi": False,
-        }, server.parse_codex_question_screen(screen))
+        self.assertEqual(
+            {
+                "question": "Allow Browser use to use full CDP access on http://localhost:3005",
+                "choices": [
+                    {
+                        "number": 1,
+                        "label": "Allow",
+                        "description": "Run the tool and continue.",
+                    },
+                    {
+                        "number": 2,
+                        "label": "Always allow",
+                        "description": "Run the tool and remember this choice for future tool calls.",
+                    },
+                    {
+                        "number": 3,
+                        "label": "Cancel",
+                        "description": "Cancel this tool call",
+                    },
+                ],
+                "multi": False,
+            },
+            server.parse_codex_question_screen(screen),
+        )
 
     def test_parses_codex_app_sign_in_choices(self):
         screen = """
@@ -1585,18 +1743,21 @@ class CodexQuestionTest(unittest.TestCase):
     2. Back
   Use tab / ↑ ↓ to move, enter to select, esc to close
 """
-        self.assertEqual({
-            "question": (
-                "Gmail Sign in to Gmail on ChatGPT to use it in Codex. URL "
-                "https://chatgpt.com/apps/gmail/connector_example "
-                "Sign in to this app in your browser, then return here."
-            ),
-            "choices": [
-                {"number": 1, "label": "Open sign-in URL", "description": ""},
-                {"number": 2, "label": "Back", "description": ""},
-            ],
-            "multi": False,
-        }, server.parse_codex_question_screen(screen))
+        self.assertEqual(
+            {
+                "question": (
+                    "Gmail Sign in to Gmail on ChatGPT to use it in Codex. URL "
+                    "https://chatgpt.com/apps/gmail/connector_example "
+                    "Sign in to this app in your browser, then return here."
+                ),
+                "choices": [
+                    {"number": 1, "label": "Open sign-in URL", "description": ""},
+                    {"number": 2, "label": "Back", "description": ""},
+                ],
+                "multi": False,
+            },
+            server.parse_codex_question_screen(screen),
+        )
 
     def test_quoted_codex_app_dialog_is_not_a_question(self):
         screen = """
@@ -1631,9 +1792,11 @@ Enter to confirm · Esc to cancel
             result["question"],
         )
         self.assertEqual(
-            ["Use this MCP server",
-             "Use this and all future MCP servers in this project",
-             "Continue without using this MCP server"],
+            [
+                "Use this MCP server",
+                "Use this and all future MCP servers in this project",
+                "Continue without using this MCP server",
+            ],
             [choice["label"] for choice in result["choices"]],
         )
 
@@ -1691,11 +1854,16 @@ to toggle, Enter to submit or Escape to cancel:
         result = server.parse_question_screen(self.NEW_DIALOG)
         self.assertFalse(result["multi"])
         self.assertEqual(
-            "2日の自動確定で、どこまでを確定対象にしますか？", result["question"],
+            "2日の自動確定で、どこまでを確定対象にしますか？",
+            result["question"],
         )
         self.assertEqual(
-            ["オムニ全部＋クレーは不足時のみ", "当選は全部確定", "Other",
-             "Chat about this"],
+            [
+                "オムニ全部＋クレーは不足時のみ",
+                "当選は全部確定",
+                "Other",
+                "Chat about this",
+            ],
             [choice["label"] for choice in result["choices"]],
         )
         self.assertEqual("運用ルール通り", result["choices"][0]["description"])
@@ -1720,13 +1888,16 @@ to toggle, Enter to submit or Escape to cancel:
 Enter text for option 3 (Other), or Escape for the list:
 """
 
-        self.assertEqual({
-            "question": "月次のタスクを、どの粒度で自動化しますか？",
-            "choices": [],
-            "multi": False,
-            "custom": True,
-            "custom_prompt": "Other の内容を入力してください",
-        }, server.parse_question_screen(screen))
+        self.assertEqual(
+            {
+                "question": "月次のタスクを、どの粒度で自動化しますか？",
+                "choices": [],
+                "multi": False,
+                "custom": True,
+                "custom_prompt": "Other の内容を入力してください",
+            },
+            server.parse_question_screen(screen),
+        )
 
     def test_quoted_other_custom_answer_prompt_is_not_a_question(self):
         screen = """\
@@ -1769,7 +1940,8 @@ Enter text for option 3 (Other), or Escape for the list:
             [
                 mock.call("send-keys", "-l", "-t", "agent-test", character)
                 for character in answer
-            ] + [mock.call("send-keys", "-t", "agent-test", "Enter")],
+            ]
+            + [mock.call("send-keys", "-t", "agent-test", "Enter")],
             tmux.call_args_list,
         )
         self.assertEqual(
@@ -1914,9 +2086,7 @@ class ScreenRunningTest(unittest.TestCase):
         self.assertFalse(server.screen_is_running(screen, "codex"))
 
     def test_claude_keeps_existing_full_screen_detection(self):
-        screen = "Running…\n" + "\n".join(
-            f"idle line {index}" for index in range(24)
-        )
+        screen = "Running…\n" + "\n".join(f"idle line {index}" for index in range(24))
 
         self.assertTrue(server.screen_is_running(screen, "claude"))
 

@@ -188,15 +188,20 @@ AI の回答内でテキストをドラッグ選択すると「選択部分を�
 - `static/new.js`: タブ切り替え、フォーム、GitHubレビュー・Chatwork連携
 
 ```sh
-ruff check server.py
-python3 -m unittest test_server
-node --check static/new.js
+python3 -m pip install -r requirements-dev.txt
+make check
+```
+
+Python コードを Ruff で整形するには次を実行します。
+
+```sh
+make format
 ```
 
 ### リリース
 
 `VERSION` を更新して変更をmainへcommitした後、次のスクリプトを実行します。
-lint・test・ブランチ・作業ツリーを検証してから、タグとGitHub Releaseを公開します。
+lint・format・test・ブランチ・作業ツリーを検証してから、タグとGitHub Releaseを公開します。
 
 ```sh
 scripts/release.sh 0.1.0
