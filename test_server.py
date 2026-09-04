@@ -64,6 +64,9 @@ class FrontendTemplateTest(unittest.TestCase):
             self.assertIn("/apple-touch-icon.png?v={favicon_version}", page)
             self.assertIn("/site.webmanifest?v={favicon_version}", page)
             self.assertIn('name="theme-color" content="#171523"', page)
+            self.assertIn('class="app-logo"', page)
+
+        self.assertIn('class="app-logo"', server.render())
 
     def test_static_file_supports_app_icon_formats(self):
         handler = object.__new__(server.Handler)

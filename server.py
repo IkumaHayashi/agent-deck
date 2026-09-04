@@ -4075,7 +4075,9 @@ SIDEBAR_CSS = r"""
   #ai-usage .usage-warning { color: #d9884f; }
   #ai-usage .usage-critical { color: #f85149; }
   #ai-usage .usage-err { color: #f85149; }
-  aside h2 { margin: 4px 4px 12px; font-size: 1.05rem; }
+  aside h2 { display: flex; align-items: center; gap: 8px; margin: 4px 4px 12px;
+    font-size: 1.05rem; }
+  aside h2 .app-logo { width: 30px; height: 30px; border-radius: 7px; }
   aside a { display: block; margin: 7px 0; padding: 10px; color: inherit; text-decoration: none;
     border: 1px solid #30363d; border-radius: 8px; overflow-wrap: anywhere; }
   aside a.active { border-color: #58a6ff; background: #1f6feb22; }
@@ -4550,7 +4552,8 @@ LIST_PAGE = r"""<!doctype html>
     .placeholder {{ display: none; }}
   }}
 </style></head><body>
-<div class="app"><aside><h2>セッション</h2>{sessions_sidebar}</aside>
+<div class="app"><aside><h2><img class="app-logo" src="/favicon.svg?v={favicon_version}"
+  alt="">Agent Deck</h2>{sessions_sidebar}</aside>
 <main class="placeholder"><div class="inner">
   <p>左の一覧からセッションを選択してください</p>
   <a href="/new">＋ 新規セッションを開始</a>
@@ -4863,7 +4866,8 @@ TERMINAL_PAGE = r"""<!doctype html>
     header small {{ font-size: .8rem; }}
   }}
 </style></head><body{body_class}>
-<div class="app"><aside><h2>セッション</h2>{sessions_sidebar}</aside><main class="terminal">
+<div class="app"><aside><h2><img class="app-logo" src="/favicon.svg?v={favicon_version}"
+  alt="">Agent Deck</h2>{sessions_sidebar}</aside><main class="terminal">
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
 <small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
