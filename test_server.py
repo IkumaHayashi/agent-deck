@@ -8,6 +8,8 @@ import unittest
 from types import SimpleNamespace
 from unittest import mock
 
+from PIL import Image
+
 
 MODULE_PATH = os.path.join(os.path.dirname(__file__), "server.py")
 SPEC = importlib.util.spec_from_file_location("launcher_server", MODULE_PATH)
@@ -82,6 +84,20 @@ class FrontendTemplateTest(unittest.TestCase):
             handler._static_file(filename)
             handler.send_header.assert_any_call("Content-Type", content_type)
             self.assertGreater(len(handler.wfile.getvalue()), 0)
+
+    def test_raster_app_icons_can_be_decoded(self):
+        static_dir = os.path.join(os.path.dirname(__file__), "static")
+        expected = {
+            "favicon.ico": (48, 48),
+            "apple-touch-icon.png": (180, 180),
+            "icon-192.png": (192, 192),
+            "icon-512.png": (512, 512),
+        }
+
+        for filename, size in expected.items():
+            with Image.open(os.path.join(static_dir, filename)) as image:
+                image.load()
+                self.assertEqual(size, image.size)
 
     def test_new_page_offers_image_picker_for_touch_devices(self):
         page = server.render()
