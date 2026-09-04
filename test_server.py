@@ -44,6 +44,114 @@ class SessionContextTest(unittest.TestCase):
 
 
 class FrontendTemplateTest(unittest.TestCase):
+    def test_language_is_selected_by_query_cookie_then_browser(self):
+        self.assertEqual("en", server.preferred_language("en", "", "ja-JP"))
+        self.assertEqual(
+            "ja",
+            server.preferred_language(
+                "", "agent_deck_language=ja", "en-US,en;q=0.9"
+            ),
+        )
+        self.assertEqual("en", server.preferred_language("", "", "fr,en;q=0.8"))
+        self.assertEqual("ja", server.preferred_language("", "", "en;q=0"))
+        self.assertEqual("ja", server.preferred_language("", "", "fr-FR"))
+
+    def test_english_launcher_has_switch_and_localized_assets(self):
+        with mock.patch.object(server, "recent_conversations", return_value=[]):
+            page = server.render(language="en")
+
+        self.assertIn('<html lang="en">', page)
+        self.assertIn("Launch from a project", page)
+        self.assertIn("No conversations available to resume", page)
+        self.assertIn("lang=en", page)
+        self.assertIn('<option value="en" selected>', page)
+        self.assertNotIn("プロジェクトから起動", page)
+
+    def test_language_switch_preserves_other_query_parameters(self):
+        switch = server.language_switch_html("en")
+
+        self.assertIn("new URLSearchParams(location.search)", switch)
+        self.assertIn("q.set('lang',this.value)", switch)
+        self.assertNotIn("new URL(location.href)", switch)
+
+    def test_english_terminal_keeps_internal_attachment_markers(self):
+        page = server.localize_source(server.TERMINAL_PAGE, "en")
+
+        self.assertIn("Loading conversation...", page)
+        self.assertIn("Run in a new web shell?", page)
+        self.assertIn(r"添付画像[:：]", page)
+        self.assertIn('"添付画像: " + data.path', page)
+
+    def test_english_dynamic_messages_are_complete_sentences(self):
+        sidebar = server.localize_source(server.SIDEBAR_JS, "en")
+        terminal = server.localize_source(server.TERMINAL_PAGE, "en")
+
+        self.assertIn('showNavLoading("Reloading...")', sidebar)
+        self.assertIn('updateButton.textContent = "Update to v" + data.latest;', sidebar)
+        self.assertIn('laterItems.length === 1 ? " item" : " items"', sidebar)
+        self.assertNotIn("再Loading", sidebar)
+        self.assertNotIn('laterItems.length + "件"', sidebar)
+        self.assertNotIn("diff diff", terminal)
+        self.assertIn('error.message + ")"', terminal)
+
+    def test_english_sidebar_translates_status_without_changing_user_text(self):
+        item = {
+            "name": "agent-test", "tool": "codex", "cwd": "/tmp/project",
+            "running": False, "background": "", "summary": "完了という名前の作業",
+            "last_message": "", "note": "", "artifacts": [], "context": None,
+            "position": "normal", "pinned": False,
+        }
+        with (
+            mock.patch.object(server, "managed_sessions", return_value=[item]),
+            mock.patch.object(server, "sidebar_status", return_value=("完了", "done")),
+        ):
+            sidebar = server.build_sidebar(None, "en")
+
+        self.assertIn("Done", sidebar)
+        self.assertIn("完了という名前の作業", sidebar)
+        self.assertIn("Language", sidebar)
+
+    def test_english_api_errors_are_localized_with_dynamic_details(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/api/session/diff?lang=en"
+        handler.headers = {}
+        handler.wfile = io.BytesIO()
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+
+        handler._json(
+            {
+                "error": "比較対象ブランチ feature/example がローカルに見つかりません",
+                "summary": "完了という名前の作業",
+            },
+            400,
+        )
+
+        payload = json.loads(handler.wfile.getvalue())
+        self.assertEqual(
+            "Comparison branch feature/example was not found locally",
+            payload["error"],
+        )
+        self.assertEqual("完了という名前の作業", payload["summary"])
+
+    def test_major_server_errors_have_english_translations(self):
+        errors = {
+            "PR番号またはGitHubのPR URLを入力してください":
+                "Enter a PR number or GitHub PR URL",
+            "作業ディレクトリはGitリポジトリではありません":
+                "The working directory is not a Git repository",
+            "差分が5MBを超えています。Gitで確認してください":
+                "The diff exceeds 5 MB. Review it with Git instead.",
+            "PNG・JPEG・GIF・WebP画像のみ添付できます":
+                "Only PNG, JPEG, GIF, and WebP images can be attached",
+            "更新先のバージョンが不正です": "Invalid target version",
+        }
+
+        for japanese, english in errors.items():
+            with self.subTest(japanese=japanese):
+                self.assertEqual(english, server.translate_error(japanese, "en"))
+
     def test_new_page_uses_external_frontend_assets(self):
         page = server.render()
 

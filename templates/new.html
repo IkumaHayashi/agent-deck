@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="ja"><head>
+<html lang="{language}"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -8,7 +8,7 @@
 <link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
 <link rel="stylesheet" href="/static/new.css?v={static_version}"></head><body>
 <h1>🚀 Agent Deck</h1>
-<nav><a href="/">‹ セッションへ</a></nav>
+<nav><a href="/">‹ セッションへ</a>{language_switch}</nav>
 {message}
 <div class="launch-settings">
   <div class="settings-row">
@@ -69,5 +69,5 @@
 <div class="cw-empty" id="resume-filter-empty" hidden>一致する会話が見つかりません</div>
 </section>
 {chatwork_panel}
-<script src="/static/new.js?v={static_version}" defer></script>
+<script src="/static/new.js?v={static_version}&amp;lang={language}" defer></script>
 </body></html>

@@ -34,6 +34,7 @@ HOME = os.path.expanduser("~")
 SCRIPT_DIR = os.path.dirname(os.path.realpath(__file__))
 TEMPLATE_DIR = os.path.join(SCRIPT_DIR, "templates")
 STATIC_DIR = os.path.join(SCRIPT_DIR, "static")
+LOCALE_DIR = os.path.join(SCRIPT_DIR, "locales")
 CONFIG_PATH = os.environ.get("AGENT_DECK_CONFIG") or f"{HOME}/.config/agent-deck/config.json"
 
 
@@ -61,6 +62,97 @@ def load_template(name):
         raise ValueError("テンプレート名が不正です")
     with open(path, encoding="utf-8") as source:
         return source.read()
+
+
+SUPPORTED_LANGUAGES = ("ja", "en")
+
+
+def load_translations(language):
+    """表示用の翻訳カタログを読む。日本語と未定義キーは原文へフォールバックする。"""
+    if language == "ja":
+        return {}
+    path = os.path.join(LOCALE_DIR, f"{language}.json")
+    try:
+        with open(path, encoding="utf-8") as source:
+            translations = json.load(source)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+    return translations if isinstance(translations, dict) else {}
+
+
+TRANSLATIONS = {language: load_translations(language) for language in SUPPORTED_LANGUAGES}
+
+
+def normalize_language(value):
+    """ja-JP / en-US のような言語タグを対応言語へ正規化する。"""
+    language = (value or "").strip().lower().replace("_", "-").split("-", 1)[0]
+    return language if language in SUPPORTED_LANGUAGES else ""
+
+
+def preferred_language(query="", cookie="", accept_language=""):
+    """明示指定、Cookie、ブラウザ設定の順で表示言語を決める。"""
+    language = normalize_language(query)
+    if language:
+        return language
+    for part in (cookie or "").split(";"):
+        name, separator, value = part.strip().partition("=")
+        if separator and name == "agent_deck_language":
+            language = normalize_language(urllib.parse.unquote(value))
+            if language:
+                return language
+    candidates = []
+    for index, part in enumerate((accept_language or "").split(",")):
+        tag, *parameters = part.strip().split(";")
+        quality = 1.0
+        for parameter in parameters:
+            name, separator, value = parameter.strip().partition("=")
+            if separator and name.lower() == "q":
+                try:
+                    quality = float(value)
+                except ValueError:
+                    quality = 0.0
+        language = normalize_language(tag)
+        if language and quality > 0:
+            candidates.append((quality, -index, language))
+    return max(candidates, default=(0, 0, "ja"))[2]
+
+
+def translate(text, language):
+    """動的に生成する表示文言を完全一致で翻訳する。"""
+    return TRANSLATIONS.get(language, {}).get(text, text)
+
+
+def translate_error(text, language):
+    """例外の詳細を残しつつ、既知のエラー文言を翻訳する。"""
+    return localize_source(text, language)
+
+
+def localize_source(source, language):
+    """ユーザーデータ差し込み前のHTML/JSソースに翻訳を適用する。"""
+    translations = TRANSLATIONS.get(language, {})
+    for original in sorted(translations, key=len, reverse=True):
+        source = source.replace(original, translations[original])
+    return source
+
+
+def language_switch_html(language):
+    label = translate("表示言語", language)
+    options = "".join(
+        f'<option value="{value}"{" selected" if value == language else ""}>{name}</option>'
+        for value, name in (("ja", "日本語"), ("en", "English"))
+    )
+    return (
+        f'<label class="language-switch"><span>{html.escape(label)}</span>'
+        f'<select aria-label="{html.escape(label)}" '
+        f'onchange="var q=new URLSearchParams(location.search);'
+        f"q.set('lang',this.value);location.search=q.toString()\">{options}</select></label>"
+    )
+
+
+def item_count(value, language):
+    if language == "ja":
+        return f"{value}件"
+    return f"{value} item{'s' if value != 1 else ''}"
 
 
 CONFIG = load_config()
@@ -3136,14 +3228,14 @@ def session_position(item):
     return "top" if item.get("pinned") else "normal"
 
 
-def position_button_html(item):
+def position_button_html(item, language="ja"):
     position = session_position(item)
     icon = {"top": "📌", "normal": "↕", "later": "↓"}[position]
     state_class = " placed" if position != "normal" else ""
     return (
         f'<button type="button" class="side-position{state_class}" '
-        f'data-position="{position}" aria-label="並び位置を変更" '
-        f'title="並び位置を変更">{icon}</button>'
+        f'data-position="{position}" aria-label="{translate("並び位置を変更", language)}" '
+        f'title="{translate("並び位置を変更", language)}">{icon}</button>'
     )
 
 
@@ -3158,12 +3250,14 @@ def tool_label(tool):
     return f'<span class="tool">{escaped}</span>'
 
 
-def build_sidebar(active):
+def build_sidebar(active, language="ja"):
     """2ペイン表示のサイドバーHTMLを組み立てる。activeは選択中のセッション名。"""
-    sidebar = '<a class="new-link" href="/new">＋ 新規起動</a>'
+    sidebar = (
+        f'<a class="new-link" href="/new">{translate("＋ 新規起動", language)}</a>'
+    )
     sidebar += (
         '<label class="filter-toggle"><input type="checkbox" id="filter-need">'
-        "要対応のみ表示</label>"
+        f'{translate("要対応のみ表示", language)}</label>'
     )
     sidebar += '<div id="side-sessions">'
     # 手動配置だけを優先し、各グループ内では一覧本来の順序を保つ。
@@ -3186,7 +3280,8 @@ def build_sidebar(active):
             heading_keep = " f-keep" if later_keep else ""
             sidebar += (
                 f'<div class="deferred-heading{heading_keep}">'
-                f'<span>後回し</span><small>{later_count}件</small></div>'
+                f'<span>{translate("後回し", language)}</span>'
+                f'<small>{item_count(later_count, language)}</small></div>'
             )
             later_started = True
         # 最初のプロンプトでセッションを識別し、最終メッセージは同じでなければ添える。
@@ -3205,18 +3300,20 @@ def build_sidebar(active):
             f'href="/terminal?session={urllib.parse.quote(other["name"])}">'
             f'<strong>{tool_label(other["tool"])}'
             f'<span class="dir">{html.escape(dir_label(other["cwd"]))}</span>'
-            f'<span class="st st-{status_class}">{html.escape(status_text)}</span>'
+            f'<span class="st st-{status_class}">'
+            f'{html.escape(translate(status_text, language))}</span>'
             f'{context_chip(other.get("context"))}</strong>'
-            f'{lines}</a>{position_button_html(other)}</div>'
+            f'{lines}</a>{position_button_html(other, language)}</div>'
         )
     sidebar += "</div>"
     # バージョンとAI使用量は一覧が短いときもサイドバー最下部へ置く。
     sidebar += (
         '<div id="sidebar-footer"><div id="app-meta">'
         f'<span>Agent Deck v{html.escape(VERSION)}</span>'
-        '<button type="button" id="app-update" hidden>アップデート</button>'
+        f'<button type="button" id="app-update" hidden>'
+        f'{translate("アップデート", language)}</button>'
         '<small id="update-status"></small></div>'
-        '<div id="ai-usage" hidden></div></div>'
+        f'<div id="ai-usage" hidden></div>{language_switch_html(language)}</div>'
     )
     return sidebar
 
@@ -3778,6 +3875,12 @@ SIDEBAR_CSS = r"""
     white-space: nowrap; }
   aside #side-sessions .st { flex: 0 1 auto; min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
+  .language-switch { display: flex; align-items: center; gap: 7px; color: #8b949e;
+    font-size: .72rem; }
+  .language-switch select { min-width: 96px; padding: 6px 24px 6px 8px;
+    border: 1px solid #30363d; border-radius: 7px; background: #0d1117;
+    color: #e6edf3; font: inherit; }
+  aside .language-switch { margin-top: 8px; }
   /* ページ遷移中のローディング。サーバー描画が重いページへの移動中に出す */
   #nav-loading { position: fixed; inset: 0; z-index: 300; display: grid;
     place-items: center; background: #0d1117cc; }
@@ -4138,7 +4241,7 @@ SIDEBAR_JS = r"""
 # デフォルト（/）のセッション一覧ページ。PCは左に一覧・右は選択か新規起動を
 # 促すプレースホルダ、SPは一覧のみを全画面で表示する。
 LIST_PAGE = r"""<!doctype html>
-<html lang="ja"><head>
+<html lang="{language}"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -4179,7 +4282,7 @@ LIST_PAGE = r"""<!doctype html>
 
 
 TERMINAL_PAGE = r"""<!doctype html>
-<html lang="ja"><head>
+<html lang="{language}"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -4324,6 +4427,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   header .actions.open .label, header .actions.open .icon {{ display: none; }}
   header .actions.open button, header .actions.open a {{ text-align: left; padding: 11px 14px;
     font-size: .95rem; }}
+  header .actions.open .language-switch {{ justify-content: space-between; padding: 6px 4px; }}
   header button.warn {{ border-color: #d63545; color: #ff9c9c; }}
   header button.note-button {{ color: #d29922; }}
   header div {{ min-width: 0; flex: 1; }}
@@ -4476,7 +4580,7 @@ TERMINAL_PAGE = r"""<!doctype html>
 </style></head><body{body_class}>
 <div class="app"><aside><h2>セッション</h2>{sessions_sidebar}</aside><main class="terminal">
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
-<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}</div>
+<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}{language_switch}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
 <button type="button" id="review-toggle" title="デフォルトブランチとの差分"><span class="label">差分</span><span class="icon">±</span></button>
 <button type="button" id="menu-toggle" aria-label="メニュー">☰</button></header>
@@ -6130,7 +6234,7 @@ CHATWORK_PANEL = """<section class="launcher-panel" id="inbox-panel">
 <div id="cw-room-messages"></div></section>"""
 
 
-def render(message="", view="new"):
+def render(message="", view="new", language="ja"):
     # view は旧・一覧ページ時代の名残。呼び出し側の互換のため残している。
     del view
     buttons = "\n".join(
@@ -6145,13 +6249,15 @@ def render(message="", view="new"):
         for name, path in other_projects
     )
     inbox_prompt_button = (
-        '<button class="cw-set" id="inbox-open" type="button">📥 受信箱から選ぶ</button>'
+        f'<button class="cw-set" id="inbox-open" type="button">'
+        f'{translate("📥 受信箱から選ぶ", language)}</button>'
         if CW_ENABLED else ""
     )
     def model_radios(tool):
         return "\n".join(
             f'<label><input type="radio" name="model-{tool}" value="{v}"'
-            f'{" checked" if v == "default" else ""}><span>{label}</span></label>'
+            f'{" checked" if v == "default" else ""}><span>'
+            f'{translate(label, language)}</span></label>'
             for v, label in MODELS_BY_TOOL[tool]
         )
     resume_groups = {}
@@ -6177,22 +6283,51 @@ def render(message="", view="new"):
         rendered_groups.append(
             f'<details class="resume-group"{" open" if index == 0 else ""}>'
             f'<summary>📁 {html.escape(short_path(group_dir))} '
-            f'<small>({len(items)}件)</small></summary>'
+            f'<small>({item_count(len(items), language)})</small></summary>'
             f'<div class="resume-grid">{"".join(forms)}</div></details>'
         )
     resume_items = "\n".join(rendered_groups) \
-        or '<div class="cw-empty">再開できる会話が見つかりません</div>'
-    return load_template(NEW_PAGE_TEMPLATE).format(
+        or f'<div class="cw-empty">{translate("再開できる会話が見つかりません", language)}</div>'
+    return localize_source(load_template(NEW_PAGE_TEMPLATE), language).format(
+        language=language,
         favicon_version=urllib.parse.quote(VERSION),
         static_version=urllib.parse.quote(BOOT_ID),
         message=message, buttons=buttons, options=options, resume_items=resume_items,
         models_claude=model_radios("claude"), models_codex=model_radios("codex"),
         inbox_prompt_button=inbox_prompt_button,
-        chatwork_panel=CHATWORK_PANEL if CW_ENABLED else "",
+        chatwork_panel=localize_source(CHATWORK_PANEL, language) if CW_ENABLED else "",
+        language_switch=language_switch_html(language),
     )
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _language(self):
+        if hasattr(self, "_resolved_language"):
+            return self._resolved_language
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(getattr(self, "path", "")).query
+        ).get(
+            "lang", [""]
+        )[0]
+        headers = getattr(self, "headers", {})
+        self._resolved_language = preferred_language(
+            query,
+            headers.get("Cookie", ""),
+            headers.get("Accept-Language", ""),
+        )
+        self._language_was_selected = bool(normalize_language(query))
+        return self._resolved_language
+
+    def _language_headers(self):
+        language = self._language()
+        self.send_header("Content-Language", language)
+        self.send_header("Vary", "Accept-Language, Cookie")
+        if getattr(self, "_language_was_selected", False):
+            self.send_header(
+                "Set-Cookie",
+                f"agent_deck_language={language}; Path=/; Max-Age=31536000; SameSite=Lax",
+            )
+
     def _deny(self):
         self.send_response(403)
         self.end_headers()
@@ -6202,14 +6337,28 @@ class Handler(BaseHTTPRequestHandler):
         data = body.encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self._language_headers()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
     def _json(self, body, status=200):
+        language = self._language()
+        if isinstance(body, dict):
+            body = {
+                key: (
+                    translate_error(value, language)
+                    if key == "error" and isinstance(value, str)
+                    else translate(value, language)
+                    if key in {"message", "activity"} and isinstance(value, str)
+                    else value
+                )
+                for key, value in body.items()
+            }
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
+        self._language_headers()
         self.send_header("Cache-Control", "no-store")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -6249,12 +6398,16 @@ class Handler(BaseHTTPRequestHandler):
         if not path.startswith(STATIC_DIR + os.sep) or extension not in content_types:
             return self._json({"error": "静的ファイルが見つかりません"}, 404)
         try:
-            with open(path, "rb") as source:
-                data = source.read()
+            with open(path, encoding="utf-8") as source:
+                content = source.read()
         except OSError:
             return self._json({"error": "静的ファイルが見つかりません"}, 404)
+        if extension == ".js":
+            content = localize_source(content, self._language())
+        data = content.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", content_types[extension])
+        self._language_headers()
         self.send_header("Cache-Control", "public, max-age=86400")
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
@@ -6278,6 +6431,7 @@ class Handler(BaseHTTPRequestHandler):
         if not client_allowed(self.client_address[0]):
             return self._deny()
         parsed = urllib.parse.urlparse(self.path)
+        language = self._language()
         if parsed.path in {"/favicon.svg", "/favicon.ico"}:
             return self._icon()
         static_match = re.fullmatch(r"/static/([A-Za-z0-9_.-]+)", parsed.path)
@@ -6287,34 +6441,39 @@ class Handler(BaseHTTPRequestHandler):
         if icon_match:
             return self._tool_icon(icon_match.group(1))
         if parsed.path == "/new":
-            return self._page(render(view="new"))
+            return self._page(render(view="new", language=language))
         if parsed.path in {"/", "/sessions"}:
             # デフォルトはセッション一覧。PCは右ペインで選択か新規起動を促し、
             # SPは一覧のみを全画面表示する。0件でもランチャーへ自動遷移しない。
-            return self._page(LIST_PAGE.format(
+            return self._page(localize_source(LIST_PAGE, language).format(
+                language=language,
                 favicon_version=urllib.parse.quote(VERSION),
-                sessions_sidebar=build_sidebar(None),
+                sessions_sidebar=build_sidebar(None, language),
                 boot_json=json.dumps(BOOT_ID),
                 sidebar_css=SIDEBAR_CSS,
-                sidebar_js=SIDEBAR_JS,
+                sidebar_js=localize_source(SIDEBAR_JS, language),
             ))
         if parsed.path == "/terminal":
             terminal_qs = urllib.parse.parse_qs(parsed.query)
             session = terminal_qs.get("session", [""])[0]
             diff_open = "always" if terminal_qs.get("review") == ["1"] else DIFF_OPEN
             if not valid_session(session):
-                return self._page(render('<div class="msg err">❌ セッションが見つかりません</div>'), 404)
+                message = translate("セッションが見つかりません", language)
+                return self._page(render(
+                    f'<div class="msg err">❌ {message}</div>', language=language
+                ), 404)
             item = next(item for item in managed_sessions() if item["name"] == session)
             model = model_label(item.get("model", ""), item["tool"])
             choices = switchable_models(item["tool"])
             if choices:
                 badge = (
                     '<button type="button" class="model" id="model">'
-                    f'{html.escape(model) or "モデル"}</button>'
+                    f'{html.escape(model) or translate("モデル", language)}</button>'
                 )
             else:
                 badge = f'<span class="model">{html.escape(model)}</span>' if model else ""
-            return self._page(TERMINAL_PAGE.format(
+            return self._page(localize_source(TERMINAL_PAGE, language).format(
+                language=language,
                 favicon_version=urllib.parse.quote(VERSION),
                 title=html.escape(f'{item["tool"]} - {item["name"]}'),
                 tool_html=tool_label(item["tool"]),
@@ -6323,7 +6482,7 @@ class Handler(BaseHTTPRequestHandler):
                 context_badge=context_badge_html(item.get("context")),
                 model_choices="".join(
                     f'<button type="button" class="model-choice" data-model="{html.escape(value)}">'
-                    f'{html.escape(label)}</button>'
+                    f'{html.escape(translate(label, language))}</button>'
                     for value, label in MODELS_BY_TOOL.get(item["tool"], [])
                     if value in choices
                 ),
@@ -6336,17 +6495,22 @@ class Handler(BaseHTTPRequestHandler):
                 pin_button="",
                 note_button=(
                     '<button type="button" class="note-button" id="note" title="'
-                    f'{html.escape(item.get("note") or "メモを追加")}">'
-                    '<span class="label">メモ</span><span class="icon">📝</span>'
-                    '<span class="menu-label">📝 メモを編集</span></button>'
+                    f'{html.escape(item.get("note") or translate("メモを追加", language))}">'
+                    f'<span class="label">{translate("メモ", language)}</span>'
+                    '<span class="icon">📝</span>'
+                    f'<span class="menu-label">'
+                    f'{translate("📝 メモを編集", language)}</span></button>'
                 ),
-                sessions_sidebar=build_sidebar(session),
-                sidebar_css=SIDEBAR_CSS, sidebar_js=SIDEBAR_JS,
+                sessions_sidebar=build_sidebar(session, language),
+                sidebar_css=SIDEBAR_CSS,
+                sidebar_js=localize_source(SIDEBAR_JS, language),
                 restart_button=(
                     (
                         '<button type="button" data-restart="keep">'
-                        '<span class="label">再起動</span><span class="icon">↻</span>'
-                        '<span class="menu-label">↻ セッションを再起動</span></button>'
+                        f'<span class="label">{translate("再起動", language)}</span>'
+                        '<span class="icon">↻</span>'
+                        f'<span class="menu-label">↻ '
+                        f'{translate("セッションを再起動", language)}</span></button>'
                         if item["session_id"] else ""
                     )
                     + (
@@ -6354,14 +6518,18 @@ class Handler(BaseHTTPRequestHandler):
                         f'{"Codex" if item["tool"] == "claude" else "Claude"}">'
                         f'<span class="label">→ {"Codex" if item["tool"] == "claude" else "Claude"}</span>'
                         '<span class="icon">⇄</span>'
-                        f'<span class="menu-label">⇄ {"Codex" if item["tool"] == "claude" else "Claude"}'
-                        'へ切り替え</span></button>'
+                        f'<span class="menu-label">⇄ '
+                        f'{translate("切り替え先", language)}: '
+                        f'{"Codex" if item["tool"] == "claude" else "Claude"}'
+                        '</span></button>'
                         if item["tool"] in TOOLS else ""
                     )
                     + (
                         '<button type="button" class="warn" data-restart="bypass">'
-                        '<span class="label">⚠️ バイパス</span><span class="icon">⚠️</span>'
-                        '<span class="menu-label">⚠️ バイパスで再起動</span></button>'
+                        f'<span class="label">{translate("⚠️ バイパス", language)}</span>'
+                        '<span class="icon">⚠️</span>'
+                        f'<span class="menu-label">⚠️ '
+                        f'{translate("バイパスで再起動", language)}</span></button>'
                         if item["session_id"] else ""
                     )
                 ),
@@ -6369,6 +6537,7 @@ class Handler(BaseHTTPRequestHandler):
                     ' class="review-closed"' if diff_open != "always" else ' class="review-open"'
                 ),
                 artifacts_html=artifact_links(item.get("artifacts", [])),
+                language_switch=language_switch_html(language),
             ))
         if parsed.path == "/api/usage":
             return self._json(usage_data() or {"providers": []})
@@ -6411,7 +6580,7 @@ class Handler(BaseHTTPRequestHandler):
                         if entry["tool"] in TOOL_ICONS else ""
                     ),
                     "dir": dir_label(entry["cwd"]),
-                    "status": status_text, "status_class": status_class,
+                    "status": translate(status_text, language), "status_class": status_class,
                     "context": entry.get("context"),
                     "summary": entry["summary"],
                     "last_message": entry["last_message"],
@@ -6560,8 +6729,8 @@ class Handler(BaseHTTPRequestHandler):
                     qs.get("resume", [""])[0],
                     qs.get("pull_request", [""])[0],
                 )
-            return self._page(render(view="new"), 200)
-        self._page(render(view="sessions"))
+            return self._page(render(view="new", language=language), 200)
+        self._page(render(view="sessions", language=language))
 
     def do_POST(self):
         if not client_allowed(self.client_address[0]):
@@ -6831,7 +7000,7 @@ class Handler(BaseHTTPRequestHandler):
                 qs.get("resume", [""])[0],
                 qs.get("pull_request", [""])[0],
             )
-        self._page(render(), 404)
+        self._page(render(language=self._language()), 404)
 
     def _upload_file(self, url_path):
         """アップロード済みファイルをサムネイル/プレビュー用に配信する。"""
@@ -6975,26 +7144,31 @@ class Handler(BaseHTTPRequestHandler):
     def _launch(self, raw_dir: str, model: str = "default", tool: str = "claude",
                 prompt: str = "", bypass: str = "0",
                 resume: str = "", pull_request: str = ""):
+        language = self._language()
+
+        def launch_page(message):
+            return self._page(render(localize_source(message, language), "new", language))
+
         path, err = validate_dir(raw_dir)
         if err:
-            return self._page(render(f'<div class="msg err">❌ {html.escape(err)}</div>', "new"))
+            return launch_page(f'<div class="msg err">❌ {html.escape(err)}</div>')
         if tool not in TOOLS:
-            return self._page(render('<div class="msg err">❌ 不正なツール指定です</div>', "new"))
+            return launch_page('<div class="msg err">❌ 不正なツール指定です</div>')
         if model not in {v for v, _ in MODELS_BY_TOOL[tool]}:
-            return self._page(render('<div class="msg err">❌ 不正なモデル指定です</div>', "new"))
+            return launch_page('<div class="msg err">❌ 不正なモデル指定です</div>')
         if bypass not in {"0", "1"}:
-            return self._page(render('<div class="msg err">❌ 不正な権限指定です</div>', "new"))
+            return launch_page('<div class="msg err">❌ 不正な権限指定です</div>')
         resume_log = ""
         if resume:
             if not re.fullmatch(r"[0-9a-f-]{36}", resume):
-                return self._page(render('<div class="msg err">❌ 再開する会話の指定が不正です</div>', "new"))
+                return launch_page('<div class="msg err">❌ 再開する会話の指定が不正です</div>')
             resume_log = conversation_log_path(tool, path, resume)
             if not resume_log:
                 # 会話途中で cwd を移動すると、一覧が送った cwd と
                 # JSONLの保存先が食い違うことがある。IDで横断検索する。
                 resume_log = find_log_by_id(tool, resume)
             if not resume_log:
-                return self._page(render('<div class="msg err">❌ 再開する会話が見つかりません</div>', "new"))
+                return launch_page('<div class="msg err">❌ 再開する会話が見つかりません</div>')
             if tool == "claude":
                 # ログが保持する最新 cwd で再開する。削除済みworktree
                 # など、使えない場所には暗黙に起動しない。
@@ -7002,15 +7176,15 @@ class Handler(BaseHTTPRequestHandler):
                 if resume_cwd and os.path.realpath(resume_cwd) != path:
                     path, err = validate_dir(resume_cwd)
                     if err:
-                        return self._page(render(
+                        return launch_page(
                             f'<div class="msg err">❌ 会話の作業ディレクトリを使用できません: '
-                            f'{html.escape(err)}</div>', "new"
-                        ))
+                            f'{html.escape(err)}</div>'
+                        )
         skip_permissions = bypass == "1"
         try:
             pull_request = normalize_pr_selector(pull_request)
         except ValueError as exc:
-            return self._page(render(f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"))
+            return launch_page(f'<div class="msg err">❌ {html.escape(str(exc))}</div>')
         if pull_request:
             # レビュー起動では対象PRを別途書き出すため、通常起動用の入力欄は引き継がない。
             prompt = ""
@@ -7019,12 +7193,12 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 path = pull_request_worktree(pull_request_target(pull_request))
             except (LookupError, RuntimeError, ValueError) as exc:
-                return self._page(render(
-                    f'<div class="msg err">❌ {html.escape(str(exc))}</div>', "new"
-                ))
+                return launch_page(
+                    f'<div class="msg err">❌ {html.escape(str(exc))}</div>'
+                )
         prompt = prompt.strip()
         if len(prompt) > 8000:
-            return self._page(render('<div class="msg err">❌ プロンプトが長すぎます（8000文字まで）</div>', "new"))
+            return launch_page('<div class="msg err">❌ プロンプトが長すぎます（8000文字まで）</div>')
         cmd = [*TOOLS[tool], path]
         if resume:
             cmd += ["--resume", resume] if tool == "claude" else ["resume", resume]
@@ -7041,7 +7215,7 @@ class Handler(BaseHTTPRequestHandler):
                 env={**os.environ},
             )
         except subprocess.TimeoutExpired:
-            return self._page(render('<div class="msg err">❌ タイムアウトしました</div>', "new"))
+            return launch_page('<div class="msg err">❌ タイムアウトしました</div>')
         if r.returncode == 0:
             session_name = launcher_session_name(r.stdout)
             if resume:
@@ -7076,7 +7250,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             detail = (r.stderr or r.stdout or "").strip()
         msg = f'<div class="msg err">❌ 失敗: {html.escape(detail)}</div>'
-        self._page(render(msg, "new"))
+        launch_page(msg)
 
     def log_message(self, fmt, *args):
         pass  # launchd のログを汚さない
