@@ -1748,13 +1748,34 @@ Enter text for option 3 (Other), or Escape for the list:
         with (
             mock.patch.object(server, "valid_session", return_value=True),
             mock.patch.object(server, "capture_session", return_value=screen),
-            mock.patch.object(server, "send_session_text") as send,
+            mock.patch.object(server, "send_custom_answer_text") as send,
             mock.patch.object(handler, "_json") as response,
         ):
             handler.do_POST()
 
         send.assert_called_once_with("agent-test", "cronで実行")
         response.assert_called_once_with({"ok": True})
+
+    def test_sends_other_custom_answer_as_literal_keys(self):
+        succeeded = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(server, "tmux_run", return_value=succeeded) as tmux,
+            mock.patch.object(server.time, "sleep") as sleep,
+        ):
+            server.send_custom_answer_text("agent-test", "1行目\n2行目\t補足")
+
+        answer = "1行目 2行目 補足"
+        self.assertEqual(
+            [
+                mock.call("send-keys", "-l", "-t", "agent-test", character)
+                for character in answer
+            ] + [mock.call("send-keys", "-t", "agent-test", "Enter")],
+            tmux.call_args_list,
+        )
+        self.assertEqual(
+            [mock.call(0.035)] * len(answer) + [mock.call(0.2)],
+            sleep.call_args_list,
+        )
 
     def test_new_prompt_with_arrow_key_hint_is_parsed(self):
         screen = self.NEW_DIALOG.replace(

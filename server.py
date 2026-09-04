@@ -3381,6 +3381,25 @@ def send_session_text(name, value, enter=True):
     return None
 
 
+def send_custom_answer_text(name, value):
+    """Claude の Other 自由入力欄へ回答をキー入力として送る。"""
+    # AskUserQuestion の自由入力欄は bracketed paste を受け付けないため、
+    # 通常メッセージ用の send_session_text は使えない。改行やタブは Enter/Tab の
+    # 操作として解釈されるので、回答が途中で確定しないよう空白へ置き換える。
+    value = re.sub(r"[\r\n\t]+", " ", value)
+    # まとめて流すと Claude Code 2.1.260 の入力処理が文字を取りこぼすため、
+    # 実際のキーボード入力に近い間隔で1文字ずつ送る。
+    for character in value:
+        typed = tmux_run("send-keys", "-l", "-t", name, character)
+        if typed.returncode != 0:
+            raise RuntimeError(typed.stderr.strip() or "入力を送信できませんでした")
+        time.sleep(0.035)
+    time.sleep(0.2)
+    submitted = tmux_run("send-keys", "-t", name, "Enter")
+    if submitted.returncode != 0:
+        raise RuntimeError(submitted.stderr.strip() or "入力を送信できませんでした")
+
+
 def cleanup_uploads(max_age=90 * 24 * 60 * 60):
     cutoff = time.time() - max_age
     try:
@@ -6750,7 +6769,7 @@ class Handler(BaseHTTPRequestHandler):
                             return self._json(
                                 {"error": "自由入力待ちではありません"}, 409
                             )
-                        send_session_text(session, text)
+                        send_custom_answer_text(session, text)
                         return self._json({"ok": True})
                     # 複数選択の質問は "1,3" のようにカンマ区切りで届く。
                     number = qs.get("number", [""])[0]
