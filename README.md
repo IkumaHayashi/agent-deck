@@ -6,7 +6,7 @@ AI コーディング CLI（Claude Code / Codex）を Mac の tmux 上で起動�
 > Agent Deck is a web launcher & session manager for AI coding CLIs
 > (Claude Code / Codex) running in tmux on macOS.
 > Launch sessions from your phone, watch progress, send messages, and
-> hand conversations off between CLIs. The UI is currently Japanese-only.
+> hand conversations off between CLIs. The web UI is available in Japanese and English.
 
 ![セッション操作画面（PC）](docs/images/terminal-pc.png)
 
@@ -87,7 +87,18 @@ FileVault が有効な場合は再起動後に一度 Mac 本体でログイン�
 
 - **内部仕様への依存**: Claude Code の会話ログ（JSONL）、選択肢画面の tmux パース、Codex の rollout ファイル等、CLI の非公開仕様に依存しています。CLI のアップデートで表示が壊れることがあります
 - **API 課金**: セッション一覧の「要対応/他者待ち/完了」分類は `claude -p` を呼び出すため、少量の API / サブスクリプション利用が発生します。既定は Haiku で、`wait_classifier_model` により Sonnet などへ変更できます
-- **UI は日本語のみ**です
+
+## 表示言語
+
+Web UIは日本語と英語に対応しています。初回アクセス時はブラウザの
+`Accept-Language` を参照し、対応言語が見つからない場合は日本語を表示します。
+画面の「表示言語」から切り替えると、選択内容をCookieへ1年間保存します。
+
+言語を直接指定する場合はURLへ `lang=ja` または `lang=en` を付けます。
+
+```text
+http://<Mac の Tailscale IP>:8787/?lang=en
+```
 
 ## 使い方
 
@@ -162,6 +173,11 @@ AI の回答内でテキストをドラッグ選択すると「選択部分を�
 
 `~/.config/agent-deck/config.json`（`AGENT_DECK_CONFIG` 環境変数で変更可）。
 全項目とコメントは [config.example.json](config.example.json) を参照してください。
+
+PCではサイドバー上部の歯車、スマートフォンでは設定ページへのリンクから設定UIを
+開けます。一般設定とプロジェクト設定は画面から保存でき、Agent Deckの再起動後に
+反映されます。実行コマンド・CLIパス・ポート・許可ネットワークなどセキュリティや
+接続に関わる項目は確認専用です。変更する場合は設定ファイルを直接編集してください。
 
 差分モードでは、通常のセッションは作業ディレクトリをリポジトリのデフォルトブランチと比較します。
 初期表示は `diff_open` で選べます。`never`（既定）は常に閉じ、
