@@ -186,6 +186,72 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
 
+    def test_session_list_embeds_launcher_on_desktop(self):
+        self.assertIn('class="launcher-frame"', server.LIST_PAGE)
+        self.assertIn('src="/new?embedded=1&amp;lang={language}"', server.LIST_PAGE)
+        self.assertIn(
+            'class="new-link new-link-desktop" href="/"', server.build_sidebar(None)
+        )
+        self.assertIn(
+            'class="new-link new-link-mobile" href="/new"', server.build_sidebar(None)
+        )
+
+        embedded = server.render(embedded=True)
+        self.assertIn('<base target="_top">', embedded)
+        self.assertIn('<body class="embedded">', embedded)
+
+    def test_sidebar_keeps_usage_footer_visible_while_sessions_scroll(self):
+        self.assertIn(
+            "#side-sessions { min-height: 0; flex: 1 1 auto; overflow-y: auto;",
+            server.SIDEBAR_CSS,
+        )
+        self.assertIn("#sidebar-footer { flex: 0 0 auto;", server.SIDEBAR_CSS)
+        self.assertIn(
+            'aiUsage.textContent = "使用量を取得できませんでした"', server.SIDEBAR_JS
+        )
+
+    def test_usage_error_cache_retries_earlier_than_success(self):
+        error = {"providers": [], "error": "一時エラー"}
+        success = {"providers": [{"name": "Codex", "rows": []}]}
+        result = SimpleNamespace(stdout=json.dumps(success))
+
+        with (
+            mock.patch.object(server, "USAGE_COMMAND", "usage --json"),
+            mock.patch.object(server, "USAGE_CACHE", {"data": error, "at": 100.0}),
+            mock.patch.object(server.time, "time", return_value=131.0),
+            mock.patch.object(server.subprocess, "run", return_value=result) as run,
+        ):
+            self.assertEqual(success, server.usage_data())
+
+        run.assert_called_once()
+
+    def test_usage_labels_are_localized_without_changing_provider_name(self):
+        data = {
+            "providers": [
+                {
+                    "name": "社内Codex",
+                    "rows": [
+                        {
+                            "label": "週間枠",
+                            "percent": 76,
+                            "reset_label": "リセット 9/7 14:49",
+                        }
+                    ],
+                    "extra": None,
+                }
+            ],
+        }
+
+        localized = server.localize_usage_data(data, "en")
+
+        self.assertEqual("社内Codex", localized["providers"][0]["name"])
+        self.assertEqual("Weekly", localized["providers"][0]["rows"][0]["label"])
+        self.assertEqual(
+            "Resets 9/7 14:49",
+            localized["providers"][0]["rows"][0]["reset_label"],
+        )
+        self.assertEqual("週間枠", data["providers"][0]["rows"][0]["label"])
+
     def test_all_pages_use_the_app_icon_assets(self):
         for page in (server.LIST_PAGE, server.TERMINAL_PAGE):
             self.assertIn("/favicon.svg?v={favicon_version}", page)

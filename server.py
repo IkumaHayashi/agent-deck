@@ -3643,8 +3643,10 @@ def tool_label(tool):
 
 def build_sidebar(active, language="ja"):
     """2ペイン表示のサイドバーHTMLを組み立てる。activeは選択中のセッション名。"""
+    new_label = translate("＋ 新規起動", language)
     sidebar = (
-        f'<a class="new-link" href="/new">{translate("＋ 新規起動", language)}</a>'
+        f'<a class="new-link new-link-desktop" href="/">{new_label}</a>'
+        f'<a class="new-link new-link-mobile" href="/new">{new_label}</a>'
     )
     sidebar += (
         '<label class="filter-toggle"><input type="checkbox" id="filter-need">'
@@ -3715,6 +3717,7 @@ def build_sidebar(active, language="ja"):
 # "level"}], "extra", "stale", "message"}]}（tools/ai-usage の --json 互換）。
 USAGE_COMMAND = CONFIG.get("usage_command", "")
 USAGE_TTL_SEC = 300  # 使用量APIは非公開なので叩きすぎない
+USAGE_ERROR_TTL_SEC = 30  # 一時エラーは長時間キャッシュせず早めに回復させる
 USAGE_CACHE = {"data": None, "at": 0.0}
 USAGE_LOCK = threading.Lock()
 
@@ -3724,20 +3727,55 @@ def usage_data():
     if not USAGE_COMMAND:
         return None
     with USAGE_LOCK:
-        if (
-            USAGE_CACHE["data"] is not None
-            and time.time() - USAGE_CACHE["at"] < USAGE_TTL_SEC
-        ):
-            return USAGE_CACHE["data"]
+        cached = USAGE_CACHE["data"]
+        ttl = (
+            USAGE_TTL_SEC
+            if isinstance(cached, dict) and cached.get("providers")
+            else USAGE_ERROR_TTL_SEC
+        )
+        if cached is not None and time.time() - USAGE_CACHE["at"] < ttl:
+            return cached
         try:
             result = subprocess.run(
                 USAGE_COMMAND, shell=True, capture_output=True, text=True, timeout=25
             )
             data = json.loads(result.stdout)
         except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError):
-            return USAGE_CACHE["data"]
+            return cached
+        if not isinstance(data, dict):
+            return cached
         USAGE_CACHE.update(data=data, at=time.time())
         return data
+
+
+def localize_usage_data(data, language):
+    """使用量JSONの既知ラベルだけを翻訳し、provider固有の値は保持する。"""
+    if language == "ja" or not isinstance(data, dict):
+        return data
+    localized = {**data, "providers": []}
+    for provider in data.get("providers") or []:
+        provider = dict(provider)
+        for field in ("rows",):
+            provider[field] = [
+                localize_usage_item(item, language)
+                for item in provider.get(field) or []
+            ]
+        if provider.get("extra"):
+            provider["extra"] = localize_usage_item(provider["extra"], language)
+        localized["providers"].append(provider)
+    return localized
+
+
+def localize_usage_item(item, language):
+    localized = dict(item)
+    localized["label"] = translate(localized.get("label", ""), language)
+    reset_label = localized.get("reset_label", "")
+    reset_prefix = "リセット "
+    if reset_label.startswith(reset_prefix):
+        localized["reset_label"] = (
+            translate(reset_prefix, language) + reset_label[len(reset_prefix) :]
+        )
+    return localized
 
 
 def capture_session(name):
@@ -4180,15 +4218,15 @@ NEW_PAGE_TEMPLATE = "new.html"
 # セッション一覧サイドバーのCSS。一覧ページ（LIST_PAGE）と2ペイン表示
 # （TERMINAL_PAGE）で共有する。format() の値として挿入するので brace は素のまま。
 SIDEBAR_CSS = r"""
-  aside { width: 320px; flex: 0 0 320px; overflow-y: auto; --aside-pad-b: 12px;
+  aside { width: 320px; flex: 0 0 320px; overflow: hidden; --aside-pad-b: 12px;
     padding: 12px 12px var(--aside-pad-b); display: flex; flex-direction: column;
     border-right: 1px solid #30363d; background: #161b22; }
-  /* flex化してもリストは潰さずasideのスクロールに任せる */
+  /* ヘッダーと使用量フッターを固定し、セッション一覧だけをスクロールする */
   aside > * { flex-shrink: 0; }
-  /* AI使用量フッター。usage_command 設定時のみ表示。リストが短くても
-     margin-top:auto で最下端に落とし、あふれたら sticky で張り付かせる */
-  #sidebar-footer { position: sticky; bottom: calc(-1 * var(--aside-pad-b));
-    margin: auto -12px calc(-1 * var(--aside-pad-b)); padding: 8px 12px var(--aside-pad-b);
+  #side-sessions { min-height: 0; flex: 1 1 auto; overflow-y: auto;
+    margin-right: -5px; padding-right: 5px; }
+  #sidebar-footer { flex: 0 0 auto; margin: 0 -12px calc(-1 * var(--aside-pad-b));
+    padding: 8px 12px var(--aside-pad-b);
     background: #161b22; border-top: 1px solid #30363d; }
   #app-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px;
     color: #8b949e; font-size: .72rem; }
@@ -4216,6 +4254,7 @@ SIDEBAR_CSS = r"""
   aside small.note { color: #d29922; -webkit-line-clamp: 2; }
   aside #side-sessions a small:not(.first) { -webkit-line-clamp: 1; }
   aside .new-link { text-align: center; color: #8ab4f8; border-style: dashed; }
+  aside .new-link-mobile { display: none; }
   aside .wez { margin: 7px 0; padding: 10px; border: 1px dashed #30363d; border-radius: 8px;
     overflow-wrap: anywhere; opacity: .75; }
   .st { margin-left: 8px; padding: 1px 8px; font-size: .68rem; font-weight: 600;
@@ -4294,6 +4333,10 @@ SIDEBAR_CSS = r"""
     border: 1px solid #30363d; border-radius: 7px; background: #0d1117;
     color: #e6edf3; font: inherit; }
   aside .language-switch { margin-top: 8px; }
+  @media (max-width: 799px) {
+    aside .new-link-desktop { display: none; }
+    aside .new-link-mobile { display: block; }
+  }
   /* ページ遷移中のローディング。サーバー描画が重いページへの移動中に出す */
   #nav-loading { position: fixed; inset: 0; z-index: 300; display: grid;
     place-items: center; background: #0d1117cc; }
@@ -4610,7 +4653,16 @@ SIDEBAR_JS = r"""
       const response = await fetch("/api/usage");
       if (!response.ok) return;
       const data = await response.json();
-      if (!data.providers || !data.providers.length) return;
+      if (!data.providers || !data.providers.length) {
+        if (data.error) {
+          aiUsage.className = "usage-err";
+          aiUsage.textContent = "使用量を取得できませんでした";
+          aiUsage.title = data.error;
+          aiUsage.hidden = false;
+        }
+        return;
+      }
+      aiUsage.className = "";
       if (data.updated_at) aiUsage.title = "取得 " + data.updated_at;
       aiUsage.replaceChildren(...data.providers.map(provider => {
         const row = document.createElement("div");
@@ -4651,8 +4703,8 @@ SIDEBAR_JS = r"""
 """
 
 
-# デフォルト（/）のセッション一覧ページ。PCは左に一覧・右は選択か新規起動を
-# 促すプレースホルダ、SPは一覧のみを全画面で表示する。
+# デフォルト（/）のセッション一覧ページ。PCは左に一覧・右に新規起動画面、
+# SPは一覧のみを全画面で表示する。
 LIST_PAGE = r"""<!doctype html>
 <html lang="{language}"><head>
 <meta charset="utf-8">
@@ -4672,25 +4724,18 @@ LIST_PAGE = r"""<!doctype html>
     background: #0d1117; color: #e6edf3; font-family: -apple-system, sans-serif; font-size: 18px; }}
   .app {{ height: 100%; display: flex; }}
 {sidebar_css}
-  .placeholder {{ min-width: 0; flex: 1; display: grid; place-items: center; padding: 20px; }}
-  .placeholder .inner {{ text-align: center; color: #8b949e; }}
-  .placeholder p {{ margin: 0 0 18px; font-size: 1.05rem; }}
-  .placeholder a {{ display: inline-block; padding: 13px 26px; border: 1px solid #2ea043;
-    border-radius: 10px; background: #238636; color: #fff; text-decoration: none;
-    font-weight: 600; }}
+  .launcher-frame {{ min-width: 0; flex: 1; border: 0; background: #0d1117; }}
   @media (max-width: 799px) {{
-    /* SPは一覧を全画面にし、右ペインは出さない */
+    /* SPは一覧を全画面にし、新規起動は従来どおり別ページで開く */
     aside {{ width: 100%; flex: 1; border-right: none;
       --aside-pad-b: max(12px, env(safe-area-inset-bottom)); }}
-    .placeholder {{ display: none; }}
+    .launcher-frame {{ display: none; }}
   }}
 </style></head><body>
 <div class="app"><aside><h2><img class="app-logo" src="/favicon.svg?v={favicon_version}"
   alt="">Agent Deck</h2>{sessions_sidebar}</aside>
-<main class="placeholder"><div class="inner">
-  <p>左の一覧からセッションを選択してください</p>
-  <a href="/new">＋ 新規セッションを開始</a>
-</div></main></div>
+<iframe class="launcher-frame" title="＋ 新規セッションを開始"
+  src="/new?embedded=1&amp;lang={language}"></iframe></div>
 <script>
   const session = null;
   const bootId = {boot_json};
@@ -6657,7 +6702,7 @@ CHATWORK_PANEL = """<section class="launcher-panel" id="inbox-panel">
 <div id="cw-room-messages"></div></section>"""
 
 
-def render(message="", view="new", language="ja"):
+def render(message="", view="new", language="ja", embedded=False):
     # view は旧・一覧ページ時代の名残。呼び出し側の互換のため残している。
     del view
     buttons = "\n".join(
@@ -6718,6 +6763,8 @@ def render(message="", view="new", language="ja"):
     )
     return localize_source(load_template(NEW_PAGE_TEMPLATE), language).format(
         language=language,
+        base_target='<base target="_top">' if embedded else "",
+        body_class="embedded" if embedded else "",
         favicon_version=urllib.parse.quote(VERSION),
         static_version=urllib.parse.quote(BOOT_ID),
         message=message,
@@ -6871,7 +6918,8 @@ class Handler(BaseHTTPRequestHandler):
         if icon_match:
             return self._tool_icon(icon_match.group(1))
         if parsed.path == "/new":
-            return self._page(render(view="new", language=language))
+            embedded = urllib.parse.parse_qs(parsed.query).get("embedded") == ["1"]
+            return self._page(render(view="new", language=language, embedded=embedded))
         if parsed.path in {"/", "/sessions"}:
             # デフォルトはセッション一覧。PCは右ペインで選択か新規起動を促し、
             # SPは一覧のみを全画面表示する。0件でもランチャーへ自動遷移しない。
@@ -6986,7 +7034,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             )
         if parsed.path == "/api/usage":
-            return self._json(usage_data() or {"providers": []})
+            data = usage_data() or {"providers": []}
+            return self._json(localize_usage_data(data, language))
         if parsed.path == "/api/review-requests":
             try:
                 return self._json({"items": github_review_requests()})
