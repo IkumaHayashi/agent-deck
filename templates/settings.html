@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="{language}"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#171523">
+<title>設定 - Agent Deck</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
+<link rel="stylesheet" href="/static/settings.css?v={static_version}">
+<style>{sidebar_css}</style></head><body>
+<div class="settings-app"><aside>{sidebar_heading}{sessions_sidebar}</aside>
+<main class="settings-main">
+  <header class="settings-heading">
+    <a class="mobile-back" href="/">‹ セッションへ</a>
+    <div><h1>設定</h1><p>保存するとAgent Deckを再起動して反映します。</p></div>
+  </header>
+  <form id="settings-form">
+    <nav class="settings-nav" aria-label="設定カテゴリ">
+      <button type="button" class="active" data-settings-tab="general">一般</button>
+      <button type="button" data-settings-tab="projects">プロジェクト</button>
+      <button type="button" data-settings-tab="integrations">連携</button>
+      <button type="button" data-settings-tab="advanced">詳細設定</button>
+    </nav>
+    <div class="settings-content">
+      <section class="settings-section active" data-settings-section="general">
+        <h2>一般</h2>
+        <div class="setting-card">
+          <div class="field-row"><div><strong>表示言語</strong><small>画面に表示する言語です。</small></div>{language_switch}</div>
+          <label class="field-row"><span><strong>セッションを自動復元</strong><small>Macの再起動後に通常セッションを会話IDから復元します。</small></span><span class="switch"><input type="checkbox" name="restore_sessions" value="1"{restore_checked}><i></i></span></label>
+          <label class="field-block"><strong>差分の初期表示</strong><small>セッションを開いたときのデフォルトブランチとの差分表示です。</small>
+            <select name="diff_open"><option value="never"{diff_never_selected}>常に閉じる</option><option value="auto"{diff_auto_selected}>差分がある場合に開く</option><option value="always"{diff_always_selected}>常に開く</option></select></label>
+          <label class="field-block"><strong>返事待ちの分類モデル</strong><small>セッションを「要対応・他者待ち・完了」に分類します。</small>
+            <select name="wait_classifier_model"><option value="haiku"{classifier_haiku_selected}>haiku（高速）</option><option value="sonnet"{classifier_sonnet_selected}>sonnet（高精度）</option></select></label>
+        </div>
+      </section>
+
+      <section class="settings-section" data-settings-section="projects">
+        <h2>プロジェクト</h2>
+        <div class="setting-card">
+          <label class="field-block"><strong>プロジェクトの親ディレクトリ</strong><small>直下のディレクトリを起動候補へ追加します。1行に1件入力してください。</small><textarea name="project_bases" rows="3" placeholder="~/projects">{project_bases}</textarea></label>
+          <div class="field-block"><strong>固定プロジェクト</strong><small>新規起動画面に大きなボタンで表示します。</small><div class="project-setting-rows" data-project-rows="pinned">{pinned_rows}</div><button type="button" class="add-row" data-add-row="pinned">＋ プロジェクトを追加</button></div>
+          <div class="field-block"><strong>追加プロジェクト</strong><small>親ディレクトリ外のプロジェクトを起動候補へ追加します。</small><div class="project-setting-rows" data-project-rows="extra">{extra_rows}</div><button type="button" class="add-row" data-add-row="extra">＋ プロジェクトを追加</button></div>
+          <label class="field-block"><strong>最近の会話の対象</strong><small>「会話を再開」に表示する作業ディレクトリを限定します。空欄ならホーム配下すべてが対象です。</small><textarea name="recent_dirs" rows="3">{recent_dirs}</textarea></label>
+        </div>
+      </section>
+
+      <section class="settings-section" data-settings-section="integrations">
+        <h2>連携</h2>
+        <p class="readonly-note">セキュリティに関わるため、この画面では確認のみできます。変更は設定ファイルを編集してください。</p>
+        <div class="setting-card">
+          <label class="field-block"><strong>AI使用量コマンド</strong><small>サイドバー下部へ表示する使用量JSONを標準出力するコマンドです。</small><input value="{usage_command}" placeholder="未設定" readonly></label>
+          <div class="field-group"><h3>Chatwork</h3>
+            <label class="field-block"><strong>アカウントID</strong><input value="{chatwork_account_id}" placeholder="未設定" readonly></label>
+            <label class="field-block"><strong>tokenファイル</strong><small>token自体ではなく、保存済みファイルのパスです。</small><input value="{chatwork_token_path}" readonly></label>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section" data-settings-section="advanced">
+        <h2>詳細設定</h2>
+        <p class="readonly-note">実行権限やアクセス範囲に関わるため、この画面では確認のみできます。</p>
+        <div class="setting-card">
+          <div class="field-grid"><label class="field-block"><strong>ポート</strong><input value="{port}" readonly></label><label class="field-block"><strong>データ保存先</strong><input value="{data_dir}" readonly></label></div>
+          <div class="field-group"><h3>CLIパス</h3><small>空欄の場合はPATHなどから自動検出します。</small>
+            <div class="field-grid"><label class="field-block"><strong>Claude Code</strong><input value="{claude_bin}" placeholder="自動検出" readonly></label><label class="field-block"><strong>Codex</strong><input value="{codex_bin}" placeholder="自動検出" readonly></label><label class="field-block"><strong>tmux</strong><input value="{tmux_bin}" placeholder="自動検出" readonly></label><label class="field-block"><strong>GitHub CLI</strong><input value="{gh_bin}" placeholder="自動検出" readonly></label></div>
+          </div>
+          <label class="field-block"><strong>アクセス許可ネットワーク</strong><small>CIDR形式で設定されています。</small><textarea rows="5" readonly>{allowed_networks}</textarea></label>
+          <div class="config-path"><small>設定ファイル</small><code>{config_path}</code></div>
+        </div>
+      </section>
+    </div>
+    <footer class="settings-actions"><span id="settings-status" role="status"></span><button type="submit" id="settings-save">保存して再起動</button></footer>
+  </form>
+</main></div>
+<div id="settings-restarting" hidden><div><span class="spinner"></span><strong>設定を反映しています…</strong><small>Agent Deckの再起動後に自動で再読み込みします。</small></div></div>
+<script>const session = null; const bootId = {boot_json};</script>
+<script>{sidebar_js}</script>
+<script src="/static/settings.js?v={static_version}&amp;lang={language}" defer></script>
+</body></html>

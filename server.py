@@ -58,6 +58,83 @@ def load_config(path=None):
         return {}
 
 
+def save_config(config, path=None):
+    """設定を一時ファイルへ書いてから置き換える。"""
+    target = path or CONFIG_PATH
+    directory = os.path.dirname(target) or "."
+    os.makedirs(directory, exist_ok=True)
+    temporary = f"{target}.tmp-{os.getpid()}-{uuid.uuid4().hex}"
+    try:
+        with open(temporary, "w", encoding="utf-8") as output:
+            json.dump(config, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+        os.replace(temporary, target)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _form_value(fields, name, default=""):
+    return fields.get(name, [default])[0].strip()
+
+
+def _form_lines(fields, name):
+    return [
+        line.strip() for line in _form_value(fields, name).splitlines() if line.strip()
+    ]
+
+
+def _form_projects(fields, prefix):
+    labels = fields.get(f"{prefix}_label", [])
+    paths = fields.get(f"{prefix}_path", [])
+    if len(labels) != len(paths):
+        raise ValueError("プロジェクト設定を読み取れませんでした")
+    projects = []
+    for label, path in zip(labels, paths):
+        label, path = label.strip(), path.strip()
+        if not label and not path:
+            continue
+        if not label or not path:
+            raise ValueError("プロジェクト名とパスを両方入力してください")
+        _validate_settings_path(path)
+        projects.append({"label": label, "path": path})
+    return projects
+
+
+def _validate_settings_path(path):
+    expanded = os.path.realpath(_expand(path))
+    home = os.path.realpath(HOME)
+    if expanded != home and not expanded.startswith(home + os.sep):
+        raise ValueError("プロジェクトのパスはホームディレクトリ配下を指定してください")
+
+
+def settings_config_from_form(fields, current=None):
+    """設定画面のフォームを検証し、既知でないキーを残した設定を返す。"""
+    updated = dict(load_config() if current is None else current)
+    updated["restore_sessions"] = _form_value(fields, "restore_sessions") == "1"
+
+    diff_open = _form_value(fields, "diff_open", "never")
+    if diff_open not in {"never", "auto", "always"}:
+        raise ValueError("差分の初期表示が不正です")
+    updated["diff_open"] = diff_open
+
+    classifier = _form_value(fields, "wait_classifier_model", "haiku")
+    if classifier not in {"haiku", "sonnet"}:
+        raise ValueError("分類モデルが不正です")
+    updated["wait_classifier_model"] = classifier
+    project_bases = _form_lines(fields, "project_bases")
+    recent_dirs = _form_lines(fields, "recent_dirs")
+    for path in project_bases + recent_dirs:
+        _validate_settings_path(path)
+    updated["project_bases"] = project_bases
+    updated["pinned"] = _form_projects(fields, "pinned")
+    updated["extra_projects"] = _form_projects(fields, "extra")
+    updated["recent_dirs"] = recent_dirs
+    return updated
+
+
 def load_template(name):
     """リポジトリ内のHTMLテンプレートを読み込む。"""
     path = os.path.realpath(os.path.join(TEMPLATE_DIR, name))
@@ -452,17 +529,15 @@ TOOL_ICONS = load_tool_icons()
 
 # アクセスを許可するネットワーク。既定は Tailscale 網内 + localhost のみ。
 # 認証は無いので、信頼できる端末しかいない網以外へ広げないこと。
+DEFAULT_ALLOWED_NETWORKS = [
+    "100.64.0.0/10",  # Tailscale CGNAT
+    "fd7a:115c:a1e0::/48",  # Tailscale IPv6
+    "127.0.0.0/8",
+    "::1/128",
+]
 ALLOWED_NETS = [
     ipaddress.ip_network(net)
-    for net in CONFIG.get(
-        "allowed_networks",
-        [
-            "100.64.0.0/10",  # Tailscale CGNAT
-            "fd7a:115c:a1e0::/48",  # Tailscale IPv6
-            "127.0.0.0/8",
-            "::1/128",
-        ],
-    )
+    for net in CONFIG.get("allowed_networks", DEFAULT_ALLOWED_NETWORKS)
 ]
 
 
@@ -3706,9 +3781,21 @@ def build_sidebar(active, language="ja"):
         f'<button type="button" id="app-update" hidden>'
         f"{translate('アップデート', language)}</button>"
         '<small id="update-status"></small></div>'
-        f'<div id="ai-usage" hidden></div>{language_switch_html(language)}</div>'
+        '<div id="ai-usage" hidden></div></div>'
     )
     return sidebar
+
+
+def sidebar_heading_html(language="ja", settings_active=False):
+    active = " active" if settings_active else ""
+    return (
+        '<h2><a class="sidebar-brand" href="/">'
+        f'<img class="app-logo" src="/favicon.svg?v={urllib.parse.quote(VERSION)}" '
+        'alt="">Agent Deck</a>'
+        f'<a class="settings-link{active}" href="/settings" '
+        f'aria-label="{translate("設定", language)}" '
+        f'title="{translate("設定", language)}">⚙</a></h2>'
+    )
 
 
 # AI使用量の表示（任意機能）。config の usage_command に、使用量JSONを標準出力へ
@@ -4243,6 +4330,14 @@ SIDEBAR_CSS = r"""
   aside h2 { display: flex; align-items: center; gap: 8px; margin: 4px 4px 12px;
     font-size: 1.05rem; }
   aside h2 .app-logo { width: 30px; height: 30px; border-radius: 7px; }
+  aside h2 > a { margin: 0; padding: 0; border: 0; border-radius: 7px; }
+  aside h2 .sidebar-brand { min-width: 0; display: flex; align-items: center; gap: 8px;
+    color: inherit; }
+  aside h2 .settings-link { flex: 0 0 34px; width: 34px; height: 34px;
+    margin-left: auto; display: grid; place-items: center; color: #8b949e;
+    font-size: 1rem; text-decoration: none; }
+  aside h2 .settings-link:hover, aside h2 .settings-link.active {
+    color: #e6edf3; background: #30363d; }
   aside a { display: block; margin: 7px 0; padding: 10px; color: inherit; text-decoration: none;
     border: 1px solid #30363d; border-radius: 8px; overflow-wrap: anywhere; }
   aside a.active { border-color: #58a6ff; background: #1f6feb22; }
@@ -4724,18 +4819,21 @@ LIST_PAGE = r"""<!doctype html>
     background: #0d1117; color: #e6edf3; font-family: -apple-system, sans-serif; font-size: 18px; }}
   .app {{ height: 100%; display: flex; }}
 {sidebar_css}
-  .launcher-frame {{ min-width: 0; flex: 1; border: 0; background: #0d1117; }}
+  .launcher-pane {{ min-width: 0; flex: 1; display: flex; flex-direction: column; }}
+  .pane-heading {{ width: min(100% - 40px, 960px); margin: 0 auto; padding-top: 26px; }}
+  .pane-heading h1 {{ margin: 0; font-size: 1.35rem; }}
+  .launcher-frame {{ min-width: 0; width: 100%; flex: 1; border: 0; background: #0d1117; }}
   @media (max-width: 799px) {{
     /* SPは一覧を全画面にし、新規起動は従来どおり別ページで開く */
     aside {{ width: 100%; flex: 1; border-right: none;
       --aside-pad-b: max(12px, env(safe-area-inset-bottom)); }}
-    .launcher-frame {{ display: none; }}
+    .launcher-pane {{ display: none; }}
   }}
 </style></head><body>
-<div class="app"><aside><h2><img class="app-logo" src="/favicon.svg?v={favicon_version}"
-  alt="">Agent Deck</h2>{sessions_sidebar}</aside>
+<div class="app"><aside>{sidebar_heading}{sessions_sidebar}</aside>
+<main class="launcher-pane"><header class="pane-heading"><h1>新規セッション</h1></header>
 <iframe class="launcher-frame" title="＋ 新規セッションを開始"
-  src="/new?embedded=1&amp;lang={language}"></iframe></div>
+  src="/new?embedded=1&amp;lang={language}"></iframe></main></div>
 <script>
   const session = null;
   const bootId = {boot_json};
@@ -5045,8 +5143,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     header small {{ font-size: .8rem; }}
   }}
 </style></head><body{body_class}>
-<div class="app"><aside><h2><img class="app-logo" src="/favicon.svg?v={favicon_version}"
-  alt="">Agent Deck</h2>{sessions_sidebar}</aside><main class="terminal">
+<div class="app"><aside>{sidebar_heading}{sessions_sidebar}</aside><main class="terminal">
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
 <small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}{language_switch}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
@@ -6702,6 +6799,89 @@ CHATWORK_PANEL = """<section class="launcher-panel" id="inbox-panel">
 <div id="cw-room-messages"></div></section>"""
 
 
+def _settings_project_rows(config, key, prefix):
+    items = config.get(key) or []
+    if not isinstance(items, list):
+        items = []
+    rows = []
+    for item in items or [{}]:
+        if not isinstance(item, dict):
+            continue
+        label = html.escape(str(item.get("label", "")), quote=True)
+        path = html.escape(str(item.get("path", "")), quote=True)
+        rows.append(
+            '<div class="project-setting-row" data-project-row>'
+            f'<input name="{prefix}_label" value="{label}" '
+            'placeholder="表示名" aria-label="表示名">'
+            f'<input name="{prefix}_path" value="{path}" '
+            'placeholder="~/projects/my-app" aria-label="プロジェクトのパス">'
+            '<button type="button" class="remove-row" data-remove-row '
+            'aria-label="削除" title="削除">×</button></div>'
+        )
+    if not rows:
+        return _settings_project_rows({key: [{}]}, key, prefix)
+    return "".join(rows)
+
+
+def render_settings(language="ja"):
+    config = load_config()
+    chatwork = config.get("chatwork") or {}
+    if not isinstance(chatwork, dict):
+        chatwork = {}
+
+    def value(name, default=""):
+        raw = config.get(name, default)
+        return html.escape("" if raw is None else str(raw), quote=True)
+
+    def lines(name, default=()):
+        raw = config.get(name, default)
+        if not isinstance(raw, list):
+            raw = default
+        return html.escape("\n".join(str(item) for item in raw))
+
+    diff_open = config.get("diff_open", config.get("pr_diff_open", "never"))
+    classifier = config.get("wait_classifier_model", "haiku")
+    return localize_source(load_template("settings.html"), language).format(
+        language=language,
+        favicon_version=urllib.parse.quote(VERSION),
+        static_version=urllib.parse.quote(BOOT_ID),
+        sidebar_css=SIDEBAR_CSS,
+        sidebar_js=localize_source(SIDEBAR_JS, language),
+        sidebar_heading=sidebar_heading_html(language, settings_active=True),
+        sessions_sidebar=build_sidebar(None, language),
+        language_switch=language_switch_html(language),
+        boot_json=json.dumps(BOOT_ID),
+        config_path=html.escape(CONFIG_PATH),
+        restore_checked=(
+            " checked" if config.get("restore_sessions", True) is not False else ""
+        ),
+        diff_never_selected=" selected" if diff_open == "never" else "",
+        diff_auto_selected=" selected" if diff_open == "auto" else "",
+        diff_always_selected=" selected" if diff_open == "always" else "",
+        classifier_haiku_selected=" selected" if classifier == "haiku" else "",
+        classifier_sonnet_selected=" selected" if classifier == "sonnet" else "",
+        project_bases=lines("project_bases"),
+        pinned_rows=_settings_project_rows(config, "pinned", "pinned"),
+        extra_rows=_settings_project_rows(config, "extra_projects", "extra"),
+        recent_dirs=lines("recent_dirs"),
+        usage_command=value("usage_command"),
+        chatwork_account_id=html.escape(
+            "" if chatwork.get("account_id") is None else str(chatwork["account_id"]),
+            quote=True,
+        ),
+        chatwork_token_path=html.escape(
+            str(chatwork.get("token_path", "~/.chatwork-token")), quote=True
+        ),
+        port=value("port", 8787),
+        data_dir=value("data_dir", "~/.local/share/agent-deck"),
+        claude_bin=value("claude_bin"),
+        codex_bin=value("codex_bin"),
+        tmux_bin=value("tmux_bin"),
+        gh_bin=value("gh_bin"),
+        allowed_networks=lines("allowed_networks", DEFAULT_ALLOWED_NETWORKS),
+    )
+
+
 def render(message="", view="new", language="ja", embedded=False):
     # view は旧・一覧ページ時代の名残。呼び出し側の互換のため残している。
     del view
@@ -6920,6 +7100,8 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/new":
             embedded = urllib.parse.parse_qs(parsed.query).get("embedded") == ["1"]
             return self._page(render(view="new", language=language, embedded=embedded))
+        if parsed.path == "/settings":
+            return self._page(render_settings(language))
         if parsed.path in {"/", "/sessions"}:
             # デフォルトはセッション一覧。PCは右ペインで選択か新規起動を促し、
             # SPは一覧のみを全画面表示する。0件でもランチャーへ自動遷移しない。
@@ -6927,6 +7109,7 @@ class Handler(BaseHTTPRequestHandler):
                 localize_source(LIST_PAGE, language).format(
                     language=language,
                     favicon_version=urllib.parse.quote(VERSION),
+                    sidebar_heading=sidebar_heading_html(language),
                     sessions_sidebar=build_sidebar(None, language),
                     boot_json=json.dumps(BOOT_ID),
                     sidebar_css=SIDEBAR_CSS,
@@ -6980,6 +7163,7 @@ class Handler(BaseHTTPRequestHandler):
                     upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
                     note_json=json.dumps(item.get("note", "")),
                     pinned_json=json.dumps(bool(item.get("pinned"))),
+                    sidebar_heading=sidebar_heading_html(language),
                     pin_button="",
                     note_button=(
                         '<button type="button" class="note-button" id="note" title="'
@@ -7320,6 +7504,18 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(body.decode("utf-8"))
         except UnicodeDecodeError:
             return self._json({"error": "送信データを読み取れませんでした"}, 400)
+        if self.path == "/api/settings":
+            if self.headers.get("X-Agent-Deck-Request") != "settings":
+                return self._json({"error": "設定画面から操作してください"}, 403)
+            try:
+                save_config(settings_config_from_form(qs))
+                self._json({"ok": True, "message": "設定を保存しました"})
+                timer = threading.Timer(0.5, restart_server)
+                timer.daemon = True
+                timer.start()
+                return
+            except (OSError, ValueError) as exc:
+                return self._json({"error": str(exc)}, 400)
         if self.path == "/api/update":
             try:
                 version = qs.get("version", [""])[0]

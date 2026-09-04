@@ -119,7 +119,7 @@ class FrontendTemplateTest(unittest.TestCase):
 
         self.assertIn("Done", sidebar)
         self.assertIn("完了という名前の作業", sidebar)
-        self.assertIn("Language", sidebar)
+        self.assertNotIn("Language", sidebar)
 
     def test_english_api_errors_are_localized_with_dynamic_details(self):
         handler = object.__new__(server.Handler)
@@ -188,6 +188,7 @@ class FrontendTemplateTest(unittest.TestCase):
 
     def test_session_list_embeds_launcher_on_desktop(self):
         self.assertIn('class="launcher-frame"', server.LIST_PAGE)
+        self.assertIn("新規セッション", server.LIST_PAGE)
         self.assertIn('src="/new?embedded=1&amp;lang={language}"', server.LIST_PAGE)
         self.assertIn(
             'class="new-link new-link-desktop" href="/"', server.build_sidebar(None)
@@ -259,9 +260,103 @@ class FrontendTemplateTest(unittest.TestCase):
             self.assertIn("/apple-touch-icon.png?v={favicon_version}", page)
             self.assertIn("/site.webmanifest?v={favicon_version}", page)
             self.assertIn('name="theme-color" content="#171523"', page)
-            self.assertIn('class="app-logo"', page)
 
         self.assertIn('class="app-logo"', server.render())
+        self.assertIn('class="app-logo"', server.sidebar_heading_html())
+
+    def test_settings_page_uses_shared_sidebar_and_read_only_sensitive_fields(self):
+        config = {
+            "project_bases": ["~/projects"],
+            "pinned": [{"label": "my-app", "path": "~/projects/my-app"}],
+            "usage_command": "usage --json",
+        }
+        with (
+            mock.patch.object(server, "load_config", return_value=config),
+            mock.patch.object(server, "managed_sessions", return_value=[]),
+        ):
+            page = server.render_settings("en")
+
+        self.assertIn("Settings - Agent Deck", page)
+        self.assertIn("/static/settings.css?v=", page)
+        self.assertIn('class="settings-link active"', page)
+        self.assertIn(
+            'value="usage --json" placeholder="Not configured" readonly', page
+        )
+        self.assertNotIn('name="usage_command"', page)
+        with open(
+            os.path.join(os.path.dirname(__file__), "static", "settings.js"),
+            encoding="utf-8",
+        ) as source:
+            self.assertIn('"X-Agent-Deck-Request": "settings"', source.read())
+
+    def test_safe_settings_are_updated_and_unknown_keys_are_preserved(self):
+        current = {
+            "usage_command": "usage --json",
+            "allowed_networks": ["127.0.0.1/32"],
+            "custom": {"keep": True},
+        }
+        fields = {
+            "restore_sessions": ["1"],
+            "diff_open": ["auto"],
+            "wait_classifier_model": ["sonnet"],
+            "project_bases": ["~/projects\n~/work"],
+            "pinned_label": ["app"],
+            "pinned_path": ["~/projects/app"],
+            "extra_label": ["tools"],
+            "extra_path": ["~/tools"],
+            "recent_dirs": ["~/projects"],
+            # 実行コマンドやネットワークはフォームから変更させない。
+            "usage_command": ["malicious"],
+            "allowed_networks": ["0.0.0.0/0"],
+        }
+
+        result = server.settings_config_from_form(fields, current)
+
+        self.assertTrue(result["restore_sessions"])
+        self.assertEqual("auto", result["diff_open"])
+        self.assertEqual("sonnet", result["wait_classifier_model"])
+        self.assertEqual(["~/projects", "~/work"], result["project_bases"])
+        self.assertEqual([{"label": "app", "path": "~/projects/app"}], result["pinned"])
+        self.assertEqual("usage --json", result["usage_command"])
+        self.assertEqual(["127.0.0.1/32"], result["allowed_networks"])
+        self.assertEqual({"keep": True}, result["custom"])
+
+    def test_project_path_outside_home_is_rejected(self):
+        fields = {
+            "diff_open": ["never"],
+            "wait_classifier_model": ["haiku"],
+            "project_bases": ["/tmp"],
+        }
+
+        with self.assertRaisesRegex(ValueError, "ホームディレクトリ配下"):
+            server.settings_config_from_form(fields, {})
+
+    def test_save_config_replaces_file_with_valid_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "config.json")
+            server.save_config({"restore_sessions": False}, path)
+
+            with open(path, encoding="utf-8") as source:
+                self.assertEqual({"restore_sessions": False}, json.load(source))
+
+    def test_settings_api_requires_ui_request_header(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/api/settings"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {"Content-Length": "0"}
+        handler.rfile = io.BytesIO()
+        handler.wfile = io.BytesIO()
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+
+        handler.do_POST()
+
+        handler.send_response.assert_called_with(403)
+        self.assertEqual(
+            "設定画面から操作してください",
+            json.loads(handler.wfile.getvalue())["error"],
+        )
 
     def test_static_file_supports_app_icon_formats(self):
         handler = object.__new__(server.Handler)

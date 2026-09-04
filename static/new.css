@@ -1,6 +1,6 @@
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, sans-serif; max-width: 960px; margin: 0 auto; padding: 20px; font-size: 18px; }
-  body.embedded { padding-top: 40px; }
+  body.embedded { padding-top: 12px; }
   body.embedded > h1, body.embedded > nav { display: none; }
   h1 { display: flex; align-items: center; gap: 10px; font-size: 1.65rem; }
   h1 .app-logo { width: 40px; height: 40px; border-radius: 9px; }
