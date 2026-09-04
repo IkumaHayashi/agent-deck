@@ -309,22 +309,6 @@ BYPASS_FLAGS = {
     "codex": ["-a", "never", "-s", "workspace-write"],
 }
 
-# 全ページ共通のファビコン（/favicon.svg で配信）。
-FAVICON_SVG = (
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
-    '<defs><linearGradient id="g" x1="12" y1="8" x2="88" y2="92" gradientUnits="userSpaceOnUse">'
-    '<stop stop-color="#8B7CF6"/><stop offset="1" stop-color="#5546D7"/>'
-    "</linearGradient></defs>"
-    '<rect width="100" height="100" rx="23" fill="#171523"/>'
-    '<rect x="19" y="16" width="58" height="68" rx="10" fill="#343047" '
-    'transform="rotate(-8 48 50)"/>'
-    '<rect x="27" y="16" width="58" height="68" rx="10" fill="url(#g)"/>'
-    '<path d="M42 39l11 10-11 10" fill="none" stroke="#fff" stroke-width="7" '
-    'stroke-linecap="round" stroke-linejoin="round"/>'
-    '<path d="M57 60h12" fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round"/>'
-    "</svg>"
-)
-
 # ツール名の代わりに表示するアイコン。ロゴはライセンス上リポジトリに同梱せず、
 # icons/fetch.sh で公式配布元から取得したときだけ起動時に読み込む（icons/README.md）。
 # ファイルが無いツールはテキスト表示にフォールバックする。
@@ -4539,9 +4523,13 @@ LIST_PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Agent Deck">
+<meta name="theme-color" content="#171523">
 <title>セッション一覧 - Agent Deck</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
-<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
+<link rel="alternate icon" type="image/x-icon" href="/favicon.ico?v={favicon_version}">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v={favicon_version}">
+<link rel="manifest" href="/site.webmanifest?v={favicon_version}">
 <style>
   :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}
@@ -4580,9 +4568,13 @@ TERMINAL_PAGE = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Agent Deck">
+<meta name="theme-color" content="#171523">
 <title>{title}</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg?v={favicon_version}">
-<link rel="apple-touch-icon" href="/favicon.svg?v={favicon_version}">
+<link rel="alternate icon" type="image/x-icon" href="/favicon.ico?v={favicon_version}">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png?v={favicon_version}">
+<link rel="manifest" href="/site.webmanifest?v={favicon_version}">
 <style>
   :root {{ color-scheme: dark; }}
   * {{ box-sizing: border-box; }}
@@ -6621,16 +6613,6 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _icon(self):
-        # 各ページから同じURLを参照させる。ico で要求されても SVG を返す。
-        data = FAVICON_SVG.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "image/svg+xml")
-        self.send_header("Cache-Control", "public, max-age=86400")
-        self.send_header("Content-Length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
     def _tool_icon(self, tool):
         data = TOOL_ICONS.get(tool)
         if not data:
@@ -6650,7 +6632,11 @@ class Handler(BaseHTTPRequestHandler):
         extension = os.path.splitext(path)[1].lower()
         content_types = {
             ".css": "text/css; charset=utf-8",
+            ".ico": "image/x-icon",
             ".js": "text/javascript; charset=utf-8",
+            ".png": "image/png",
+            ".svg": "image/svg+xml",
+            ".webmanifest": "application/manifest+json; charset=utf-8",
         }
         if not path.startswith(STATIC_DIR + os.sep) or extension not in content_types:
             return self._json({"error": "静的ファイルが見つかりません"}, 404)
@@ -6684,8 +6670,14 @@ class Handler(BaseHTTPRequestHandler):
         if not client_allowed(self.client_address[0]):
             return self._deny()
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path in {"/favicon.svg", "/favicon.ico"}:
-            return self._icon()
+        app_assets = {
+            "/favicon.svg": "favicon.svg",
+            "/favicon.ico": "favicon.ico",
+            "/apple-touch-icon.png": "apple-touch-icon.png",
+            "/site.webmanifest": "site.webmanifest",
+        }
+        if parsed.path in app_assets:
+            return self._static_file(app_assets[parsed.path])
         static_match = re.fullmatch(r"/static/([A-Za-z0-9_.-]+)", parsed.path)
         if static_match:
             return self._static_file(static_match.group(1))

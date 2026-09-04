@@ -49,9 +49,39 @@ class FrontendTemplateTest(unittest.TestCase):
 
         self.assertIn("/static/new.css?v=", page)
         self.assertIn("/static/new.js?v=", page)
+        self.assertIn("/apple-touch-icon.png?v=", page)
+        self.assertIn("/site.webmanifest?v=", page)
         self.assertIn('data-panel="reviews-panel"', page)
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
+
+    def test_all_pages_use_the_app_icon_assets(self):
+        for page in (server.LIST_PAGE, server.TERMINAL_PAGE):
+            self.assertIn("/favicon.svg?v={favicon_version}", page)
+            self.assertIn("/favicon.ico?v={favicon_version}", page)
+            self.assertIn("/apple-touch-icon.png?v={favicon_version}", page)
+            self.assertIn("/site.webmanifest?v={favicon_version}", page)
+            self.assertIn('name="theme-color" content="#171523"', page)
+
+    def test_static_file_supports_app_icon_formats(self):
+        handler = object.__new__(server.Handler)
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        handler.wfile = io.BytesIO()
+
+        for filename, content_type in (
+            ("favicon.svg", "image/svg+xml"),
+            ("favicon.ico", "image/x-icon"),
+            ("apple-touch-icon.png", "image/png"),
+            ("site.webmanifest", "application/manifest+json; charset=utf-8"),
+        ):
+            handler.wfile.seek(0)
+            handler.wfile.truncate()
+            handler.send_header.reset_mock()
+            handler._static_file(filename)
+            handler.send_header.assert_any_call("Content-Type", content_type)
+            self.assertGreater(len(handler.wfile.getvalue()), 0)
 
     def test_new_page_offers_image_picker_for_touch_devices(self):
         page = server.render()
