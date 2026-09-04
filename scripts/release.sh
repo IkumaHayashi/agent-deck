@@ -25,10 +25,8 @@ if [[ -n $(git status --porcelain) ]]; then
   exit 1
 fi
 
-echo "lintを実行します"
-ruff check server.py test_server.py
-echo "testを実行します"
-python3 -m unittest -v
+echo "lint・format・testを実行します"
+make check
 
 git fetch origin main --tags
 if ! git merge-base --is-ancestor origin/main HEAD; then
