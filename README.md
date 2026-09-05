@@ -195,6 +195,64 @@ PCではサイドバー上部の歯車、スマートフォンでは設定ペー
 実行時のデータ（アップロード画像・キャッシュ・ログ）は
 `~/.local/share/agent-deck/` に保存されます（`data_dir` で変更可）。
 
+### AI使用量の表示
+
+`usage_command` にコマンドを設定すると、その標準出力のJSONをサイドバー下部へ
+表示します。未設定なら何も表示しません。結果は5分キャッシュされ、失敗しても
+Agent Deck の他の機能には影響しません。
+
+同梱の参考実装を使う場合:
+
+```json
+"usage_command": "python3 ~/agent-deck/tools/ai-usage.py"
+```
+
+[`tools/ai-usage.py`](tools/ai-usage.py) は Claude Code の5時間枠・週間枠と、
+Codex の各枠を取得します。トークンは各CLIが保存したもの（Claude Code は
+キーチェーン、Codex は `~/.codex/auth.json`）を読むだけで、送信先は各ベンダーの
+APIのみです。Codex にログインしていない環境では Claude Code の行だけ出ます。
+
+> ⚠️ **参考実装は非公開APIに依存しています。** どちらのベンダーも使用量を返す
+> 公開APIを提供していないため、各CLIが内部で使うエンドポイントを叩いています。
+> ベンダー側の変更で予告なく壊れることがあります。壊れた場合は
+> `usage_command` を外してください。
+
+#### 自分でコマンドを用意する
+
+`usage_command` は任意のコマンドを実行できるので、参考実装を使わず自分の環境に
+合わせたスクリプトを書いても構いません。次の形のJSONを標準出力へ出してください。
+
+```json
+{
+  "updated_at": "15:04",
+  "providers": [
+    {
+      "name": "Claude Code",
+      "ok": true,
+      "stale": null,
+      "rows": [
+        {"label": "5時間枠", "percent": 42.0, "reset_label": "リセット 15:19", "level": "normal"}
+      ],
+      "extra": null
+    }
+  ]
+}
+```
+
+| フィールド | 意味 |
+|-----------|------|
+| `providers[].name` | 行の先頭に出す名前 |
+| `providers[].ok` | `false` なら「取得失敗」と表示し、`message` をツールチップに出す |
+| `providers[].rows[]` | 表示する枠。`label` は末尾の「枠」を落として表示する |
+| `rows[].percent` | 使用率（0〜100）。四捨五入して表示する |
+| `rows[].reset_label` | ツールチップに出すリセット時刻。空文字なら出さない |
+| `rows[].level` | `normal` / `warning`（橙） / `critical`（赤） |
+| `providers[].extra` | 行末に添える追加項目（`rows[]` と同じ形）。不要なら `null` |
+| `providers[].stale` | キャッシュ表示中の注記。設定すると「⚠」を出す |
+
+`label` と `reset_label` の接頭辞「リセット 」は、英語表示のとき
+`locales/en.json` にあるものだけ翻訳されます。
+
 ## 開発
 
 新規起動ページのフロントエンドは、役割ごとに次のファイルへ分けています。

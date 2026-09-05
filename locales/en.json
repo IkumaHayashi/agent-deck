@@ -51,7 +51,6 @@
   "Agent Deckの再起動後に自動で再読み込みします。": "This page reloads automatically after Agent Deck restarts.",
   "表示名": "Display name",
   "プロジェクトのパス": "Project path",
-  "削除": "Remove",
   "再接続できませんでした": "Could not reconnect",
   "ポートや許可ネットワークを変更した場合は、新しいURLで開いてください。": "If the port or allowed networks changed, open Agent Deck at its new URL.",
   "保存中…": "Saving…",
@@ -132,6 +131,7 @@
   "コピー": "Copied",
   "button.textContent = \"コピー\"": "button.textContent = \"Copy\"",
   "copy.textContent = \"コピー\"": "copy.textContent = \"Copy\"",
+  "aria-label=\"削除\" title=\"削除\"": "aria-label=\"Remove\" title=\"Remove\"",
   "変更": "Modified",
   "変更ファイルはありません": "No changed files",
   "チャット": "Chat",
@@ -268,6 +268,7 @@
   "週間枠": "Weekly",
   "週間枠 (Fable)": "Weekly (Fable)",
   "リセット ": "Resets ",
+  "追加クレジット": "Extra credits",
   "Webシェルを起動中...": "Starting web shell...",
   "新しいWebシェルで実行しますか？\\n\\n": "Run in a new web shell?\\n\\n",
   "このセッションを終了しますか？リンクされたGitワークツリーで作業中の場合は、ワークツリーも削除します。": "Stop this session? If it uses a linked Git worktree, the worktree will also be removed.",
@@ -349,5 +350,11 @@
   "再起動": "Restart",
   "セッションを再起動": "Restart session",
   "切り替え先": "Switch to",
-  "バイパスで再起動": "Restart with bypass"
+  "バイパスで再起動": "Restart with bypass",
+  "バグを報告": "Report a bug",
+  "症状": "What happened",
+  "再現手順": "Steps to reproduce",
+  "期待する動作": "Expected behavior",
+  "環境": "Environment",
+  "ブラウザ": "Browser"
 }

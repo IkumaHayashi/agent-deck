@@ -20,6 +20,123 @@ TEST_RUNTIME_DIR = tempfile.TemporaryDirectory()
 server.DATA_DIR = TEST_RUNTIME_DIR.name
 server.SESSION_REGISTRY_PATH = os.path.join(TEST_RUNTIME_DIR.name, "sessions.json")
 
+USAGE_PATH = os.path.join(os.path.dirname(__file__), "tools", "ai-usage.py")
+USAGE_SPEC = importlib.util.spec_from_file_location("ai_usage", USAGE_PATH)
+ai_usage = importlib.util.module_from_spec(USAGE_SPEC)
+USAGE_SPEC.loader.exec_module(ai_usage)
+
+
+class BundledUsageCommandTest(unittest.TestCase):
+    """同梱の参考実装が、server.py が読める形のJSONを出すことを確かめる。"""
+
+    CLAUDE_USAGE = {
+        "limits": [
+            {"kind": "session", "percent": 42.0, "resets_at": "2026-09-05T06:00:00Z"},
+            {
+                "kind": "weekly_all",
+                "percent": 95.5,
+                "resets_at": "2026-09-09T06:00:00Z",
+            },
+            {
+                "kind": "weekly_scoped",
+                "percent": 12.0,
+                "scope": {"model": {"display_name": "Fable"}},
+            },
+        ],
+        "extra_usage": {
+            "is_enabled": True,
+            "decimal_places": 2,
+            "used_credits": 150,
+            "monthly_limit": 5000,
+            "utilization": 3.0,
+        },
+    }
+
+    def test_claude_rows_carry_the_fields_the_sidebar_reads(self):
+        parsed = ai_usage.claude_parse(self.CLAUDE_USAGE)
+
+        labels = [row["label"] for row in parsed["rows"]]
+        self.assertEqual(["5時間枠", "週間枠", "週間枠 (Fable)"], labels)
+        for row in parsed["rows"]:
+            self.assertEqual({"label", "percent", "reset_label", "level"}, set(row))
+        # 90%以上は critical、70%未満は normal
+        self.assertEqual("normal", parsed["rows"][0]["level"])
+        self.assertEqual("critical", parsed["rows"][1]["level"])
+        self.assertEqual("追加クレジット", parsed["extra"]["label"])
+        self.assertEqual("$1.50 / $50.00", parsed["extra"]["reset_label"])
+
+    def test_claude_falls_back_to_the_older_window_shape(self):
+        parsed = ai_usage.claude_parse(
+            {"five_hour": {"utilization": 8.0}, "seven_day": {"utilization": 71.0}}
+        )
+
+        self.assertEqual(["5時間枠", "週間枠"], [r["label"] for r in parsed["rows"]])
+        self.assertEqual("warning", parsed["rows"][1]["level"])
+
+    def test_codex_hides_unused_additional_windows(self):
+        parsed = ai_usage.codex_parse(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 30.0,
+                        "limit_window_seconds": 5 * 3600,
+                    },
+                    "secondary_window": {
+                        "used_percent": 60.0,
+                        "limit_window_seconds": 7 * 24 * 3600,
+                    },
+                },
+                "additional_rate_limits": [
+                    {
+                        "limit_name": "Spark",
+                        "rate_limit": {"primary_window": {"used_percent": 0.0}},
+                    },
+                    {
+                        "limit_name": "Pro",
+                        "rate_limit": {"primary_window": {"used_percent": 5.0}},
+                    },
+                ],
+            }
+        )
+
+        self.assertEqual(
+            ["5時間枠", "週間枠", "Pro"], [r["label"] for r in parsed["rows"]]
+        )
+
+    def test_localize_usage_data_translates_the_bundled_labels(self):
+        data = {
+            "providers": [
+                {
+                    "name": "Claude Code",
+                    "ok": True,
+                    "rows": ai_usage.claude_parse(self.CLAUDE_USAGE)["rows"],
+                    "extra": ai_usage.claude_parse(self.CLAUDE_USAGE)["extra"],
+                }
+            ]
+        }
+
+        localized = server.localize_usage_data(data, "en")
+
+        rows = localized["providers"][0]["rows"]
+        self.assertEqual("5-hour", rows[0]["label"])
+        self.assertEqual("Weekly", rows[1]["label"])
+        self.assertTrue(rows[0]["reset_label"].startswith("Resets "))
+        self.assertEqual("Extra credits", localized["providers"][0]["extra"]["label"])
+
+    def test_usage_data_reads_the_bundled_script_output(self):
+        payload = json.dumps({"providers": [{"name": "Claude Code", "ok": True}]})
+        with mock.patch.object(server, "USAGE_COMMAND", "echo ignored"):
+            with mock.patch.object(
+                server.subprocess,
+                "run",
+                return_value=SimpleNamespace(stdout=payload),
+            ):
+                server.USAGE_CACHE.update(data=None, at=0.0)
+                data = server.usage_data()
+
+        self.assertEqual("Claude Code", data["providers"][0]["name"])
+        server.USAGE_CACHE.update(data=None, at=0.0)
+
 
 class SessionContextTest(unittest.TestCase):
     def test_fable_minor_version_uses_one_million_token_window(self):
@@ -56,7 +173,7 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertEqual("ja", server.preferred_language("", "", "en;q=0"))
         self.assertEqual("ja", server.preferred_language("", "", "fr-FR"))
 
-    def test_english_launcher_has_switch_and_localized_assets(self):
+    def test_english_launcher_has_localized_assets_without_switch(self):
         with mock.patch.object(server, "recent_conversations", return_value=[]):
             page = server.render(language="en")
 
@@ -64,8 +181,36 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("Launch from a project", page)
         self.assertIn("No conversations available to resume", page)
         self.assertIn("lang=en", page)
-        self.assertIn('<option value="en" selected>', page)
         self.assertNotIn("プロジェクトから起動", page)
+        # 言語切り替えは設定ページへ集約したので、起動画面には出さない。
+        self.assertNotIn("language-switch", page)
+
+    def test_language_switch_is_only_on_settings_page(self):
+        with mock.patch.object(server, "managed_sessions", return_value=[]):
+            settings = server.render_settings(language="en")
+            terminal_actions = server.build_sidebar(None, "en")
+
+        self.assertIn('<option value="en" selected>', settings)
+        self.assertNotIn("language-switch", terminal_actions)
+        self.assertNotIn("{language_switch}", server.TERMINAL_PAGE)
+
+    def test_bug_report_link_points_at_the_update_repo(self):
+        link = server.bug_report_link_html("en")
+
+        self.assertIn(f"https://github.com/{server.UPDATE_REPO}/issues/new?", link)
+        self.assertIn("labels=bug", link)
+        self.assertIn("What+happened", link)
+        self.assertIn("🐛 Report a bug", link)
+        self.assertIn(f"Agent+Deck%3A+v{server.VERSION}", link)
+        self.assertIn('target="_blank"', link)
+        self.assertIn('rel="noopener noreferrer"', link)
+
+    def test_sidebar_footer_has_bug_report_button(self):
+        with mock.patch.object(server, "managed_sessions", return_value=[]):
+            sidebar = server.build_sidebar(None, "ja")
+
+        self.assertIn('id="bug-report"', sidebar)
+        self.assertIn("🐛 バグを報告", sidebar)
 
     def test_language_switch_preserves_other_query_parameters(self):
         switch = server.language_switch_html("en")
@@ -73,6 +218,44 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("new URLSearchParams(location.search)", switch)
         self.assertIn("q.set('lang',this.value)", switch)
         self.assertNotIn("new URL(location.href)", switch)
+
+    def test_locale_file_has_no_duplicate_keys(self):
+        seen, duplicates = set(), []
+
+        def collect(pairs):
+            for key, _ in pairs:
+                if key in seen:
+                    duplicates.append(key)
+                seen.add(key)
+            return dict(pairs)
+
+        with open(
+            os.path.join(server.LOCALE_DIR, "en.json"), encoding="utf-8"
+        ) as source:
+            json.load(source, object_pairs_hook=collect)
+
+        self.assertEqual([], duplicates)
+
+    def test_delete_label_differs_between_diff_status_and_remove_button(self):
+        terminal = server.localize_source(server.TERMINAL_PAGE, "en")
+        with open(
+            os.path.join(server.STATIC_DIR, "settings.js"), encoding="utf-8"
+        ) as source:
+            settings_js = server.localize_source(source.read(), "en")
+        row = server.localize_source(server.SETTINGS_PROJECT_ROW, "en")
+
+        self.assertIn('D: ["−", "Deleted", "st-D"]', terminal)
+        self.assertIn('aria-label="Remove" title="Remove"', settings_js)
+        self.assertIn('aria-label="Remove" title="Remove"', row)
+
+    def test_english_settings_rows_keep_user_values_untranslated(self):
+        config = {"pinned": [{"label": "表示名", "path": "~/削除"}]}
+
+        row = server._settings_project_rows(config, "pinned", "pinned", "en")
+
+        self.assertIn('placeholder="Display name"', row)
+        self.assertIn('value="表示名"', row)
+        self.assertIn('value="~/削除"', row)
 
     def test_english_terminal_keeps_internal_attachment_markers(self):
         page = server.localize_source(server.TERMINAL_PAGE, "en")

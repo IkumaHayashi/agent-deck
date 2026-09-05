@@ -259,6 +259,38 @@ def language_switch_html(language):
     )
 
 
+def bug_report_url(language):
+    """GitHubのissue作成画面へ、テンプレートを埋めたURLを返す。"""
+    body = "\n".join(
+        (
+            f"## {translate('症状', language)}",
+            "",
+            "",
+            f"## {translate('再現手順', language)}",
+            "1. ",
+            "",
+            f"## {translate('期待する動作', language)}",
+            "",
+            "",
+            f"## {translate('環境', language)}",
+            f"- Agent Deck: v{VERSION}",
+            f"- {translate('ブラウザ', language)}: ",
+            "",
+        )
+    )
+    query = urllib.parse.urlencode({"labels": "bug", "body": body})
+    return f"https://github.com/{UPDATE_REPO}/issues/new?{query}"
+
+
+def bug_report_link_html(language):
+    label = translate("バグを報告", language)
+    return (
+        f'<a id="bug-report" href="{html.escape(bug_report_url(language))}" '
+        f'target="_blank" rel="noopener noreferrer" '
+        f'title="{html.escape(label)}">🐛 {html.escape(label)}</a>'
+    )
+
+
 def item_count(value, language):
     if language == "ja":
         return f"{value}件"
@@ -3780,6 +3812,7 @@ def build_sidebar(active, language="ja"):
         f"<span>Agent Deck v{html.escape(VERSION)}</span>"
         f'<button type="button" id="app-update" hidden>'
         f"{translate('アップデート', language)}</button>"
+        f"{bug_report_link_html(language)}"
         '<small id="update-status"></small></div>'
         '<div id="ai-usage" hidden></div></div>'
     )
@@ -4321,6 +4354,10 @@ SIDEBAR_CSS = r"""
   #app-meta button { flex: 0 0 auto; width: auto; padding: 4px 8px; font-size: .72rem;
     color: #fff; background: #238636; border-color: #2ea043; }
   #app-meta small { flex-basis: 100%; margin: 0; color: #d29922; }
+  aside #app-meta #bug-report { flex: 0 0 auto; width: auto; margin: 0 0 0 auto;
+    padding: 4px 8px; border: 1px solid #30363d; border-radius: 7px;
+    background: #21262d; color: #cdd9e5; font-size: .72rem; white-space: nowrap; }
+  aside #app-meta #bug-report:hover { border-color: #8b949e; color: #fff; }
   #ai-usage { margin-top: 5px; font-size: .74rem; color: #8b949e; }
   #ai-usage .usage-row { display: flex; align-items: baseline; flex-wrap: wrap;
     gap: 2px 9px; margin: 3px 0; }
@@ -4429,7 +4466,6 @@ SIDEBAR_CSS = r"""
   .language-switch select { min-width: 96px; padding: 6px 24px 6px 8px;
     border: 1px solid #30363d; border-radius: 7px; background: #0d1117;
     color: #e6edf3; font: inherit; }
-  aside .language-switch { margin-top: 8px; }
   @media (max-width: 799px) {
     aside .new-link-desktop { display: none; }
     aside .new-link-mobile { display: block; }
@@ -4994,7 +5030,6 @@ TERMINAL_PAGE = r"""<!doctype html>
   header .actions.open .label, header .actions.open .icon {{ display: none; }}
   header .actions.open button, header .actions.open a {{ text-align: left; padding: 11px 14px;
     font-size: .95rem; }}
-  header .actions.open .language-switch {{ justify-content: space-between; padding: 6px 4px; }}
   header button.warn {{ border-color: #d63545; color: #ff9c9c; }}
   header button.note-button {{ color: #d29922; }}
   header div {{ min-width: 0; flex: 1; }}
@@ -5147,7 +5182,7 @@ TERMINAL_PAGE = r"""<!doctype html>
 </style></head><body{body_class}>
 <div class="app"><aside>{sidebar_heading}{sessions_sidebar}</aside><main class="terminal">
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
-<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}{language_switch}</div>
+<small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
 <button type="button" id="review-toggle" title="デフォルトブランチとの差分"><span class="label">差分</span><span class="icon">±</span></button>
 <button type="button" id="menu-toggle" aria-label="メニュー">☰</button></header>
@@ -6801,27 +6836,38 @@ CHATWORK_PANEL = """<section class="launcher-panel" id="inbox-panel">
 <div id="cw-room-messages"></div></section>"""
 
 
-def _settings_project_rows(config, key, prefix):
+# 設定画面のプロジェクト行。static/settings.js が JS 側で組み立てる行と
+# 同じ形にする。翻訳を当ててから値を差し込み、利用者が付けた表示名や
+# パスが翻訳対象にならないようにする。
+SETTINGS_PROJECT_ROW = (
+    '<div class="project-setting-row" data-project-row>'
+    '<input name="{prefix}_label" value="{label}" '
+    'placeholder="表示名" aria-label="表示名">'
+    '<input name="{prefix}_path" value="{path}" '
+    'placeholder="~/projects/my-app" aria-label="プロジェクトのパス">'
+    '<button type="button" class="remove-row" data-remove-row '
+    'aria-label="削除" title="削除">×</button></div>'
+)
+
+
+def _settings_project_rows(config, key, prefix, language="ja"):
     items = config.get(key) or []
     if not isinstance(items, list):
         items = []
+    row_template = localize_source(SETTINGS_PROJECT_ROW, language)
     rows = []
     for item in items or [{}]:
         if not isinstance(item, dict):
             continue
-        label = html.escape(str(item.get("label", "")), quote=True)
-        path = html.escape(str(item.get("path", "")), quote=True)
         rows.append(
-            '<div class="project-setting-row" data-project-row>'
-            f'<input name="{prefix}_label" value="{label}" '
-            'placeholder="表示名" aria-label="表示名">'
-            f'<input name="{prefix}_path" value="{path}" '
-            'placeholder="~/projects/my-app" aria-label="プロジェクトのパス">'
-            '<button type="button" class="remove-row" data-remove-row '
-            'aria-label="削除" title="削除">×</button></div>'
+            row_template.format(
+                prefix=prefix,
+                label=html.escape(str(item.get("label", "")), quote=True),
+                path=html.escape(str(item.get("path", "")), quote=True),
+            )
         )
     if not rows:
-        return _settings_project_rows({key: [{}]}, key, prefix)
+        return _settings_project_rows({key: [{}]}, key, prefix, language)
     return "".join(rows)
 
 
@@ -6863,8 +6909,8 @@ def render_settings(language="ja"):
         classifier_haiku_selected=" selected" if classifier == "haiku" else "",
         classifier_sonnet_selected=" selected" if classifier == "sonnet" else "",
         project_bases=lines("project_bases"),
-        pinned_rows=_settings_project_rows(config, "pinned", "pinned"),
-        extra_rows=_settings_project_rows(config, "extra_projects", "extra"),
+        pinned_rows=_settings_project_rows(config, "pinned", "pinned", language),
+        extra_rows=_settings_project_rows(config, "extra_projects", "extra", language),
         recent_dirs=lines("recent_dirs"),
         usage_command=value("usage_command"),
         chatwork_account_id=html.escape(
@@ -6957,7 +7003,6 @@ def render(message="", view="new", language="ja", embedded=False):
         models_codex=model_radios("codex"),
         inbox_prompt_button=inbox_prompt_button,
         chatwork_panel=localize_source(CHATWORK_PANEL, language) if CW_ENABLED else "",
-        language_switch=language_switch_html(language),
     )
 
 
@@ -7216,7 +7261,6 @@ class Handler(BaseHTTPRequestHandler):
                         else ' class="review-open"'
                     ),
                     artifacts_html=artifact_links(item.get("artifacts", [])),
-                    language_switch=language_switch_html(language),
                 )
             )
         if parsed.path == "/api/usage":

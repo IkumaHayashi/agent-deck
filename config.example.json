@@ -67,5 +67,6 @@
   "legacy_upload_dirs": [],
 
   "_usage_command": "AI使用量をサイドバー下部に表示（任意）。{\"providers\": [{\"name\", \"ok\", \"rows\": [{\"label\", \"percent\", \"reset_label\", \"level\"}]}]} 形式のJSONを標準出力へ出すコマンド。結果は5分キャッシュされる",
+  "_usage_command_bundled": "同梱の参考実装を使う場合: \"python3 ~/agent-deck/tools/ai-usage.py\"（非公開APIに依存。README参照）",
   "usage_command": null
 }
