@@ -1,5 +1,6 @@
 PYTHON ?= python3
-RUFF ?= ruff
+# ruff の実行ファイルが PATH になければ、$(PYTHON) に入っている ruff へ退避する
+RUFF ?= $(shell command -v ruff >/dev/null 2>&1 && echo ruff || echo "$(PYTHON) -m ruff")
 
 JS_FILES := $(wildcard static/*.js)
 

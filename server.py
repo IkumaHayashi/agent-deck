@@ -3887,9 +3887,28 @@ def localize_usage_data(data, language):
     return localized
 
 
+USAGE_LABEL_TEMPLATES = (
+    (re.compile(r"週間枠 \((.+)\)"), "週間枠 ({})"),
+    (re.compile(r"(\d+)時間枠"), "{}時間枠"),
+    (re.compile(r"(\d+)日枠"), "{}日枠"),
+)
+
+
+def localize_usage_label(label, language):
+    """静的ラベルは完全一致で、モデル名や時間数を含む動的ラベルは雛形で翻訳する。"""
+    translated = translate(label, language)
+    if translated != label:
+        return translated
+    for pattern, template in USAGE_LABEL_TEMPLATES:
+        match = pattern.fullmatch(label)
+        if match:
+            return translate(template, language).replace("{}", match.group(1))
+    return label
+
+
 def localize_usage_item(item, language):
     localized = dict(item)
-    localized["label"] = translate(localized.get("label", ""), language)
+    localized["label"] = localize_usage_label(localized.get("label", ""), language)
     reset_label = localized.get("reset_label", "")
     reset_prefix = "リセット "
     if reset_label.startswith(reset_prefix):

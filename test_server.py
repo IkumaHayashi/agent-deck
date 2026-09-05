@@ -103,6 +103,22 @@ class BundledUsageCommandTest(unittest.TestCase):
             ["5時間枠", "週間枠", "Pro"], [r["label"] for r in parsed["rows"]]
         )
 
+    def test_localize_usage_label_translates_the_dynamic_labels(self):
+        self.assertEqual(
+            "Weekly (Opus)", server.localize_usage_label("週間枠 (Opus)", "en")
+        )
+        self.assertEqual(
+            "Weekly (Claude Sonnet 4.5)",
+            server.localize_usage_label("週間枠 (Claude Sonnet 4.5)", "en"),
+        )
+        self.assertEqual("3-hour", server.localize_usage_label("3時間枠", "en"))
+        self.assertEqual("30-day", server.localize_usage_label("30日枠", "en"))
+        # 雛形に当てはまらないラベルと日本語表示はそのまま返す
+        self.assertEqual("Pro", server.localize_usage_label("Pro", "en"))
+        self.assertEqual(
+            "週間枠 (Opus)", server.localize_usage_label("週間枠 (Opus)", "ja")
+        )
+
     def test_localize_usage_data_translates_the_bundled_labels(self):
         data = {
             "providers": [
