@@ -333,6 +333,7 @@
   "Issue / PRが見つかりません": "The issue or PR was not found",
   "GitHubから返されたIssue / PR情報を読み取れませんでした": "Could not read the issue or PR data returned by GitHub",
   "Pull Requestブランチを取得できませんでした": "Could not check out the Pull Request branch",
+  "既存のworktreeが対象リポジトリまたはブランチと一致しません": "The existing worktree does not match the target repository or branch",
   "Issue / PR指定は新規の通常起動でのみ使用できます": "Issue or PR selection is only available when starting a new standard session",
   "ghまたはgit CLIが見つかりません": "The gh or git CLI was not found",
   "GitHubまたはGitの処理がタイムアウトしました": "The GitHub or Git operation timed out",

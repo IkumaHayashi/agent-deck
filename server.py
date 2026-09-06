@@ -2763,20 +2763,65 @@ def github_work_item_target(cwd, kind, selector):
     return item
 
 
+def git_common_directory(cwd, git=None):
+    """リポジトリとリンクworktreeで共通するgit dirの実体パスを返す。"""
+    result = subprocess.run(
+        [git or find_bin("git"), "-C", cwd, "rev-parse", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    common_dir = result.stdout.strip() if result.returncode == 0 else ""
+    if not common_dir:
+        raise RuntimeError(result.stderr.strip() or "Gitリポジトリを確認できません")
+    if not os.path.isabs(common_dir):
+        common_dir = os.path.join(cwd, common_dir)
+    return os.path.realpath(common_dir)
+
+
+def github_work_item_worktree_path(target, common_dir):
+    """リポジトリやcloneが異なる対象同士で衝突しないworktreeパスを返す。"""
+    repo = target["cwd"]
+    kind = target["kind"]
+    number = int(target["number"])
+    label = "issue" if kind == "issue" else "pull"
+    repository = target.get("repositoryName") or os.path.basename(repo.rstrip("/"))
+    repository_slug = re.sub(r"[^a-z0-9_.-]+", "-", repository.lower()).strip("-")
+    repository_key = hashlib.sha256(common_dir.encode()).hexdigest()[:10]
+    return os.path.join(
+        WORKTREES_DIR,
+        f"{repository_slug or 'repository'}-{repository_key}-{label}-{number}",
+    )
+
+
 def github_work_item_worktree(target):
     """Issue / PRで作業するためのブランチ付き専用worktreeを返す。"""
     repo = target["cwd"]
     kind = target["kind"]
     number = int(target["number"])
     label = "issue" if kind == "issue" else "pull"
-    path = os.path.join(
-        WORKTREES_DIR, f"{os.path.basename(repo.rstrip('/'))}-{label}-{number}"
-    )
+    git = find_bin("git")
+    common_dir = git_common_directory(repo, git)
+    path = github_work_item_worktree_path(target, common_dir)
+    branch = f"agent-deck/{label}-{number}"
     if os.path.isdir(path):
+        existing_common_dir = git_common_directory(path, git)
+        current_branch = subprocess.run(
+            [git, "-C", path, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if (
+            existing_common_dir != common_dir
+            or current_branch.returncode != 0
+            or current_branch.stdout.strip() != branch
+        ):
+            raise RuntimeError(
+                "既存のworktreeが対象リポジトリまたはブランチと一致しません"
+            )
         return path
     os.makedirs(WORKTREES_DIR, exist_ok=True)
-    git = find_bin("git")
-    branch = f"agent-deck/{label}-{number}"
     exists = (
         subprocess.run(
             [git, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],

@@ -248,12 +248,19 @@
     return box;
   }
   var githubPreviewTimer;
+  var githubPreviewController;
+  function clearGithubTargetPreview() {
+    if (githubPreviewController) githubPreviewController.abort();
+    githubPreviewController = null;
+    var target = document.getElementById("github-preview");
+    target.className = "cw-empty";
+    target.textContent = "番号またはURLを入力すると内容を確認できます";
+  }
   async function loadGithubTargetPreview() {
     var target = document.getElementById("github-preview");
     var selector = document.getElementById("github-selector").value.trim();
     if (!selector) {
-      target.className = "cw-empty"; target.textContent = "番号またはURLを入力すると内容を確認できます";
-      return;
+      return clearGithubTargetPreview();
     }
     var urlKind = selector.match(/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+\/?$/i);
     if (urlKind) {
@@ -263,22 +270,29 @@
     }
     var kind = document.querySelector(".github-kinds input:checked").value;
     var dir = document.getElementById("github-project").value;
+    if (githubPreviewController) githubPreviewController.abort();
+    var controller = new AbortController(); githubPreviewController = controller;
     target.className = "cw-loading"; target.textContent = "GitHubから読み込み中...";
     try {
       var query = new URLSearchParams({dir: dir, kind: kind, target: selector});
-      var response = await fetch("/api/github-item?" + query.toString());
+      var response = await fetch("/api/github-item?" + query.toString(), {signal: controller.signal});
       var item = await response.json();
+      if (controller !== githubPreviewController) return;
       if (!response.ok) throw new Error(item.error || "Issue / PRを取得できませんでした");
       target.className = ""; target.replaceChildren(githubTargetCard(item));
-    } catch (error) { showError(target, error.message); }
+    } catch (error) {
+      if (error.name === "AbortError" || controller !== githubPreviewController) return;
+      showError(target, error.message);
+    }
   }
   document.getElementById("github-target-form").addEventListener("submit", function (event) {
     event.preventDefault(); clearTimeout(githubPreviewTimer); loadGithubTargetPreview();
   });
   document.getElementById("github-selector").addEventListener("input", function () {
     clearTimeout(githubPreviewTimer);
+    clearGithubTargetPreview();
     var value = this.value.trim();
-    if (!value) return loadGithubTargetPreview();
+    if (!value) return;
     if (/^\d+$/.test(value) || /^https:\/\/github\.com\/.+\/(?:issues|pull)\/\d+\/?$/i.test(value)) {
       githubPreviewTimer = setTimeout(loadGithubTargetPreview, 500);
     }

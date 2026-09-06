@@ -396,6 +396,15 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
 
+    def test_github_preview_cancels_stale_requests_and_clears_old_card(self):
+        with open(os.path.join(server.STATIC_DIR, "new.js"), encoding="utf-8") as f:
+            script = f.read()
+
+        self.assertIn("githubPreviewController.abort()", script)
+        self.assertIn("new AbortController()", script)
+        self.assertIn("controller !== githubPreviewController", script)
+        self.assertIn("clearGithubTargetPreview();", script)
+
     def test_session_list_embeds_launcher_on_desktop(self):
         self.assertIn('class="launcher-frame"', server.LIST_PAGE)
         self.assertIn("新規セッション", server.LIST_PAGE)
@@ -1970,6 +1979,39 @@ class DirectoryDiffTest(unittest.TestCase):
                 "https://github.com/example/repo/pull/9",
             )
 
+    def test_github_worktree_paths_do_not_collide_between_repositories_or_clones(self):
+        with mock.patch.object(server, "WORKTREES_DIR", "/tmp/worktrees"):
+            first = server.github_work_item_worktree_path(
+                {
+                    "cwd": "/tmp/first/app",
+                    "repositoryName": "alice/app",
+                    "kind": "issue",
+                    "number": 42,
+                },
+                "/tmp/first/app/.git",
+            )
+            other_repository = server.github_work_item_worktree_path(
+                {
+                    "cwd": "/tmp/second/app",
+                    "repositoryName": "bob/app",
+                    "kind": "issue",
+                    "number": 42,
+                },
+                "/tmp/second/app/.git",
+            )
+            other_clone = server.github_work_item_worktree_path(
+                {
+                    "cwd": "/tmp/clone/app",
+                    "repositoryName": "alice/app",
+                    "kind": "issue",
+                    "number": 42,
+                },
+                "/tmp/clone/app/.git",
+            )
+
+        self.assertNotEqual(first, other_repository)
+        self.assertNotEqual(first, other_clone)
+
     def test_github_issue_worktree_starts_from_default_branch(self):
         missing_branch = SimpleNamespace(returncode=1, stdout="", stderr="")
         created = SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -1980,6 +2022,9 @@ class DirectoryDiffTest(unittest.TestCase):
                 server, "WORKTREES_DIR", os.path.join(data_dir, "worktrees")
             ),
             mock.patch.object(server, "find_bin", return_value="/usr/bin/git"),
+            mock.patch.object(
+                server, "git_common_directory", return_value="/tmp/repo.git"
+            ),
             mock.patch.object(
                 server, "git_default_branch", return_value=("main", "origin/main")
             ),
@@ -2017,6 +2062,9 @@ class DirectoryDiffTest(unittest.TestCase):
                 server, "find_bin", side_effect=lambda name: f"/usr/bin/{name}"
             ),
             mock.patch.object(
+                server, "git_common_directory", return_value="/tmp/repo.git"
+            ),
+            mock.patch.object(
                 server.subprocess, "run", side_effect=[missing_branch, ok, ok]
             ) as run,
         ):
@@ -2039,6 +2087,34 @@ class DirectoryDiffTest(unittest.TestCase):
             ],
             run.call_args_list[2].args[0],
         )
+
+    def test_existing_github_worktree_must_match_source_repository(self):
+        current_branch = SimpleNamespace(
+            returncode=0, stdout="agent-deck/issue-31\n", stderr=""
+        )
+        target = {
+            "cwd": "/tmp/source/repo",
+            "repositoryName": "example/repo",
+            "kind": "issue",
+            "number": 31,
+        }
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            mock.patch.object(server, "WORKTREES_DIR", data_dir),
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/git"),
+            mock.patch.object(
+                server,
+                "git_common_directory",
+                side_effect=["/tmp/source/repo/.git", "/tmp/other/repo/.git"],
+            ),
+            mock.patch.object(server.subprocess, "run", return_value=current_branch),
+        ):
+            path = server.github_work_item_worktree_path(
+                target, "/tmp/source/repo/.git"
+            )
+            os.makedirs(path)
+            with self.assertRaisesRegex(RuntimeError, "対象リポジトリ"):
+                server.github_work_item_worktree(target)
 
     def test_non_git_directory_has_friendly_error(self):
         failed = SimpleNamespace(returncode=1, stdout="", stderr="not a git repository")
