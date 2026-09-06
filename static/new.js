@@ -216,6 +216,95 @@
     }
     return box;
   }
+  function githubTargetCard(item) {
+    var box = document.createElement("div"); box.className = "review-request";
+    var title = document.createElement("strong");
+    title.textContent = item.repositoryName + "#" + item.number + " " + item.title;
+    var meta = document.createElement("small");
+    meta.textContent = (item.kind === "issue" ? "Issue" : "Pull Request")
+      + " · " + item.state + (item.author && item.author.login ? " · @" + item.author.login : "");
+    box.append(title, meta);
+    if (item.body) {
+      var body = document.createElement("div"); body.className = "github-preview-body";
+      body.textContent = item.body.length > 500 ? item.body.slice(0, 500) + "…" : item.body;
+      box.appendChild(body);
+    }
+    if (item.labels && item.labels.length) {
+      var labels = document.createElement("div"); labels.className = "github-labels";
+      item.labels.forEach(function (label) {
+        var chip = document.createElement("span"); chip.textContent = label.name; labels.appendChild(chip);
+      });
+      box.appendChild(labels);
+    }
+    var form = document.createElement("form"); form.className = "launch";
+    form.method = "post"; form.action = "/launch";
+    [["dir", item.cwd], ["github_kind", item.kind], ["github_target", item.url]].forEach(function (pair) {
+      var input = document.createElement("input"); input.type = "hidden";
+      input.name = pair[0]; input.value = pair[1]; form.appendChild(input);
+    });
+    var button = document.createElement("button"); button.type = "submit";
+    button.textContent = item.kind === "issue" ? "🚀 このIssueから起動" : "🚀 このPRから起動";
+    form.appendChild(button); wireLaunchForm(form); box.appendChild(form);
+    return box;
+  }
+  var githubPreviewTimer;
+  var githubPreviewController;
+  function clearGithubTargetPreview() {
+    if (githubPreviewController) githubPreviewController.abort();
+    githubPreviewController = null;
+    var target = document.getElementById("github-preview");
+    target.className = "cw-empty";
+    target.textContent = "番号またはURLを入力すると内容を確認できます";
+  }
+  async function loadGithubTargetPreview() {
+    var target = document.getElementById("github-preview");
+    var selector = document.getElementById("github-selector").value.trim();
+    if (!selector) {
+      return clearGithubTargetPreview();
+    }
+    var urlKind = selector.match(/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+\/?$/i);
+    if (urlKind) {
+      var inferred = urlKind[1].toLowerCase() === "issues" ? "issue" : "pull";
+      var inferredRadio = document.querySelector('.github-kinds input[value="' + inferred + '"]');
+      if (inferredRadio) inferredRadio.checked = true;
+    }
+    var kind = document.querySelector(".github-kinds input:checked").value;
+    var dir = document.getElementById("github-project").value;
+    if (githubPreviewController) githubPreviewController.abort();
+    var controller = new AbortController(); githubPreviewController = controller;
+    target.className = "cw-loading"; target.textContent = "GitHubから読み込み中...";
+    try {
+      var query = new URLSearchParams({dir: dir, kind: kind, target: selector});
+      var response = await fetch("/api/github-item?" + query.toString(), {signal: controller.signal});
+      var item = await response.json();
+      if (controller !== githubPreviewController) return;
+      if (!response.ok) throw new Error(item.error || "Issue / PRを取得できませんでした");
+      target.className = ""; target.replaceChildren(githubTargetCard(item));
+    } catch (error) {
+      if (error.name === "AbortError" || controller !== githubPreviewController) return;
+      showError(target, error.message);
+    }
+  }
+  document.getElementById("github-target-form").addEventListener("submit", function (event) {
+    event.preventDefault(); clearTimeout(githubPreviewTimer); loadGithubTargetPreview();
+  });
+  document.getElementById("github-selector").addEventListener("input", function () {
+    clearTimeout(githubPreviewTimer);
+    clearGithubTargetPreview();
+    var value = this.value.trim();
+    if (!value) return;
+    if (/^\d+$/.test(value) || /^https:\/\/github\.com\/.+\/(?:issues|pull)\/\d+\/?$/i.test(value)) {
+      githubPreviewTimer = setTimeout(loadGithubTargetPreview, 500);
+    }
+  });
+  document.getElementById("github-project").addEventListener("change", function () {
+    if (document.getElementById("github-selector").value.trim()) loadGithubTargetPreview();
+  });
+  document.querySelectorAll(".github-kinds input").forEach(function (radio) {
+    radio.addEventListener("change", function () {
+      if (document.getElementById("github-selector").value.trim()) loadGithubTargetPreview();
+    });
+  });
   async function loadReviews(force) {
     var target = document.getElementById("review-requests"); target.className = "cw-loading"; target.textContent = "読み込み中...";
     try {

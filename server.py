@@ -435,7 +435,7 @@ CW_ENABLED = bool(CW_ACCOUNT_ID) and os.path.exists(CW_TOKEN_PATH)
 CW_CACHE_PATH = f"{DATA_DIR}/cw_cache.json"
 # 過去の会話の画像も表示し続けられるよう、tmp ではなく永続領域に置く
 UPLOAD_DIR = f"{DATA_DIR}/uploads"
-# PRレビュー用に切り出す git worktree の置き場所
+# Issue / PRからの作業やPRレビューで切り出す git worktree の置き場所
 WORKTREES_DIR = f"{DATA_DIR}/worktrees"
 # 過去ログに残る旧保存先の添付も表示できるよう、パス検出の対象に含める
 UPLOAD_PATH_PREFIXES = [DATA_DIR] + [
@@ -2341,6 +2341,10 @@ PR_SELECTOR_RE = re.compile(r"(?:https://github\.com/[\w.-]+/[\w.-]+/pull/)?(\d+
 GITHUB_PR_URL_RE = re.compile(
     r"https://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/pull/(?P<number>\d+)/?"
 )
+GITHUB_ITEM_URL_RE = re.compile(
+    r"https://github\.com/(?P<repo>[\w.-]+/[\w.-]+)/"
+    r"(?P<kind>issues|pull)/(?P<number>\d+)/?"
+)
 
 
 def normalize_pr_selector(value):
@@ -2690,6 +2694,193 @@ def pull_request_target(selector):
     item["cwd"] = cwd
     item["repositoryName"] = match.group("repo")
     return item
+
+
+def github_work_item_target(cwd, kind, selector):
+    """Issue / PR指定を検証し、プレビューとworktree作成に使う情報を返す。"""
+    if kind not in {"issue", "pull"}:
+        raise ValueError("IssueまたはPull Requestを選択してください")
+    selector = (selector or "").strip()
+    url_match = GITHUB_ITEM_URL_RE.fullmatch(selector)
+    if not url_match and not re.fullmatch(r"\d+", selector):
+        raise ValueError("Issue / PR番号またはGitHub URLを入力してください")
+    if url_match:
+        url_kind = "issue" if url_match.group("kind") == "issues" else "pull"
+        if url_kind != kind:
+            raise ValueError("選択した種別とGitHub URLの種別が一致しません")
+        repository = url_match.group("repo").lower()
+        number = url_match.group("number")
+        selected_repository = ""
+        if cwd and os.path.isdir(cwd):
+            remote = subprocess.run(
+                [find_bin("git"), "remote", "get-url", "origin"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if remote.returncode == 0:
+                selected_repository = github_repo_name(remote.stdout)
+        if selected_repository != repository:
+            cwd = local_github_repositories().get(repository, "")
+        if not cwd:
+            raise LookupError(
+                "対象リポジトリがAgent Deckのプロジェクトに見つかりません"
+            )
+    else:
+        number = selector
+        remote = subprocess.run(
+            [find_bin("git"), "remote", "get-url", "origin"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        repository = github_repo_name(remote.stdout) if remote.returncode == 0 else ""
+        if not repository:
+            raise LookupError("選択したプロジェクトのGitHub originを確認できません")
+    command = "issue" if kind == "issue" else "pr"
+    fields = "number,title,url,state,body,author,labels,updatedAt"
+    result = subprocess.run(
+        [find_bin("gh"), command, "view", number, "--json", fields],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    if result.returncode != 0:
+        raise LookupError(result.stderr.strip() or "Issue / PRが見つかりません")
+    try:
+        item = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "GitHubから返されたIssue / PR情報を読み取れませんでした"
+        ) from exc
+    item["cwd"] = cwd
+    item["kind"] = kind
+    item["repositoryName"] = repository
+    return item
+
+
+def git_common_directory(cwd, git=None):
+    """リポジトリとリンクworktreeで共通するgit dirの実体パスを返す。"""
+    result = subprocess.run(
+        [git or find_bin("git"), "-C", cwd, "rev-parse", "--git-common-dir"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    common_dir = result.stdout.strip() if result.returncode == 0 else ""
+    if not common_dir:
+        raise RuntimeError(result.stderr.strip() or "Gitリポジトリを確認できません")
+    if not os.path.isabs(common_dir):
+        common_dir = os.path.join(cwd, common_dir)
+    return os.path.realpath(common_dir)
+
+
+def github_work_item_worktree_path(target, common_dir):
+    """リポジトリやcloneが異なる対象同士で衝突しないworktreeパスを返す。"""
+    repo = target["cwd"]
+    kind = target["kind"]
+    number = int(target["number"])
+    label = "issue" if kind == "issue" else "pull"
+    repository = target.get("repositoryName") or os.path.basename(repo.rstrip("/"))
+    repository_slug = re.sub(r"[^a-z0-9_.-]+", "-", repository.lower()).strip("-")
+    repository_key = hashlib.sha256(common_dir.encode()).hexdigest()[:10]
+    return os.path.join(
+        WORKTREES_DIR,
+        f"{repository_slug or 'repository'}-{repository_key}-{label}-{number}",
+    )
+
+
+def github_work_item_worktree(target):
+    """Issue / PRで作業するためのブランチ付き専用worktreeを返す。"""
+    repo = target["cwd"]
+    kind = target["kind"]
+    number = int(target["number"])
+    label = "issue" if kind == "issue" else "pull"
+    git = find_bin("git")
+    common_dir = git_common_directory(repo, git)
+    path = github_work_item_worktree_path(target, common_dir)
+    branch = f"agent-deck/{label}-{number}"
+    if os.path.isdir(path):
+        existing_common_dir = git_common_directory(path, git)
+        current_branch = subprocess.run(
+            [git, "-C", path, "branch", "--show-current"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if (
+            existing_common_dir != common_dir
+            or current_branch.returncode != 0
+            or current_branch.stdout.strip() != branch
+        ):
+            raise RuntimeError(
+                "既存のworktreeが対象リポジトリまたはブランチと一致しません"
+            )
+        return path
+    os.makedirs(WORKTREES_DIR, exist_ok=True)
+    exists = (
+        subprocess.run(
+            [git, "show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        ).returncode
+        == 0
+    )
+    if kind == "issue":
+        _, base_ref = git_default_branch(repo)
+        args = [git, "worktree", "add", path, branch]
+        if not exists:
+            args = [git, "worktree", "add", "-b", branch, path, base_ref]
+        add = subprocess.run(args, cwd=repo, capture_output=True, text=True, timeout=30)
+        if add.returncode != 0:
+            raise RuntimeError(add.stderr.strip() or "worktreeを作成できませんでした")
+        return path
+    if exists:
+        add = subprocess.run(
+            [git, "worktree", "add", path, branch],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    else:
+        add = subprocess.run(
+            [git, "worktree", "add", "--detach", path],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    if add.returncode != 0:
+        raise RuntimeError(add.stderr.strip() or "worktreeを作成できませんでした")
+    if exists:
+        return path
+    checkout = subprocess.run(
+        [find_bin("gh"), "pr", "checkout", str(number), "--branch", branch],
+        cwd=path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={**os.environ, "NO_COLOR": "1"},
+    )
+    if checkout.returncode != 0:
+        subprocess.run(
+            [git, "worktree", "remove", path],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        raise RuntimeError(
+            checkout.stderr.strip() or "Pull Requestブランチを取得できませんでした"
+        )
+    return path
 
 
 def pull_request_worktree(target):
@@ -6963,6 +7154,11 @@ def render(message="", view="new", language="ja", embedded=False):
         f'<option value="{html.escape(path)}">{html.escape(name)}</option>'
         for name, path in other_projects
     )
+    github_projects = list(dict.fromkeys([*PINNED, *other_projects]))
+    github_project_options = "\n".join(
+        f'<option value="{html.escape(path)}">{html.escape(name)}</option>'
+        for name, path in github_projects
+    )
     inbox_prompt_button = (
         f'<button class="cw-set" id="inbox-open" type="button">'
         f"{translate('📥 受信箱から選ぶ', language)}</button>"
@@ -7017,6 +7213,7 @@ def render(message="", view="new", language="ja", embedded=False):
         message=message,
         buttons=buttons,
         options=options,
+        github_project_options=github_project_options,
         resume_items=resume_items,
         models_claude=model_radios("claude"),
         models_codex=model_radios("codex"),
@@ -7312,6 +7509,32 @@ class Handler(BaseHTTPRequestHandler):
                 )
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
+        if parsed.path == "/api/github-item":
+            query = urllib.parse.parse_qs(parsed.query)
+            raw_dir = query.get("dir", [""])[0]
+            path, error = validate_dir(raw_dir)
+            if error:
+                return self._json({"error": error}, 400)
+            try:
+                return self._json(
+                    github_work_item_target(
+                        path,
+                        query.get("kind", [""])[0],
+                        query.get("target", [""])[0],
+                    )
+                )
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 400)
+            except LookupError as exc:
+                return self._json({"error": str(exc)}, 404)
+            except FileNotFoundError:
+                return self._json({"error": "ghまたはgit CLIが見つかりません"}, 503)
+            except subprocess.TimeoutExpired:
+                return self._json(
+                    {"error": "GitHubからの取得がタイムアウトしました"}, 504
+                )
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 500)
         if parsed.path == "/api/version":
             return self._json(latest_release())
         if parsed.path == "/api/local-image":
@@ -7509,6 +7732,8 @@ class Handler(BaseHTTPRequestHandler):
                     qs.get("bypass", ["0"])[0],
                     qs.get("resume", [""])[0],
                     qs.get("pull_request", [""])[0],
+                    qs.get("github_kind", [""])[0],
+                    qs.get("github_target", [""])[0],
                 )
             return self._page(render(view="new", language=language), 200)
         self._page(render(view="sessions", language=language))
@@ -7863,6 +8088,8 @@ class Handler(BaseHTTPRequestHandler):
                 qs.get("bypass", ["0"])[0],
                 qs.get("resume", [""])[0],
                 qs.get("pull_request", [""])[0],
+                qs.get("github_kind", [""])[0],
+                qs.get("github_target", [""])[0],
             )
         self._page(render(language=self._language()), 404)
 
@@ -8064,6 +8291,8 @@ class Handler(BaseHTTPRequestHandler):
         bypass: str = "0",
         resume: str = "",
         pull_request: str = "",
+        github_kind: str = "",
+        github_target: str = "",
     ):
         language = self._language()
 
@@ -8118,6 +8347,31 @@ class Handler(BaseHTTPRequestHandler):
                 path = pull_request_worktree(pull_request_target(pull_request))
             except (LookupError, RuntimeError, ValueError) as exc:
                 return launch_page(str(exc))
+        if github_target:
+            if resume or pull_request:
+                return launch_page("Issue / PR指定は新規の通常起動でのみ使用できます")
+            try:
+                target = github_work_item_target(path, github_kind, github_target)
+                path = github_work_item_worktree(target)
+            except FileNotFoundError:
+                return launch_page("ghまたはgit CLIが見つかりません")
+            except subprocess.TimeoutExpired:
+                return launch_page("GitHubまたはGitの処理がタイムアウトしました")
+            except (LookupError, RuntimeError, ValueError) as exc:
+                return launch_page(str(exc))
+            target_instruction = (
+                "以下の GitHub Issue に対応してください。"
+                if github_kind == "issue"
+                else "以下の GitHub Pull Request に対応してください。"
+            )
+            target_prompt = (
+                f"{translate(target_instruction, language)}\n{target['url']}"
+            )
+            prompt = target_prompt + (
+                f"\n\n{translate('追加の指示:', language)}\n{prompt.strip()}"
+                if prompt.strip()
+                else ""
+            )
         prompt = prompt.strip()
         if len(prompt) > 8000:
             return launch_page("プロンプトが長すぎます（8000文字まで）")
