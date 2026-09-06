@@ -43,6 +43,7 @@
 </div>
 <div class="launcher-tabs" role="tablist">
   <button type="button" class="active" data-panel="projects-panel">プロジェクト</button>
+  <button type="button" data-panel="github-panel">Issue / PR</button>
   <button type="button" data-panel="reviews-panel">GitHubレビュー</button>
   <button type="button" data-panel="resume-panel">会話を再開</button>
 </div>
@@ -58,6 +59,25 @@
   <input type="text" name="dir" placeholder="任意のディレクトリ ~/projects/..." autocapitalize="off" autocorrect="off" required>
   <button class="proj" type="submit">🚀 このディレクトリで起動</button>
 </form></details>
+</section>
+<section class="launcher-panel" id="github-panel">
+<h2>Issue / PRから起動</h2>
+<p class="panel-intro">GitHubのIssueまたはPull Requestを指定し、専用worktreeでセッションを起動します。</p>
+<form id="github-target-form">
+  <label class="setting-label" for="github-project">プロジェクト</label>
+  <select id="github-project">{github_project_options}</select>
+  <span class="setting-label">種別</span>
+  <div class="models github-kinds">
+    <label><input type="radio" name="github-kind" value="issue" checked><span>Issue</span></label>
+    <label><input type="radio" name="github-kind" value="pull"><span>Pull Request</span></label>
+  </div>
+  <label class="setting-label" for="github-selector">番号またはURL</label>
+  <div class="github-selector-row">
+    <input type="text" id="github-selector" placeholder="123 または GitHub URL" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    <button class="cw-set" type="submit">プレビュー</button>
+  </div>
+</form>
+<div id="github-preview" class="cw-empty">番号またはURLを入力すると内容を確認できます</div>
 </section>
 <section class="launcher-panel" id="reviews-panel">
 <div class="cw-head"><h2>GitHubレビュー</h2><button class="cw-refresh" id="reviews-refresh" type="button">🔄 更新</button></div>

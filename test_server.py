@@ -192,12 +192,21 @@ class FrontendTemplateTest(unittest.TestCase):
     def test_english_launcher_has_localized_assets_without_switch(self):
         with mock.patch.object(server, "recent_conversations", return_value=[]):
             page = server.render(language="en")
+        script_path = os.path.join(os.path.dirname(__file__), "static", "new.js")
+        with open(script_path, encoding="utf-8") as source:
+            script = server.localize_source(source.read(), "en")
 
         self.assertIn('<html lang="en">', page)
         self.assertIn("Launch from a project", page)
+        self.assertIn("Launch from an issue or PR", page)
+        self.assertIn("Enter a number or URL to preview its details", page)
         self.assertIn("No conversations available to resume", page)
         self.assertIn("lang=en", page)
         self.assertNotIn("プロジェクトから起動", page)
+        self.assertNotIn("Issue / PRから起動", page)
+        self.assertIn("🚀 Launch from this issue", script)
+        self.assertIn("Loading from GitHub...", script)
+        self.assertNotIn("GitHubから読み込み中...", script)
         # 言語切り替えは設定ページへ集約したので、起動画面には出さない。
         self.assertNotIn("language-switch", page)
 
@@ -382,6 +391,8 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("/apple-touch-icon.png?v=", page)
         self.assertIn("/site.webmanifest?v=", page)
         self.assertIn('data-panel="reviews-panel"', page)
+        self.assertIn('data-panel="github-panel"', page)
+        self.assertIn('id="github-selector"', page)
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
 
@@ -701,6 +712,52 @@ class FrontendTemplateTest(unittest.TestCase):
         # PRレビューはPR headを取得したworktreeで起動する
         worktree.assert_called_once()
         self.assertIn("/tmp/worktrees/project-pr-42", run.call_args.args[0])
+
+    def test_github_issue_launches_in_worktree_with_target_prompt(self):
+        handler = object.__new__(server.Handler)
+        result = SimpleNamespace(
+            returncode=0, stdout="Started session agent-issue\n", stderr=""
+        )
+        target = {
+            "cwd": "/tmp/project",
+            "kind": "issue",
+            "number": 42,
+            "url": "https://github.com/example/repo/issues/42",
+        }
+        with (
+            mock.patch.object(
+                server, "validate_dir", return_value=("/tmp/project", "")
+            ),
+            mock.patch.object(server.subprocess, "run", return_value=result) as run,
+            mock.patch.object(
+                server, "wait_for_new_session_id", return_value="session-id"
+            ),
+            mock.patch.object(server, "set_session_metadata"),
+            mock.patch.object(server, "upsert_registered_session"),
+            mock.patch.object(server, "invalidate_session_cache"),
+            mock.patch.object(
+                server, "github_work_item_target", return_value=target
+            ) as resolve,
+            mock.patch.object(
+                server,
+                "github_work_item_worktree",
+                return_value="/tmp/worktrees/project-issue-42",
+            ) as worktree,
+            mock.patch.object(handler, "_redirect"),
+        ):
+            handler._launch(
+                "/tmp/project",
+                prompt="追加条件も確認してください",
+                github_kind="issue",
+                github_target="42",
+            )
+
+        resolve.assert_called_once_with("/tmp/project", "issue", "42")
+        worktree.assert_called_once_with(target)
+        command = run.call_args.args[0]
+        self.assertIn("/tmp/worktrees/project-issue-42", command)
+        self.assertIn(target["url"], command[-1])
+        self.assertIn("追加条件も確認してください", command[-1])
 
     def test_claude_resume_finds_moved_log_and_uses_its_latest_cwd(self):
         handler = object.__new__(server.Handler)
@@ -1831,6 +1888,157 @@ class DirectoryDiffTest(unittest.TestCase):
         self.assertEqual(existing, path)
         # 既存worktreeなら worktree add は走らず、checkout失敗でもそのまま使う
         self.assertEqual(1, run.call_count)
+
+    def test_github_issue_number_is_resolved_in_selected_project(self):
+        payload = {
+            "number": 31,
+            "title": "起動対象",
+            "url": "https://github.com/example/repo/issues/31",
+            "state": "OPEN",
+            "body": "本文",
+            "author": {"login": "octocat"},
+            "labels": [],
+            "updatedAt": "2026-09-04T00:00:00Z",
+        }
+        results = [
+            SimpleNamespace(
+                returncode=0,
+                stdout="git@github.com:Example/Repo.git\n",
+                stderr="",
+            ),
+            SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+        ]
+        with (
+            mock.patch.object(
+                server, "find_bin", side_effect=lambda name, *a: f"/usr/bin/{name}"
+            ),
+            mock.patch.object(server.subprocess, "run", side_effect=results) as run,
+        ):
+            item = server.github_work_item_target("/tmp/repo", "issue", "31")
+
+        self.assertEqual("issue", item["kind"])
+        self.assertEqual("example/repo", item["repositoryName"])
+        self.assertEqual(
+            [
+                "/usr/bin/gh",
+                "issue",
+                "view",
+                "31",
+                "--json",
+                "number,title,url,state,body,author,labels,updatedAt",
+            ],
+            run.call_args_list[1].args[0],
+        )
+
+    def test_github_url_selects_matching_local_project(self):
+        payload = {
+            "number": 9,
+            "title": "PR対象",
+            "url": "https://github.com/example/repo/pull/9",
+            "state": "OPEN",
+        }
+        results = [
+            SimpleNamespace(
+                returncode=0,
+                stdout="git@github.com:example/other.git\n",
+                stderr="",
+            ),
+            SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+        ]
+        with (
+            mock.patch.object(server, "find_bin", side_effect=lambda name: name),
+            mock.patch.object(server.os.path, "isdir", return_value=True),
+            mock.patch.object(server.subprocess, "run", side_effect=results) as run,
+            mock.patch.object(
+                server,
+                "local_github_repositories",
+                return_value={"example/repo": "/tmp/matched"},
+            ),
+        ):
+            item = server.github_work_item_target(
+                "/tmp/other", "pull", "https://github.com/example/repo/pull/9"
+            )
+
+        self.assertEqual("/tmp/matched", item["cwd"])
+        self.assertEqual("/tmp/matched", run.call_args_list[1].kwargs["cwd"])
+
+    def test_github_url_kind_must_match_selection(self):
+        with self.assertRaisesRegex(ValueError, "種別"):
+            server.github_work_item_target(
+                "/tmp/repo",
+                "issue",
+                "https://github.com/example/repo/pull/9",
+            )
+
+    def test_github_issue_worktree_starts_from_default_branch(self):
+        missing_branch = SimpleNamespace(returncode=1, stdout="", stderr="")
+        created = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            tempfile.TemporaryDirectory() as repo,
+            mock.patch.object(
+                server, "WORKTREES_DIR", os.path.join(data_dir, "worktrees")
+            ),
+            mock.patch.object(server, "find_bin", return_value="/usr/bin/git"),
+            mock.patch.object(
+                server, "git_default_branch", return_value=("main", "origin/main")
+            ),
+            mock.patch.object(
+                server.subprocess, "run", side_effect=[missing_branch, created]
+            ) as run,
+        ):
+            path = server.github_work_item_worktree(
+                {"cwd": repo, "kind": "issue", "number": 31}
+            )
+
+        self.assertEqual(
+            [
+                "/usr/bin/git",
+                "worktree",
+                "add",
+                "-b",
+                "agent-deck/issue-31",
+                path,
+                "origin/main",
+            ],
+            run.call_args_list[1].args[0],
+        )
+
+    def test_github_pull_worktree_checks_out_writable_branch(self):
+        missing_branch = SimpleNamespace(returncode=1, stdout="", stderr="")
+        ok = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            tempfile.TemporaryDirectory() as data_dir,
+            tempfile.TemporaryDirectory() as repo,
+            mock.patch.object(
+                server, "WORKTREES_DIR", os.path.join(data_dir, "worktrees")
+            ),
+            mock.patch.object(
+                server, "find_bin", side_effect=lambda name: f"/usr/bin/{name}"
+            ),
+            mock.patch.object(
+                server.subprocess, "run", side_effect=[missing_branch, ok, ok]
+            ) as run,
+        ):
+            path = server.github_work_item_worktree(
+                {"cwd": repo, "kind": "pull", "number": 9}
+            )
+
+        self.assertEqual(
+            ["/usr/bin/git", "worktree", "add", "--detach", path],
+            run.call_args_list[1].args[0],
+        )
+        self.assertEqual(
+            [
+                "/usr/bin/gh",
+                "pr",
+                "checkout",
+                "9",
+                "--branch",
+                "agent-deck/pull-9",
+            ],
+            run.call_args_list[2].args[0],
+        )
 
     def test_non_git_directory_has_friendly_error(self):
         failed = SimpleNamespace(returncode=1, stdout="", stderr="not a git repository")
