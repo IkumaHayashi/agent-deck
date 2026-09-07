@@ -154,6 +154,119 @@ class BundledUsageCommandTest(unittest.TestCase):
         server.USAGE_CACHE.update(data=None, at=0.0)
 
 
+class CodexModelsTest(unittest.TestCase):
+    def test_reads_visible_models_in_priority_order(self):
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8") as cache:
+            json.dump(
+                {
+                    "models": [
+                        {
+                            "slug": "gpt-5.6-sol",
+                            "display_name": "GPT-5.6-Sol",
+                            "visibility": "list",
+                            "priority": 6,
+                        },
+                        {
+                            "slug": "gpt-hidden",
+                            "display_name": "Hidden",
+                            "visibility": "hide",
+                            "priority": 2,
+                        },
+                        {
+                            "slug": "gpt-6-astra",
+                            "display_name": "GPT-6-Astra",
+                            "visibility": "list",
+                            "priority": 1,
+                        },
+                    ]
+                },
+                cache,
+            )
+            cache.flush()
+
+            models = server.codex_models_from_cache(cache.name)
+
+        self.assertEqual(
+            [
+                ("gpt-6-astra", "6 Astra"),
+                ("gpt-5.6-sol", "5.6 Sol"),
+            ],
+            models,
+        )
+
+    def test_falls_back_when_cache_is_unreadable(self):
+        self.assertEqual([], server.codex_models_from_cache("/missing/models.json"))
+
+    def test_available_models_use_cli_catalog_and_cache_the_result(self):
+        payload = {
+            "models": [
+                {
+                    "slug": "gpt-6-astra",
+                    "display_name": "GPT-6-Astra",
+                    "visibility": "list",
+                    "priority": 1,
+                }
+            ]
+        }
+        result = SimpleNamespace(returncode=0, stdout=json.dumps(payload))
+        with (
+            mock.patch.object(server, "CODEX_MODELS_CACHE", {"at": 0.0, "models": []}),
+            mock.patch.object(server.time, "time", return_value=1000.0),
+            mock.patch.object(server.subprocess, "run", return_value=result) as run,
+        ):
+            first = server.available_codex_models()
+            second = server.available_codex_models()
+
+        self.assertEqual([("gpt-6-astra", "6 Astra")], first)
+        self.assertEqual(first, second)
+        run.assert_called_once_with(
+            [server.CODEX_BIN, "debug", "models"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+    def test_available_models_fall_back_to_file_cache(self):
+        failed = SimpleNamespace(returncode=1, stdout="")
+        fallback = [("gpt-5.6-sol", "5.6 Sol")]
+        with (
+            mock.patch.object(server, "CODEX_MODELS_CACHE", {"at": 0.0, "models": []}),
+            mock.patch.object(server.time, "time", return_value=1000.0),
+            mock.patch.object(server.subprocess, "run", return_value=failed),
+            mock.patch.object(server, "codex_models_from_cache", return_value=fallback),
+        ):
+            models = server.available_codex_models()
+
+        self.assertEqual(fallback, models)
+
+    def test_configured_models_override_discovery(self):
+        configured = {"codex": [["default", "既定"], ["custom", "Custom"]]}
+        with (
+            mock.patch.object(server, "CONFIG", {"models": configured}),
+            mock.patch.object(server, "available_codex_models") as discovery,
+        ):
+            models = server.models_for_tool("codex")
+
+        self.assertEqual([("default", "既定"), ("custom", "Custom")], models)
+        discovery.assert_not_called()
+
+    def test_unconfigured_models_follow_codex_catalog(self):
+        with (
+            mock.patch.object(server, "CONFIG", {"models": {"claude": []}}),
+            mock.patch.object(
+                server,
+                "available_codex_models",
+                return_value=[("gpt-6-astra", "6 Astra")],
+            ),
+        ):
+            models = server.models_for_tool("codex")
+
+        self.assertEqual(
+            [("default", "デフォルト"), ("gpt-6-astra", "6 Astra")],
+            models,
+        )
+
+
 class SessionContextTest(unittest.TestCase):
     def test_fable_minor_version_uses_one_million_token_window(self):
         self.assertEqual(1_000_000, server.claude_context_window("claude-fable-5-1"))

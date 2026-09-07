@@ -47,7 +47,7 @@
   "_wait_classifier_model": "返事待ちセッションを「要対応・他者待ち・完了」に分類する Claude モデル（既定 haiku。精度を比較する場合は sonnet）",
   "wait_classifier_model": "haiku",
 
-  "_models": "モデル選択肢の上書き。[値, 表示ラベル] の配列",
+  "_models": "モデル選択肢の上書き。[値, 表示ラベル] の配列。Codexは未指定ならCLIの利用可能モデルへ自動追従",
   "models": {
     "claude": [
       ["default", "デフォルト"],

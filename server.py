@@ -522,16 +522,98 @@ DEFAULT_MODELS = {
     ],
     "codex": [
         ("default", "デフォルト"),
-        ("gpt-5.6", "5.6"),
-        ("gpt-5.6-luna", "luna"),
-        ("gpt-5.6-terra", "terra"),
-        ("gpt-5.6-pro", "pro"),
+        ("gpt-6-astra", "6 Astra"),
+        ("gpt-5.6-sol", "5.6 Sol"),
+        ("gpt-5.6-terra", "5.6 Terra"),
+        ("gpt-5.6-luna", "5.6 Luna"),
+        ("gpt-5.5", "5.5"),
     ],
 }
-MODELS_BY_TOOL = {
-    tool: [tuple(m) for m in CONFIG.get("models", {}).get(tool, defaults)]
-    for tool, defaults in DEFAULT_MODELS.items()
-}
+CODEX_MODELS_LOCK = threading.Lock()
+CODEX_MODELS_CACHE = {"at": 0.0, "models": []}
+CODEX_MODELS_TTL = 300
+
+
+def codex_models_from_payload(payload):
+    """Codex のモデルカタログから、選択画面に出すモデルを返す。"""
+    if not isinstance(payload, dict) or not isinstance(payload.get("models"), list):
+        return []
+
+    models = []
+    seen = set()
+    for item in payload.get("models", []):
+        if not isinstance(item, dict) or item.get("visibility") != "list":
+            continue
+        slug = item.get("slug")
+        if not isinstance(slug, str) or not slug or slug in seen:
+            continue
+        display_name = item.get("display_name")
+        label = display_name if isinstance(display_name, str) and display_name else slug
+        label = (
+            label.removeprefix("GPT-").replace("-", " ")
+            if label.startswith("GPT-")
+            else label.replace("-", " ")
+        )
+        priority = item.get("priority")
+        priority = priority if isinstance(priority, (int, float)) else float("inf")
+        models.append((priority, slug, label))
+        seen.add(slug)
+    models.sort(key=lambda item: (item[0], item[1]))
+    return [(slug, label) for _, slug, label in models]
+
+
+def codex_models_from_cache(path=None):
+    """Codex が保存したモデルカタログをフォールバックとして読む。"""
+    cache_path = path or os.path.join(
+        os.environ.get("CODEX_HOME", os.path.join(HOME, ".codex")),
+        "models_cache.json",
+    )
+    try:
+        with open(cache_path, encoding="utf-8") as source:
+            return codex_models_from_payload(json.load(source))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return []
+
+
+def available_codex_models():
+    """Codex CLI の最新カタログを取得し、短時間キャッシュする。"""
+    now = time.time()
+    with CODEX_MODELS_LOCK:
+        if now - CODEX_MODELS_CACHE["at"] < CODEX_MODELS_TTL:
+            return CODEX_MODELS_CACHE["models"]
+
+        discovered = []
+        try:
+            result = subprocess.run(
+                [CODEX_BIN, "debug", "models"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                discovered = codex_models_from_payload(json.loads(result.stdout))
+        except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            pass
+        if not discovered:
+            discovered = codex_models_from_cache()
+        if discovered:
+            CODEX_MODELS_CACHE["models"] = discovered
+        CODEX_MODELS_CACHE["at"] = now
+        return CODEX_MODELS_CACHE["models"]
+
+
+def models_for_tool(tool):
+    """モデル選択肢を返す。設定で未指定の Codex はCLIの一覧へ自動追従する。"""
+    configured = CONFIG.get("models", {})
+    if tool in configured:
+        return [tuple(model) for model in configured[tool]]
+    if tool == "codex":
+        discovered = available_codex_models()
+        if discovered:
+            return [("default", "デフォルト"), *discovered]
+    return DEFAULT_MODELS[tool]
+
+
 # 権限バイパス起動時に渡すフラグ。
 # Codex は --dangerously-bypass-... だとサンドボックスまで外れるため、
 # 確認なし + 書き込みはワークスペース内に限定する組み合わせを使う。
@@ -2002,7 +2084,7 @@ def switchable_models(tool):
     """起動後に切り替えられるモデル。Codex の /model は引数を取らないので対象外。"""
     if tool != "claude":
         return []
-    return [value for value, _ in MODELS_BY_TOOL["claude"] if value != "default"]
+    return [value for value, _ in models_for_tool("claude") if value != "default"]
 
 
 def model_label(model, tool):
@@ -7171,7 +7253,7 @@ def render(message="", view="new", language="ja", embedded=False):
             f'<label><input type="radio" name="model-{tool}" value="{v}"'
             f"{' checked' if v == 'default' else ''}><span>"
             f"{translate(label, language)}</span></label>"
-            for v, label in MODELS_BY_TOOL[tool]
+            for v, label in models_for_tool(tool)
         )
 
     resume_groups = {}
@@ -7416,7 +7498,7 @@ class Handler(BaseHTTPRequestHandler):
                     model_choices="".join(
                         f'<button type="button" class="model-choice" data-model="{html.escape(value)}">'
                         f"{html.escape(translate(label, language))}</button>"
-                        for value, label in MODELS_BY_TOOL.get(item["tool"], [])
+                        for value, label in models_for_tool(item["tool"])
                         if value in choices
                     ),
                     session_json=json.dumps(session),
@@ -8308,7 +8390,7 @@ class Handler(BaseHTTPRequestHandler):
             return launch_page(err)
         if tool not in TOOLS:
             return launch_page("不正なツール指定です")
-        if model not in {v for v, _ in MODELS_BY_TOOL[tool]}:
+        if model not in {v for v, _ in models_for_tool(tool)}:
             return launch_page("不正なモデル指定です")
         if bypass not in {"0", "1"}:
             return launch_page("不正な権限指定です")
