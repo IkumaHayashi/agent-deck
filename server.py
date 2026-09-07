@@ -209,9 +209,15 @@ ERROR_TRANSLATION_TEMPLATES = (
         "会話の作業ディレクトリを使用できません: ディレクトリが存在しません: ",
         "",
     ),
+    (
+        "会話の作業ディレクトリを使用できません: worktreeを作り直せませんでした: ",
+        "",
+    ),
     ("比較対象ブランチ ", " がローカルに見つかりません"),
     ("ディレクトリが存在しません: ", ""),
     ("会話の作業ディレクトリを使用できません: ", ""),
+    ("worktreeを作り直せませんでした: ", ""),
+    ("worktreeの作成元リポジトリが見つかりません: ", ""),
     ("セッションは終了しましたが、ワークツリーを削除できませんでした: ", ""),
     ("ファイルを保存できませんでした: ", ""),
     ("画像を保存できませんでした: ", ""),
@@ -437,6 +443,13 @@ CW_CACHE_PATH = f"{DATA_DIR}/cw_cache.json"
 UPLOAD_DIR = f"{DATA_DIR}/uploads"
 # Issue / PRからの作業やPRレビューで切り出す git worktree の置き場所
 WORKTREES_DIR = f"{DATA_DIR}/worktrees"
+# セッション終了で worktree を消した後も会話を再開できるよう、作成元の
+# Issue / PR を記録しておく。会話ログの保存先は cwd から決まるため、
+# 再開には同じパスへ worktree を作り直す必要がある。
+WORKTREE_REGISTRY_PATH = f"{DATA_DIR}/worktrees.json"
+WORKTREE_REGISTRY_LOCK = threading.Lock()
+# 古い記録が無制限に溜まらないよう、新しいものから残す上限
+WORKTREE_REGISTRY_LIMIT = 200
 # 過去ログに残る旧保存先の添付も表示できるよう、パス検出の対象に含める
 UPLOAD_PATH_PREFIXES = [DATA_DIR] + [
     _expand(p) for p in CONFIG.get("legacy_upload_dirs", [])
@@ -2887,6 +2900,151 @@ def github_work_item_target(cwd, kind, selector):
     return item
 
 
+def _worktree_record(raw):
+    """作り直しに必要な項目が揃った worktree 記録だけを正規化して返す。"""
+    if not isinstance(raw, dict):
+        return None
+    path = str(raw.get("path") or "")
+    repo = str(raw.get("repo") or "")
+    kind = str(raw.get("kind") or "")
+    if not path.startswith("/") or not repo.startswith("/"):
+        return None
+    if kind not in {"issue", "pull", "review"}:
+        return None
+    try:
+        number = int(raw.get("number"))
+    except (TypeError, ValueError):
+        return None
+    if number <= 0:
+        return None
+    return {
+        "path": path,
+        "repo": repo,
+        "kind": kind,
+        "number": number,
+        "repository": str(raw.get("repository") or ""),
+    }
+
+
+def _read_worktree_registry_unlocked():
+    try:
+        with open(WORKTREE_REGISTRY_PATH, encoding="utf-8") as source:
+            payload = json.load(source)
+    except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, dict) or payload.get("version") != 1:
+        return []
+    items = []
+    for raw in payload.get("worktrees", []):
+        item = _worktree_record(raw)
+        if item:
+            items.append(item)
+    return items
+
+
+def _write_worktree_registry_unlocked(items):
+    os.makedirs(DATA_DIR, mode=0o700, exist_ok=True)
+    normalized = []
+    seen = set()
+    for raw in items:
+        item = _worktree_record(raw)
+        if not item or item["path"] in seen:
+            continue
+        seen.add(item["path"])
+        normalized.append(item)
+        if len(normalized) >= WORKTREE_REGISTRY_LIMIT:
+            break
+    payload = {"version": 1, "worktrees": normalized}
+    temporary = f"{WORKTREE_REGISTRY_PATH}.tmp-{uuid.uuid4().hex}"
+    try:
+        with open(temporary, "x", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, indent=2)
+            output.write("\n")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, WORKTREE_REGISTRY_PATH)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def remember_worktree(path, repo, kind, number, repository=""):
+    """作り直しに使う Issue / PR 情報を worktree のパスに紐付けて残す。"""
+    record = _worktree_record(
+        {
+            "path": os.path.realpath(path),
+            "repo": os.path.realpath(repo),
+            "kind": kind,
+            "number": number,
+            "repository": repository,
+        }
+    )
+    if not record:
+        return
+    with WORKTREE_REGISTRY_LOCK:
+        items = _read_worktree_registry_unlocked()
+        remaining = [item for item in items if item["path"] != record["path"]]
+        # 最近使ったものを先頭に置き、上限で切られても残るようにする
+        _write_worktree_registry_unlocked([record, *remaining])
+
+
+def worktree_record(path):
+    """worktree のパスから、作成元の Issue / PR 記録を引く。"""
+    if not path:
+        return None
+    target = os.path.realpath(path)
+    with WORKTREE_REGISTRY_LOCK:
+        items = _read_worktree_registry_unlocked()
+    for item in items:
+        if item["path"] == target:
+            return item
+    return None
+
+
+def restorable_worktree(cwd):
+    """消えていても作り直せる Issue / PR 用 worktree なら、その記録を返す。
+
+    一覧描画から呼ぶため、gitやghは実行せず記録とリポジトリの有無だけ見る。
+    """
+    if not cwd or os.path.isdir(cwd):
+        return None
+    record = worktree_record(cwd)
+    if record and os.path.isdir(record["repo"]):
+        return record
+    return None
+
+
+def restore_worktree(path):
+    """記録に基づき、消えた Issue / PR 用 worktree を同じ場所へ作り直す。
+
+    会話ログの保存先は cwd から決まるので、別のパスに作っても `--resume` は
+    元の会話を見つけられない。パスが変わってしまう復元は失敗として扱う。
+    """
+    record = worktree_record(path)
+    if not record:
+        raise LookupError("作り直せるworktreeの記録がありません")
+    if not os.path.isdir(record["repo"]):
+        raise LookupError(
+            f"worktreeの作成元リポジトリが見つかりません: {record['repo']}"
+        )
+    target = {
+        "cwd": record["repo"],
+        # レビュー用worktreeはPR headをdetachで置くだけで、種別は持たない
+        "kind": "pull" if record["kind"] == "review" else record["kind"],
+        "number": record["number"],
+        "repositoryName": record["repository"],
+    }
+    created = (
+        pull_request_worktree(target)
+        if record["kind"] == "review"
+        else github_work_item_worktree(target)
+    )
+    if os.path.realpath(created) != os.path.realpath(path):
+        raise RuntimeError("worktreeを元と同じ場所に作り直せませんでした")
+    return created
+
+
 def git_common_directory(cwd, git=None):
     """リポジトリとリンクworktreeで共通するgit dirの実体パスを返す。"""
     result = subprocess.run(
@@ -2919,7 +3077,22 @@ def github_work_item_worktree_path(target, common_dir):
 
 
 def github_work_item_worktree(target):
-    """Issue / PRで作業するためのブランチ付き専用worktreeを返す。"""
+    """Issue / PRで作業するためのブランチ付き専用worktreeを返す。
+
+    セッション終了で消した後も会話を再開できるよう、作成元を記録しておく。
+    """
+    path = _github_work_item_worktree(target)
+    remember_worktree(
+        path,
+        target["cwd"],
+        target["kind"],
+        target["number"],
+        target.get("repositoryName", ""),
+    )
+    return path
+
+
+def _github_work_item_worktree(target):
     repo = target["cwd"]
     kind = target["kind"]
     number = int(target["number"])
@@ -3045,6 +3218,9 @@ def pull_request_worktree(target):
         )
     # 既存worktreeの更新失敗（レビュー中の修正で作業ツリーが汚れている等）は
     # 手元の状態を壊さないことを優先し、そのまま続行する。
+    remember_worktree(
+        path, repo, "review", target["number"], target.get("repositoryName", "")
+    )
     return path
 
 
@@ -3271,7 +3447,11 @@ def recent_conversations(limit=24):
         if entry["id"] in active_ids or entry["path"] in active_paths:
             continue
         # 起動時の validate_dir と同じ条件。ホーム外（scratchpad等）は起動できない
-        if not (cwd == HOME or cwd.startswith(HOME + "/")) or not os.path.isdir(cwd):
+        if not (cwd == HOME or cwd.startswith(HOME + "/")):
+            continue
+        # 終了時に消したIssue / PR用worktreeは、起動時に作り直せるので残す
+        restorable = bool(restorable_worktree(cwd))
+        if not restorable and not os.path.isdir(cwd):
             continue
         # recent_dirs 設定時は、その配下の会話だけを出す
         if RECENT_DIRS and not any(
@@ -3289,6 +3469,7 @@ def recent_conversations(limit=24):
                 "id": entry["id"],
                 "cwd": cwd,
                 "summary": summary,
+                "restorable": restorable,
                 "label": time.strftime("%m/%d %H:%M", time.localtime(entry["mtime"])),
             }
         )
@@ -3301,6 +3482,10 @@ def resume_group_dir(cwd):
     Git worktree は common git dir の親（通常は元リポジトリ）へまとめる。
     Git管理外や取得に失敗したディレクトリは cwd 自体を使う。
     """
+    # 削除済みworktreeは git に問い合わせられないので、記録した作成元を使う
+    record = restorable_worktree(cwd)
+    if record:
+        return record["repo"]
     try:
         result = subprocess.run(
             [
@@ -4560,6 +4745,20 @@ def validate_dir(path: str):
     if not os.path.isdir(path):
         return None, f"ディレクトリが存在しません: {path}"
     return path, None
+
+
+def restore_and_validate_dir(path: str):
+    """消えた Issue / PR 用 worktree を作り直してから作業ディレクトリを検証する。
+
+    記録がない普通のディレクトリでは、validate_dir と同じエラーをそのまま返す。
+    """
+    try:
+        restore_worktree(os.path.realpath(os.path.expanduser(path)))
+    except LookupError:
+        return validate_dir(path)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        return None, f"worktreeを作り直せませんでした: {exc}"
+    return validate_dir(path)
 
 
 def load_cw_cache():
@@ -7323,6 +7522,13 @@ def render(message="", view="new", language="ja", embedded=False):
     for index, (group_dir, items) in enumerate(resume_groups.items()):
         forms = []
         for item in items:
+            # 削除済みworktreeの会話は、起動時に作り直すことを先に伝える
+            restore_note = (
+                f'<small class="resume-restore">🌱 '
+                f"{translate('worktreeを作り直して再開します', language)}</small>"
+                if item.get("restorable")
+                else ""
+            )
             forms.append(
                 f'<form class="launch" method="post" action="/launch" data-resume="1"'
                 f' data-resume-id="{html.escape(item["id"])}">'
@@ -7333,6 +7539,7 @@ def render(message="", view="new", language="ja", embedded=False):
                 f'<span class="resume-summary">🕘 {html.escape(item["summary"])}</span>'
                 f"<small>{html.escape(short_path(item['cwd']))} · {item['tool']}"
                 f" · {item['label']}</small>"
+                f"{restore_note}"
                 f'<small class="resume-id">ID: {html.escape(item["id"])}</small>'
                 f"</button></form>"
             )
@@ -8446,6 +8653,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._page(render(message, "new", language))
 
         path, err = validate_dir(raw_dir)
+        if err and resume:
+            # 終了時に消したIssue / PR用worktreeは、同じ場所へ作り直して再開する
+            path, err = restore_and_validate_dir(raw_dir)
         if err:
             return launch_page(err)
         if tool not in TOOLS:
@@ -8466,11 +8676,13 @@ class Handler(BaseHTTPRequestHandler):
             if not resume_log:
                 return launch_page("再開する会話が見つかりません")
             if tool == "claude":
-                # ログが保持する最新 cwd で再開する。削除済みworktree
-                # など、使えない場所には暗黙に起動しない。
+                # ログが保持する最新 cwd で再開する。記録があるIssue / PR用
+                # worktreeは作り直し、それ以外の消えた場所には起動しない。
                 resume_cwd = claude_session_cwd(resume_log)
                 if resume_cwd and os.path.realpath(resume_cwd) != path:
                     path, err = validate_dir(resume_cwd)
+                    if err:
+                        path, err = restore_and_validate_dir(resume_cwd)
                     if err:
                         return launch_page(
                             f"会話の作業ディレクトリを使用できません: {err}"
