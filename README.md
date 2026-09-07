@@ -181,6 +181,11 @@ AI の回答内でテキストをドラッグ選択すると「選択部分を�
 `~/.config/agent-deck/config.json`（`AGENT_DECK_CONFIG` 環境変数で変更可）。
 全項目とコメントは [config.example.json](config.example.json) を参照してください。
 
+Codex のモデル選択肢は、設定の `models.codex` を省略すると Codex CLI から
+利用可能なモデルを自動取得します。取得結果は5分間キャッシュし、CLIから取得できない
+場合は `~/.codex/models_cache.json`、さらに内蔵一覧の順にフォールバックします。
+選択肢を固定したい場合だけ `models.codex` を設定してください。
+
 PCではサイドバー上部の歯車、スマートフォンでは設定ページへのリンクから設定UIを
 開けます。一般設定とプロジェクト設定は画面から保存でき、Agent Deckの再起動後に
 反映されます。実行コマンド・CLIパス・ポート・許可ネットワークなどセキュリティや
