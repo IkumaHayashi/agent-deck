@@ -2990,14 +2990,18 @@ def remember_worktree(path, repo, kind, number, repository=""):
 
 
 def worktree_record(path):
-    """worktree のパスから、作成元の Issue / PR 記録を引く。"""
+    """worktree のパス、またはその配下から、作成元の Issue / PR 記録を引く。
+
+    会話の途中で worktree 内のサブディレクトリへ移ると cwd はそちらになる。
+    worktree ごと作り直せば中身も戻るので、祖先の記録も対象にする。
+    """
     if not path:
         return None
     target = os.path.realpath(path)
     with WORKTREE_REGISTRY_LOCK:
         items = _read_worktree_registry_unlocked()
     for item in items:
-        if item["path"] == target:
+        if item["path"] == target or path_is_within(target, item["path"]):
             return item
     return None
 
@@ -3040,7 +3044,8 @@ def restore_worktree(path):
         if record["kind"] == "review"
         else github_work_item_worktree(target)
     )
-    if os.path.realpath(created) != os.path.realpath(path):
+    # 求められたのが配下のディレクトリでも、worktree 本体が元の場所に戻れば足りる
+    if os.path.realpath(created) != record["path"]:
         raise RuntimeError("worktreeを元と同じ場所に作り直せませんでした")
     return created
 
