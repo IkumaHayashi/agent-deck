@@ -1399,13 +1399,13 @@ def screen_background_label(screen):
     )
 
 
-def session_running(name):
+def session_running(name, tool=None):
     """TUI がまだ処理中かを返す。"""
     try:
         screen = tmux_run("capture-pane", "-p", "-J", "-S", "-24", "-t", name)
     except Exception:
         return False
-    return screen.returncode == 0 and screen_is_running(screen.stdout)
+    return screen.returncode == 0 and screen_is_running(screen.stdout, tool)
 
 
 # 選択プロンプト行。Claude Code 2.1.257 で文言が「Enter selection(s) …
@@ -1800,18 +1800,58 @@ def pending_shell_auth(name, tool):
 
 def log_activity(path, tool):
     """会話ログから、いま動いているツールなどの短いラベルを返す。"""
+    completed = set()
     for item in read_json_lines_reverse(path, max_lines=40):
+        if tool == "codex":
+            payload = item.get("payload") or {}
+            kind = payload.get("type")
+            if item.get("type") == "event_msg" and kind in {
+                "task_started",
+                "task_complete",
+                "turn_aborted",
+            }:
+                break
+            if item.get("type") == "response_item":
+                if kind in {"function_call_output", "custom_tool_call_output"}:
+                    completed.add(payload.get("call_id"))
+                    continue
+                if kind in {"function_call", "custom_tool_call"}:
+                    if payload.get("call_id") in completed:
+                        continue
+                    name = (payload.get("name") or "").split(".")[-1]
+                    if name in {"exec_command", "shell_command", "shell"}:
+                        command = _codex_command(payload.get("arguments") or "{}")
+                        return " ".join(command.split())[:90] or "コマンドを実行中"
+                    if name == "apply_patch":
+                        return "ファイルを編集中"
+                    if name in {"exec", "parallel", ""}:
+                        return "ツールを実行中"
+                    return tool_use_label(name, {})
+                if kind == "reasoning":
+                    break
+        elif tool == "claude":
+            content = (item.get("message") or {}).get("content", [])
+            if isinstance(content, list):
+                for part in reversed(content):
+                    if part.get("type") == "tool_result":
+                        completed.add(part.get("tool_use_id"))
+                    elif part.get("type") == "tool_use":
+                        if part.get("id") not in completed:
+                            return tool_use_label(
+                                part.get("name", ""), part.get("input")
+                            )
+                    elif part.get("type") in {"text", "thinking"}:
+                        return "考え中"
         if user_message_entry(item, tool):
             return "考え中"
-        parts = assistant_parts(item, tool)
-        if parts:
-            return parts[-1]["text"] if parts[-1]["role"] == "tool" else "考え中"
+        if assistant_message_text(item, tool):
+            return "考え中"
     return "考え中"
 
 
 def session_activity(name, path, tool):
     """実行中なら、いま動いているツールなどを短く返す。空文字ならアイドル。"""
-    if not session_running(name):
+    if not session_running(name, tool):
         return ""
     return log_activity(path, tool)
 
@@ -2297,7 +2337,9 @@ def _codex_command(arguments):
     """function_call の arguments(JSON文字列) から実行コマンド文字列を取り出す。"""
     try:
         parsed = json.loads(arguments)
-    except ValueError:
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(parsed, dict):
         return ""
     command = parsed.get("cmd") or parsed.get("command") or ""
     if isinstance(command, list):
@@ -5363,8 +5405,19 @@ TERMINAL_PAGE = r"""<!doctype html>
     border: 1px solid #3d444d; border-radius: 999px; cursor: pointer; }}
   .message.assistant .expand-toggle {{ display: inline-block; margin-left: 2px; }}
   .expand-toggle:hover {{ color: #e6edf3; border-color: #58a6ff; }}
-  .message.activity {{ display: flex; align-items: center; gap: 9px; color: #d9884f;
-    font-size: .92rem; }}
+  #generation-status {{ flex-shrink: 0; display: flex; align-items: center; gap: 9px;
+    padding: 10px max(16px, 6vw); border-top: 1px solid #30363d;
+    background: #161b22; color: #d9884f; font-size: .92rem; }}
+  #generation-status[hidden], body.review-open #generation-status,
+  #screen:not([hidden]) ~ #generation-status {{ display: none; }}
+  #generation-status::before {{ content: "✻"; flex-shrink: 0;
+    animation: activity-pulse 1.3s ease-in-out infinite; }}
+  #generation-status strong {{ flex-shrink: 0; font-size: inherit; }}
+  #generation-detail {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: #8b949e; }}
+  @media (prefers-reduced-motion: reduce) {{
+    #generation-status::before {{ animation: none; }}
+  }}
   .message.auth .bubble {{ padding: 14px 16px; border: 1px solid #d29922;
     border-radius: 10px; background: #d2992212; }}
   .message.question {{ padding: 14px; border: 1px solid #d29922; border-radius: 12px; }}
@@ -5381,7 +5434,6 @@ TERMINAL_PAGE = r"""<!doctype html>
     font-weight: 700; cursor: pointer; }}
   .question-submit[disabled] {{ opacity: .45; cursor: default; }}
   .question-custom {{ width: 100%; min-height: 88px; margin-top: 4px; resize: vertical; }}
-  .message.activity::before {{ content: "✻"; animation: activity-pulse 1.3s ease-in-out infinite; }}
   .bubble p {{ margin: 0 0 12px; white-space: pre-wrap; }}
   .bubble p:last-child {{ margin-bottom: 0; }}
   .bubble h1, .bubble h2, .bubble h3 {{ margin: 20px 0 10px; line-height: 1.35; }}
@@ -5498,6 +5550,9 @@ TERMINAL_PAGE = r"""<!doctype html>
   </div>
 </section>
 <button type="button" id="selection-quote" hidden>↩ 選択部分を引用</button>
+<div id="generation-status" role="status" aria-live="polite" hidden>
+  <strong>回答を生成中</strong><span id="generation-detail"></span>
+</div>
 <div class="controls">
   <div id="attachment-preview" hidden aria-label="添付画像のプレビュー"></div>
   <textarea id="input" placeholder="メッセージを入力（! でコマンド実行、📎 でファイル添付）"></textarea>
@@ -5596,6 +5651,8 @@ TERMINAL_PAGE = r"""<!doctype html>
 {sidebar_js}
   const screen = document.getElementById("screen");
   const chat = document.getElementById("chat");
+  const generationStatus = document.getElementById("generation-status");
+  const generationDetail = document.getElementById("generation-detail");
   const input = document.getElementById("input");
   const attachmentPreview = document.getElementById("attachment-preview");
   const status = document.getElementById("status");
@@ -6602,7 +6659,13 @@ TERMINAL_PAGE = r"""<!doctype html>
   window.addEventListener("resize", hideSelectionQuote);
   function renderMessages(messages, activity, question, auth) {{
     activity = activity || ""; question = question || null; auth = auth || "";
-    const serialized = JSON.stringify([messages, activity, question, auth]);
+    generationStatus.hidden = !activity || !!question || !!auth;
+    if (generationDetail.textContent !== activity) {{
+      generationDetail.textContent = activity;
+      generationDetail.title = activity;
+    }}
+    // 作業ラベルだけの更新では会話を再描画せず、選択中の文章やスクロールを保つ。
+    const serialized = JSON.stringify([messages, !!activity, question, auth]);
     if (serialized === lastMessages) return;
     const firstLoad = !lastMessages;
     // 新着で全メッセージを再描画しても、上を読んでいる間は現在位置を維持する。
@@ -6674,10 +6737,6 @@ TERMINAL_PAGE = r"""<!doctype html>
       const row = document.createElement("div"); row.className = "message assistant auth";
       const bubble = document.createElement("div"); bubble.className = "bubble";
       renderMarkdown(bubble, auth); row.append(bubble); chat.append(row);
-    }}
-    if (activity) {{
-      const row = document.createElement("div"); row.className = "message activity";
-      row.textContent = activity; chat.append(row);
     }}
     if (question) {{
       const panel = document.createElement("div"); panel.className = "message question";
@@ -6789,6 +6848,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       renderMessages(withPending(serverMessages, serverQueued), serverActivity, serverQuestion, serverAuth);
       if (Date.now() >= statusMessageUntil) status.textContent = "接続中";
     }} catch (error) {{
+      generationStatus.hidden = true;
       status.textContent = error.message;
       if (!lastMessages) {{
         // 一度も描画できていないと「会話を読み込み中...」が残り続けるので、
@@ -7716,7 +7776,7 @@ class Handler(BaseHTTPRequestHandler):
                                     item.get("model", ""), item["tool"]
                                 ),
                                 "context": item.get("context"),
-                                "activity": "",
+                                "activity": session_activity(session, "", item["tool"]),
                                 "output": "",
                                 "artifacts": [],
                             }
