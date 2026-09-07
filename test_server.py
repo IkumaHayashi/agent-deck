@@ -2982,6 +2982,132 @@ class WaitClassifierTest(unittest.TestCase):
         self.assertEqual("完了", server.WAIT_CLASS_CACHE["/tmp/session.jsonl"]["label"])
 
 
+class SessionActivityTest(unittest.TestCase):
+    def activity(self, entries, tool="codex"):
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl") as source:
+            for entry in entries:
+                source.write(json.dumps(entry) + "\n")
+            source.flush()
+            return server.log_activity(source.name, tool)
+
+    def test_codex_shows_pending_command_and_clears_it_after_result(self):
+        call = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call",
+                "call_id": "cmd-1",
+                "name": "functions.exec_command",
+                "arguments": json.dumps({"cmd": "python3 -m unittest\n"}),
+            },
+        }
+        result = {
+            "type": "response_item",
+            "payload": {
+                "type": "function_call_output",
+                "call_id": "cmd-1",
+                "output": "OK",
+            },
+        }
+        self.assertEqual("python3 -m unittest", self.activity([call]))
+        self.assertEqual("考え中", self.activity([call, result]))
+
+    def test_codex_custom_tools_and_malformed_arguments(self):
+        for name, kind, arguments, expected in (
+            ("exec", "custom_tool_call", None, "ツールを実行中"),
+            ("apply_patch", "custom_tool_call", None, "ファイルを編集中"),
+            ("exec_command", "function_call", "{", "コマンドを実行中"),
+            ("exec_command", "function_call", "[]", "コマンドを実行中"),
+        ):
+            with self.subTest(name=name, arguments=arguments):
+                call = {
+                    "type": "response_item",
+                    "payload": {
+                        "type": kind,
+                        "name": name,
+                        "call_id": "tool-1",
+                        "arguments": arguments,
+                    },
+                }
+                self.assertEqual(expected, self.activity([call]))
+                result = {
+                    "type": "response_item",
+                    "payload": {"type": kind + "_output", "call_id": "tool-1"},
+                }
+                self.assertEqual("考え中", self.activity([call, result]))
+
+    def test_new_codex_turn_does_not_reuse_previous_tool(self):
+        call = {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "name": "apply_patch",
+                "call_id": "old",
+            },
+        }
+        for kind in ("task_started", "task_complete", "turn_aborted"):
+            with self.subTest(kind=kind):
+                self.assertEqual(
+                    "考え中",
+                    self.activity(
+                        [call, {"type": "event_msg", "payload": {"type": kind}}]
+                    ),
+                )
+
+    def test_claude_keeps_only_unfinished_parallel_tool(self):
+        call = {
+            "type": "assistant",
+            "message": {
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "read-1",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/first.py"},
+                    },
+                    {
+                        "type": "tool_use",
+                        "id": "read-2",
+                        "name": "Read",
+                        "input": {"file_path": "/tmp/second.py"},
+                    },
+                ]
+            },
+        }
+        result = {
+            "type": "user",
+            "message": {
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "read-2", "content": "file"}
+                ]
+            },
+        }
+        self.assertEqual("Read: second.py", self.activity([call], "claude"))
+        self.assertEqual("Read: first.py", self.activity([call, result], "claude"))
+        result["message"]["content"].append(
+            {"type": "tool_result", "tool_use_id": "read-1", "content": "file"}
+        )
+        self.assertEqual("考え中", self.activity([call, result], "claude"))
+
+    def test_running_without_log_still_has_activity(self):
+        screen = SimpleNamespace(
+            returncode=0, stdout="• Working (3s • esc to interrupt)"
+        )
+        with mock.patch.object(server, "tmux_run", return_value=screen):
+            self.assertEqual(
+                "考え中", server.session_activity("agent-test", "", "codex")
+            )
+
+    def test_finished_codex_spinner_does_not_leave_activity_visible(self):
+        screen = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "• Working (3s • esc to interrupt)\n完了\n────────────────────\n› 次の入力"
+            ),
+        )
+        with mock.patch.object(server, "tmux_run", return_value=screen):
+            self.assertEqual("", server.session_activity("agent-test", "", "codex"))
+
+
 class ScreenRunningTest(unittest.TestCase):
     def test_codex_ignores_spinner_before_completed_short_response(self):
         screen = "\n".join(
