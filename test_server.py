@@ -1395,6 +1395,20 @@ class WorktreeRestoreTest(unittest.TestCase):
             server.restorable_worktree(os.path.join(self.home, "unknown"))
         )
 
+    def test_conversation_inside_the_worktree_is_restored_with_it(self):
+        path = server.github_work_item_worktree(self.issue_target())
+        # 会話の途中で worktree 内へ移ると、cwd は配下のディレクトリになる
+        nested = os.path.join(path, "packages", "front")
+        os.makedirs(nested)
+        self.commit("packages/front/app.txt", "画面\n", "画面を追加", cwd=path)
+        server.remove_session_worktree(path)
+
+        self.assertEqual(self.repo, server.restorable_worktree(nested)["repo"])
+        restored = server.restore_worktree(nested)
+
+        self.assertEqual(os.path.realpath(path), os.path.realpath(restored))
+        self.assertTrue(os.path.isdir(nested))
+
     def test_removed_worktree_conversations_are_grouped_under_their_repository(self):
         path = server.github_work_item_worktree(self.issue_target())
         server.remove_session_worktree(path)
