@@ -13,6 +13,7 @@
   button.proj small { color: #888; }
   button.proj .resume-id { display: block; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: .68rem; }
+  button.proj .resume-restore { display: block; color: #00b894; }
   .msg { padding: 12px; border-radius: 10px; margin: 12px 0; }
   .ok { background: #00b8941a; border: 1px solid #00b894; }
   .err { background: #d635451a; border: 1px solid #d63545; }

@@ -3,6 +3,7 @@ import base64
 import io
 import json
 import os
+import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -19,6 +20,12 @@ SPEC.loader.exec_module(server)
 TEST_RUNTIME_DIR = tempfile.TemporaryDirectory()
 server.DATA_DIR = TEST_RUNTIME_DIR.name
 server.SESSION_REGISTRY_PATH = os.path.join(TEST_RUNTIME_DIR.name, "sessions.json")
+server.WORKTREE_REGISTRY_PATH = os.path.join(TEST_RUNTIME_DIR.name, "worktrees.json")
+# セッション一覧キャッシュを期限切れにしない。放置すると裏の更新スレッドが
+# 実 tmux を叩き、その subprocess 呼び出しが別テストのモックに紛れ込む。
+server.SESSION_CACHE.update(
+    {"expires": float("inf"), "items": [], "loading": False, "loaded": True}
+)
 
 USAGE_PATH = os.path.join(os.path.dirname(__file__), "tools", "ai-usage.py")
 USAGE_SPEC = importlib.util.spec_from_file_location("ai_usage", USAGE_PATH)
@@ -766,6 +773,28 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn(f"ID: {conversation['id']}", page)
         self.assertIn('class="resume-group"', page)
 
+    def test_removed_worktree_conversation_announces_its_recreation(self):
+        conversation = {
+            "cwd": "/Users/demo/worktrees/project-issue-42",
+            "tool": "claude",
+            "id": "019fd08a-e352-7a22-9aa5-0b5d0de94eba",
+            "summary": "worktreeを消した後の会話",
+            "label": "09/07 12:34",
+            "restorable": True,
+        }
+        with (
+            mock.patch.object(
+                server, "recent_conversations", return_value=[conversation]
+            ),
+            mock.patch.object(
+                server, "resume_group_dir", return_value="/Users/demo/project"
+            ),
+        ):
+            page = server.render()
+
+        self.assertIn("worktreeを作り直して再開します", page)
+        self.assertIn(f'value="{conversation["cwd"]}"', page)
+
     def test_worktree_conversations_are_grouped_by_common_git_directory(self):
         result = SimpleNamespace(
             returncode=0,
@@ -1279,6 +1308,201 @@ class WorktreeCleanupTest(unittest.TestCase):
                 server.terminate_session("agent-test", "/tmp/worktree")
 
         tmux.assert_called_once()
+
+
+class WorktreeRestoreTest(unittest.TestCase):
+    """終了時に消したIssue / PR用worktreeを、会話再開のため作り直せることを確かめる。"""
+
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        # macOS の /var は /private/var へのリンクなので、記録と同じ実体パスで比べる
+        self.home = os.path.realpath(self.temp_dir.name)
+        self.data_dir = os.path.join(self.home, "data")
+        os.makedirs(self.data_dir)
+        for name, value in (
+            ("DATA_DIR", self.data_dir),
+            ("WORKTREES_DIR", os.path.join(self.data_dir, "worktrees")),
+            (
+                "WORKTREE_REGISTRY_PATH",
+                os.path.join(self.data_dir, "worktrees.json"),
+            ),
+            ("HOME", self.home),
+        ):
+            patch = mock.patch.object(server, name, value)
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.repo = os.path.join(self.home, "repo")
+        os.makedirs(self.repo)
+        self.git("init", self.repo)
+        self.git("-C", self.repo, "branch", "-M", "main")
+        self.commit("README.md", "test\n", "初期化")
+
+    @staticmethod
+    def git(*args):
+        return server.subprocess.run(
+            [
+                server.find_bin("git"),
+                "-c",
+                "user.name=Agent Deck",
+                "-c",
+                "user.email=agent-deck@example.com",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def commit(self, name, body, message, cwd=None):
+        cwd = cwd or self.repo
+        with open(os.path.join(cwd, name), "w", encoding="utf-8") as output:
+            output.write(body)
+        self.git("-C", cwd, "add", name)
+        self.git("-C", cwd, "commit", "-m", message)
+
+    def issue_target(self, number=42):
+        return {
+            "cwd": self.repo,
+            "kind": "issue",
+            "number": number,
+            "repositoryName": "example/repo",
+        }
+
+    def test_issue_worktree_is_recreated_at_the_same_path_with_its_work(self):
+        path = server.github_work_item_worktree(self.issue_target())
+        self.commit("work.txt", "作業中\n", "作業を保存", cwd=path)
+        self.assertTrue(server.remove_session_worktree(path))
+        self.assertFalse(os.path.exists(path))
+
+        restored = server.restore_worktree(path)
+
+        # 会話ログは cwd から引かれるので、同じパスに戻ることが再開の条件
+        self.assertEqual(os.path.realpath(path), os.path.realpath(restored))
+        self.assertTrue(os.path.isfile(os.path.join(path, "work.txt")))
+        branch = self.git("-C", path, "branch", "--show-current")
+        self.assertEqual("agent-deck/issue-42", branch.stdout.strip())
+
+    def test_restorable_worktree_only_matches_removed_recorded_worktrees(self):
+        path = server.github_work_item_worktree(self.issue_target())
+
+        # 生きているworktreeは作り直しの対象ではない
+        self.assertIsNone(server.restorable_worktree(path))
+        server.remove_session_worktree(path)
+        self.assertEqual(self.repo, server.restorable_worktree(path)["repo"])
+        # 記録のない場所は、消えていても勝手に作らない
+        self.assertIsNone(
+            server.restorable_worktree(os.path.join(self.home, "unknown"))
+        )
+
+    def test_removed_worktree_conversations_are_grouped_under_their_repository(self):
+        path = server.github_work_item_worktree(self.issue_target())
+        server.remove_session_worktree(path)
+
+        self.assertEqual(self.repo, server.resume_group_dir(path))
+
+    def test_restore_and_validate_dir_reports_the_original_error_without_record(self):
+        missing = os.path.join(self.home, "missing")
+
+        path, err = server.restore_and_validate_dir(missing)
+
+        self.assertIsNone(path)
+        self.assertEqual(f"ディレクトリが存在しません: {missing}", err)
+
+    def test_restore_fails_when_the_source_repository_is_gone(self):
+        path = server.github_work_item_worktree(self.issue_target())
+        server.remove_session_worktree(path)
+        shutil.rmtree(self.repo)
+
+        with self.assertRaisesRegex(LookupError, "作成元リポジトリが見つかりません"):
+            server.restore_worktree(path)
+
+    def test_review_worktree_is_recorded_and_restored_as_a_pull_request(self):
+        review_path = os.path.join(self.data_dir, "worktrees", "repo-pr-7")
+        server.remember_worktree(review_path, self.repo, "review", 7, "example/repo")
+
+        with mock.patch.object(
+            server, "pull_request_worktree", return_value=review_path
+        ) as worktree:
+            server.restore_worktree(review_path)
+
+        # レビュー用はブランチを持たないので、PR head を取り直す経路で作り直す
+        worktree.assert_called_once()
+        self.assertEqual(7, worktree.call_args.args[0]["number"])
+        self.assertEqual(self.repo, worktree.call_args.args[0]["cwd"])
+
+    def test_registry_keeps_the_most_recent_records_within_the_limit(self):
+        with mock.patch.object(server, "WORKTREE_REGISTRY_LIMIT", 2):
+            for number in (1, 2, 3):
+                server.remember_worktree(
+                    os.path.join(self.data_dir, "worktrees", f"repo-issue-{number}"),
+                    self.repo,
+                    "issue",
+                    number,
+                )
+
+        kept = [
+            item["number"]
+            for item in server._read_worktree_registry_unlocked()  # noqa: SLF001
+        ]
+        self.assertEqual([3, 2], kept)
+
+
+class ResumeWorktreeLaunchTest(unittest.TestCase):
+    """削除済みworktreeの会話を、起動時に作り直してから再開することを確かめる。"""
+
+    SESSION_ID = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+
+    def test_launch_recreates_the_worktree_before_resuming(self):
+        handler = object.__new__(server.Handler)
+        worktree = os.path.realpath("/tmp/worktrees/project-issue-42")
+        result = SimpleNamespace(
+            returncode=0, stdout="Started session agent-resumed\n", stderr=""
+        )
+        validations = [
+            (None, f"ディレクトリが存在しません: {worktree}"),
+            (worktree, ""),
+        ]
+
+        with (
+            mock.patch.object(
+                server, "validate_dir", side_effect=validations
+            ) as validate,
+            mock.patch.object(server, "restore_worktree") as restore,
+            mock.patch.object(
+                server, "conversation_log_path", return_value="/tmp/log.jsonl"
+            ),
+            mock.patch.object(server, "claude_session_cwd", return_value=worktree),
+            mock.patch.object(server, "log_meta", return_value={"summary": "再開"}),
+            mock.patch.object(server.subprocess, "run", return_value=result) as run,
+            mock.patch.object(server, "set_session_metadata"),
+            mock.patch.object(server, "upsert_registered_session"),
+            mock.patch.object(server, "invalidate_session_cache"),
+            mock.patch.object(handler, "_redirect"),
+        ):
+            handler._launch(worktree, tool="claude", resume=self.SESSION_ID)
+
+        restore.assert_called_once_with(os.path.realpath(worktree))
+        self.assertEqual(2, validate.call_count)
+        self.assertIn(worktree, run.call_args.args[0])
+        self.assertIn(self.SESSION_ID, run.call_args.args[0])
+
+    def test_new_session_does_not_recreate_worktrees(self):
+        handler = object.__new__(server.Handler)
+        with (
+            mock.patch.object(
+                server,
+                "validate_dir",
+                return_value=(None, "ディレクトリが存在しません: /tmp/gone"),
+            ),
+            mock.patch.object(server, "restore_worktree") as restore,
+            mock.patch.object(handler, "_page", return_value=""),
+            mock.patch.object(handler, "_language", return_value="ja"),
+        ):
+            handler._launch("/tmp/gone")
+
+        # 再開でない起動は、消えたディレクトリを勝手に作り直さない
+        restore.assert_not_called()
 
 
 class SessionRestoreTest(unittest.TestCase):

@@ -387,5 +387,11 @@
   "再現手順": "Steps to reproduce",
   "期待する動作": "Expected behavior",
   "環境": "Environment",
-  "ブラウザ": "Browser"
+  "ブラウザ": "Browser",
+  "worktreeを作り直して再開します": "Will recreate the worktree and resume",
+  "作り直せるworktreeの記録がありません": "No worktree record available to recreate",
+  "worktreeを元と同じ場所に作り直せませんでした": "Could not recreate the worktree at its original path",
+  "worktreeの作成元リポジトリが見つかりません: ": "The repository this worktree came from is missing: ",
+  "worktreeを作り直せませんでした: ": "Could not recreate the worktree: ",
+  "会話の作業ディレクトリを使用できません: worktreeを作り直せませんでした: ": "The conversation's working directory is unavailable: could not recreate the worktree: "
 }
