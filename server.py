@@ -615,13 +615,18 @@ def available_codex_models():
         return CODEX_MODELS_CACHE["models"]
 
 
-def models_for_tool(tool):
+def models_for_tool(tool, *, cached=False):
     """モデル選択肢を返す。設定で未指定の Codex はCLIの一覧へ自動追従する。"""
     configured = CONFIG.get("models", {})
     if tool in configured:
         return [tuple(model) for model in configured[tool]]
     if tool == "codex":
-        discovered = available_codex_models()
+        # 起動フォームの初期描画ではCLIを待たず、手元のカタログを使う。
+        discovered = (
+            CODEX_MODELS_CACHE["models"] or codex_models_from_cache()
+            if cached
+            else available_codex_models()
+        )
         if discovered:
             return [("default", "デフォルト"), *discovered]
     return DEFAULT_MODELS[tool]
@@ -3414,12 +3419,9 @@ def recent_conversations(limit=24):
     stat だけで新しい順に並べ、ログ本文を読むのは表示する件数分に留める。
     実行中の tmux セッションに紐付いた会話は、二重起動を防ぐため除外する。
     """
-    active_ids = {
-        item["session_id"] for item in managed_sessions() if item["session_id"]
-    }
-    active_paths = {
-        item["log_path"] for item in managed_sessions() if item.get("log_path")
-    }
+    sessions = managed_sessions()
+    active_ids = {item["session_id"] for item in sessions if item["session_id"]}
+    active_paths = {item["log_path"] for item in sessions if item.get("log_path")}
     entries = []
     for path in glob.glob(f"{HOME}/.claude/projects/*/*.jsonl"):
         session_id = os.path.basename(path).removesuffix(".jsonl")
@@ -5008,6 +5010,26 @@ SIDEBAR_CSS = r"""
     aside .new-link-desktop { display: none; }
     aside .new-link-mobile { display: block; }
   }
+  /* 新規作成への往復では元の画面とiframeを保持する。 */
+  .launcher-pane.route-only { display: none; }
+  .launcher-back { display: none; }
+  /* チャットの定期更新が高さを測れるよう、元の画面のレイアウトは維持する。 */
+  body.launcher-open .app > main:not(.launcher-pane) { visibility: hidden; }
+  body.launcher-open .launcher-pane { position: fixed; inset: 0 0 0 320px;
+    display: flex; flex-direction: column; background: #0d1117; z-index: 100; }
+  body.launcher-open .pane-heading { flex: 0 0 auto; display: flex; align-items: center;
+    gap: 18px; width: min(100% - 40px, 960px); margin: 0 auto; padding: 16px 0 4px;
+    border: 0; background: transparent; }
+  body.launcher-open .pane-heading h1 { margin: 0; font-size: 1.2rem; }
+  body.launcher-open .launcher-back { display: block; width: auto; padding: 8px 12px;
+    color: #8ab4f8; border: 1px solid #30363d; border-radius: 8px;
+    background: #161b22; font: inherit; font-size: .85rem; cursor: pointer; }
+  body.launcher-open .launcher-frame { min-height: 0; width: 100%; flex: 1;
+    border: 0; background: #0d1117; }
+  @media (max-width: 799px) {
+    body.launcher-open .launcher-pane { left: 0; }
+    body.launcher-open .app > aside { display: none; }
+  }
   /* ページ遷移中のローディング。サーバー描画が重いページへの移動中に出す */
   #nav-loading { position: fixed; inset: 0; z-index: 300; display: grid;
     place-items: center; background: #0d1117cc; }
@@ -5024,6 +5046,10 @@ SIDEBAR_CSS = r"""
 # 呼び出し側のページで const session（一覧ページは null）と const bootId を
 # 先に宣言しておくこと。
 SIDEBAR_JS = r"""
+  const launcherScript = document.createElement("script");
+  launcherScript.src = "/static/launcher.js?v=" + encodeURIComponent(bootId)
+    + "&lang=" + encodeURIComponent(document.documentElement.lang);
+  document.head.append(launcherScript);
   // ページ遷移はサーバーで丸ごと再描画するため時間がかかる。リンククリックや
   // JSからの遷移中はオーバーレイを出して待ちを可視化する
   const navLoading = document.createElement("div");
@@ -5400,7 +5426,7 @@ LIST_PAGE = r"""<!doctype html>
   .pane-heading h1 {{ margin: 0; font-size: 1.35rem; }}
   .launcher-frame {{ min-width: 0; width: 100%; flex: 1; border: 0; background: #0d1117; }}
   @media (max-width: 799px) {{
-    /* SPは一覧を全画面にし、新規起動は従来どおり別ページで開く */
+    /* SPは一覧を全画面表示。新規作成はlauncher-openで切り替える。 */
     aside {{ width: 100%; flex: 1; border-right: none;
       --aside-pad-b: max(12px, env(safe-area-inset-bottom)); }}
     .launcher-pane {{ display: none; }}
@@ -7486,43 +7512,15 @@ def render_settings(language="ja"):
     )
 
 
-def render(message="", view="new", language="ja", embedded=False):
-    # view は旧・一覧ページ時代の名残。呼び出し側の互換のため残している。
-    del view
-    buttons = "\n".join(
-        f'<form class="launch" method="post" action="/launch">'
-        f'<input type="hidden" name="dir" value="{html.escape(path)}">'
-        f'<button class="proj" type="submit">🚀 {html.escape(name)}</button></form>'
-        for name, path in PINNED
-    )
-    other_projects = list_other_projects()
-    options = "\n".join(
-        f'<option value="{html.escape(path)}">{html.escape(name)}</option>'
-        for name, path in other_projects
-    )
-    github_projects = list(dict.fromkeys([*PINNED, *other_projects]))
-    github_project_options = "\n".join(
-        f'<option value="{html.escape(path)}">{html.escape(name)}</option>'
-        for name, path in github_projects
-    )
-    inbox_prompt_button = (
-        f'<button class="cw-set" id="inbox-open" type="button">'
-        f"{translate('📥 受信箱から選ぶ', language)}</button>"
-        if CW_ENABLED
-        else ""
-    )
-
-    def model_radios(tool):
-        return "\n".join(
-            f'<label><input type="radio" name="model-{tool}" value="{v}"'
-            f"{' checked' if v == 'default' else ''}><span>"
-            f"{translate(label, language)}</span></label>"
-            for v, label in models_for_tool(tool)
-        )
-
+def render_resume_items(language="ja"):
+    """再開タブを開いたときだけログを走査し、会話一覧を描画する。"""
     resume_groups = {}
+    group_dirs = {}
     for item in recent_conversations():
-        resume_groups.setdefault(resume_group_dir(item["cwd"]), []).append(item)
+        cwd = item["cwd"]
+        if cwd not in group_dirs:
+            group_dirs[cwd] = resume_group_dir(cwd)
+        resume_groups.setdefault(group_dirs[cwd], []).append(item)
     rendered_groups = []
     for index, (group_dir, items) in enumerate(resume_groups.items()):
         forms = []
@@ -7554,10 +7552,46 @@ def render(message="", view="new", language="ja", embedded=False):
             f"<small>({item_count(len(items), language)})</small></summary>"
             f'<div class="resume-grid">{"".join(forms)}</div></details>'
         )
-    resume_items = (
+    return (
         "\n".join(rendered_groups)
         or f'<div class="cw-empty">{translate("再開できる会話が見つかりません", language)}</div>'
     )
+
+
+def render(message="", view="new", language="ja", embedded=False):
+    # view は旧・一覧ページ時代の名残。呼び出し側の互換のため残している。
+    del view
+    buttons = "\n".join(
+        f'<form class="launch" method="post" action="/launch">'
+        f'<input type="hidden" name="dir" value="{html.escape(path)}">'
+        f'<button class="proj" type="submit">🚀 {html.escape(name)}</button></form>'
+        for name, path in PINNED
+    )
+    other_projects = list_other_projects()
+    options = "\n".join(
+        f'<option value="{html.escape(path)}">{html.escape(name)}</option>'
+        for name, path in other_projects
+    )
+    github_projects = list(dict.fromkeys([*PINNED, *other_projects]))
+    github_project_options = "\n".join(
+        f'<option value="{html.escape(path)}">{html.escape(name)}</option>'
+        for name, path in github_projects
+    )
+    inbox_prompt_button = (
+        f'<button class="cw-set" id="inbox-open" type="button">'
+        f"{translate('📥 受信箱から選ぶ', language)}</button>"
+        if CW_ENABLED
+        else ""
+    )
+
+    def model_radios(tool):
+        return "\n".join(
+            f'<label><input type="radio" name="model-{tool}" value="{v}"'
+            f"{' checked' if v == 'default' else ''}><span>"
+            f"{translate(label, language)}</span></label>"
+            for v, label in models_for_tool(tool, cached=True)
+        )
+
     return localize_source(load_template(NEW_PAGE_TEMPLATE), language).format(
         language=language,
         base_target='<base target="_top">' if embedded else "",
@@ -7568,7 +7602,6 @@ def render(message="", view="new", language="ja", embedded=False):
         buttons=buttons,
         options=options,
         github_project_options=github_project_options,
-        resume_items=resume_items,
         models_claude=model_radios("claude"),
         models_codex=model_radios("codex"),
         inbox_prompt_button=inbox_prompt_button,
@@ -7714,6 +7747,20 @@ class Handler(BaseHTTPRequestHandler):
         icon_match = re.fullmatch(r"/tool-icon/([a-z]+)\.png", parsed.path)
         if icon_match:
             return self._tool_icon(icon_match.group(1))
+        if parsed.path == "/api/launcher-models":
+            return self._json(
+                {
+                    "models": [
+                        {"value": value, "label": translate(label, language)}
+                        for value, label in models_for_tool("codex")
+                    ]
+                }
+            )
+        if parsed.path == "/api/recent-conversations":
+            try:
+                return self._json({"html": render_resume_items(language)})
+            except (OSError, subprocess.SubprocessError):
+                return self._json({"error": "会話の取得に失敗しました"}, 500)
         if parsed.path == "/new":
             embedded = urllib.parse.parse_qs(parsed.query).get("embedded") == ["1"]
             return self._page(render(view="new", language=language, embedded=embedded))

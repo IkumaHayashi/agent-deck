@@ -24,6 +24,7 @@
     <div><span class="setting-label">モデル</span>
       <div class="models" id="models-claude">{models_claude}</div>
       <div class="models" id="models-codex" style="display:none">{models_codex}</div>
+      <div id="model-status" class="cw-empty" aria-live="polite" hidden></div>
     </div>
   </div>
   <details><summary>起動オプション（通常権限）</summary>
@@ -90,7 +91,8 @@
 <h2>最近の会話を再開</h2>
   <p class="panel-intro">同じ会話の続きから起動します。権限設定のみ適用されます。</p>
 <input type="text" id="resume-id-filter" placeholder="resume IDで絞り込み" aria-label="resume IDで絞り込み" autocapitalize="off" autocorrect="off" spellcheck="false">
-<div id="resume-groups">{resume_items}</div>
+<button type="button" class="cw-refresh" id="resume-refresh">🔄 更新</button>
+<div id="resume-groups" aria-live="polite"><div class="cw-empty">タブを開くと読み込みます</div></div>
 <div class="cw-empty" id="resume-filter-empty" hidden>一致する会話が見つかりません</div>
 </section>
 {chatwork_panel}
