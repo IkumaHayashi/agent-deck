@@ -5013,7 +5013,8 @@ SIDEBAR_CSS = r"""
   /* 新規作成への往復では元の画面とiframeを保持する。 */
   .launcher-pane.route-only { display: none; }
   .launcher-back { display: none; }
-  body.launcher-open .app > main:not(.launcher-pane) { display: none !important; }
+  /* チャットの定期更新が高さを測れるよう、元の画面のレイアウトは維持する。 */
+  body.launcher-open .app > main:not(.launcher-pane) { visibility: hidden; }
   body.launcher-open .launcher-pane { position: fixed; inset: 0 0 0 320px;
     display: flex; flex-direction: column; background: #0d1117; z-index: 100; }
   body.launcher-open .pane-heading { flex: 0 0 auto; display: flex; align-items: center;
