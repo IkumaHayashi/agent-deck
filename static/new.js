@@ -3,10 +3,47 @@
     var t = document.querySelector(".tools input:checked");
     return t ? t.value : "claude";
   }
+  var codexModelsLoaded = false;
+  var codexModelsLoading = false;
+  async function loadCodexModels() {
+    if (codexModelsLoaded || codexModelsLoading) return;
+    codexModelsLoading = true;
+    var status = document.getElementById("model-status");
+    status.textContent = "読み込み中...";
+    try {
+      var response = await fetch("/api/launcher-models?lang=" + encodeURIComponent(document.documentElement.lang));
+      var data = await response.json();
+      if (!response.ok) throw new Error("モデル一覧を更新できませんでした");
+      var target = document.getElementById("models-codex");
+      var selected = target.querySelector("input:checked");
+      var value = selected ? selected.value : "default";
+      // 更新待ちの間に選んだモデルも維持する。
+      if (!data.models.some(function (model) { return model.value === value; }) && selected) {
+        data.models.push({value: value, label: selected.parentElement.textContent});
+      }
+      target.replaceChildren();
+      data.models.forEach(function (model) {
+        var label = document.createElement("label");
+        var input = document.createElement("input");
+        input.type = "radio"; input.name = "model-codex"; input.value = model.value;
+        input.checked = model.value === value;
+        var text = document.createElement("span"); text.textContent = model.label;
+        label.append(input, text); target.append(label);
+      });
+      codexModelsLoaded = true;
+      status.textContent = "";
+    } catch (error) {
+      status.textContent = "モデル一覧を更新できませんでした";
+    } finally {
+      codexModelsLoading = false;
+    }
+  }
   function syncModels() {
     ["claude", "codex"].forEach(function (t) {
       document.getElementById("models-" + t).style.display = t === currentTool() ? "" : "none";
     });
+    document.getElementById("model-status").hidden = currentTool() !== "codex";
+    if (currentTool() === "codex") loadCodexModels();
   }
   document.querySelectorAll(".tools input").forEach(function (r) {
     r.addEventListener("change", syncModels);
@@ -14,6 +51,8 @@
   syncModels();
   var reviewsLoaded = false;
   var inboxLoaded = false;
+  var resumeLoaded = false;
+  var resumeLoading = false;
   function activateLauncherPanel(panelId) {
     document.querySelectorAll(".launcher-panel").forEach(function (panel) {
       panel.classList.toggle("active", panel.id === panelId);
@@ -21,6 +60,7 @@
     document.querySelectorAll(".launcher-tabs button").forEach(function (button) {
       button.classList.toggle("active", button.dataset.panel === panelId);
     });
+    if (panelId === "resume-panel" && !resumeLoaded) loadResume();
     if (panelId === "reviews-panel" && !reviewsLoaded) {
       reviewsLoaded = true; loadReviews(false);
     }
@@ -100,7 +140,9 @@
   // resume IDの一部を入力すると、全グループの候補を絞り込む。
   var resumeIdFilter = document.getElementById("resume-id-filter");
   if (resumeIdFilter) {
-    resumeIdFilter.addEventListener("input", function () {
+    resumeIdFilter.addEventListener("input", filterResume);
+  }
+  function filterResume() {
       var query = resumeIdFilter.value.trim().toLowerCase();
       var forms = document.querySelectorAll("form[data-resume-id]");
       var matches = 0;
@@ -116,8 +158,35 @@
       });
       var empty = document.getElementById("resume-filter-empty");
       if (empty) empty.hidden = !query || matches > 0;
-    });
   }
+  async function loadResume() {
+    if (resumeLoading) return;
+    resumeLoading = true;
+    var target = document.getElementById("resume-groups");
+    var refresh = document.getElementById("resume-refresh");
+    refresh.disabled = true;
+    target.className = "cw-loading";
+    target.textContent = "読み込み中...";
+    document.getElementById("resume-filter-empty").hidden = true;
+    try {
+      var response = await fetch("/api/recent-conversations?lang=" + encodeURIComponent(document.documentElement.lang));
+      var data = await response.json();
+      if (!response.ok) throw new Error(data.error || "会話の取得に失敗しました");
+      // サーバー側で会話の値をHTMLエスケープ済みの同一オリジン断片。
+      target.innerHTML = data.html;
+      target.className = "";
+      target.querySelectorAll("form.launch").forEach(wireLaunchForm);
+      resumeLoaded = true;
+      filterResume();
+    } catch (error) {
+      resumeLoaded = false;
+      showError(target, error.message);
+    } finally {
+      resumeLoading = false;
+      refresh.disabled = false;
+    }
+  }
+  document.getElementById("resume-refresh").addEventListener("click", loadResume);
   // 最初のプロンプト欄への画像ペースト。アップロードしてパスを本文に差し込む
   var promptBox = document.getElementById("prompt");
   var promptStatus = document.getElementById("prompt-status");

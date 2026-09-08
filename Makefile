@@ -21,4 +21,4 @@ test:
 	$(PYTHON) -m unittest discover -v
 
 js-check:
-	node --check $(JS_FILES)
+	@for file in $(JS_FILES); do node --check "$$file" || exit 1; done

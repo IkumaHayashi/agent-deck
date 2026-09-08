@@ -320,7 +320,7 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("Launch from a project", page)
         self.assertIn("Launch from an issue or PR", page)
         self.assertIn("Enter a number or URL to preview its details", page)
-        self.assertIn("No conversations available to resume", page)
+        self.assertIn("Open this tab to load", page)
         self.assertIn("lang=en", page)
         self.assertNotIn("プロジェクトから起動", page)
         self.assertNotIn("Issue / PRから起動", page)
@@ -515,6 +515,70 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('id="github-selector"', page)
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
+
+    def test_new_page_does_not_wait_for_conversation_or_session_scans(self):
+        with (
+            mock.patch.object(server, "CONFIG", {}),
+            mock.patch.object(server, "recent_conversations") as conversations,
+            mock.patch.object(server, "managed_sessions") as sessions,
+            mock.patch.object(server, "resume_group_dir") as group_dir,
+            mock.patch.object(server, "available_codex_models") as models,
+        ):
+            page = server.render()
+
+        conversations.assert_not_called()
+        sessions.assert_not_called()
+        group_dir.assert_not_called()
+        models.assert_not_called()
+        self.assertIn('id="resume-groups"', page)
+        self.assertIn("タブを開くと読み込みます", page)
+
+    def test_recent_conversations_api_localizes_and_escapes_fragment(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/api/recent-conversations?lang=en"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {}
+        handler.wfile = io.BytesIO()
+        handler.send_response = mock.Mock()
+        handler.send_header = mock.Mock()
+        handler.end_headers = mock.Mock()
+        conversation = {
+            "cwd": "/Users/demo/project",
+            "tool": "claude",
+            "id": "019fd08a-e352-7a22-9aa5-0b5d0de94eba",
+            "summary": '<script>alert("x")</script>',
+            "label": "09/08 12:34",
+            "restorable": True,
+        }
+        with (
+            mock.patch.object(
+                server, "recent_conversations", return_value=[conversation] * 2
+            ),
+            mock.patch.object(
+                server, "resume_group_dir", return_value=conversation["cwd"]
+            ) as group_dir,
+        ):
+            handler.do_GET()
+
+        handler.send_response.assert_called_with(200)
+        group_dir.assert_called_once_with(conversation["cwd"])
+        fragment = json.loads(handler.wfile.getvalue())["html"]
+        self.assertIn("&lt;script&gt;", fragment)
+        self.assertNotIn("<script>", fragment)
+        self.assertNotIn("worktreeを作り直して再開します", fragment)
+        self.assertIn('data-resume="1"', fragment)
+
+    def test_recent_conversations_api_returns_retryable_error(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/api/recent-conversations?lang=en"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {}
+        handler._json = mock.Mock()
+        with mock.patch.object(server, "recent_conversations", side_effect=OSError):
+            handler.do_GET()
+        handler._json.assert_called_once_with(
+            {"error": "会話の取得に失敗しました"}, 500
+        )
 
     def test_github_preview_cancels_stale_requests_and_clears_old_card(self):
         with open(os.path.join(server.STATIC_DIR, "new.js"), encoding="utf-8") as f:
@@ -766,9 +830,9 @@ class FrontendTemplateTest(unittest.TestCase):
                 server, "resume_group_dir", return_value=conversation["cwd"]
             ),
         ):
-            page = server.render()
+            page = server.render_resume_items()
 
-        self.assertIn('id="resume-id-filter"', page)
+        self.assertIn('id="resume-id-filter"', server.render())
         self.assertIn(f'data-resume-id="{conversation["id"]}"', page)
         self.assertIn(f"ID: {conversation['id']}", page)
         self.assertIn('class="resume-group"', page)
@@ -790,7 +854,7 @@ class FrontendTemplateTest(unittest.TestCase):
                 server, "resume_group_dir", return_value="/Users/demo/project"
             ),
         ):
-            page = server.render()
+            page = server.render_resume_items()
 
         self.assertIn("worktreeを作り直して再開します", page)
         self.assertIn(f'value="{conversation["cwd"]}"', page)
