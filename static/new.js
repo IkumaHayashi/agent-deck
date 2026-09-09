@@ -137,27 +137,96 @@
   if (inboxBack) inboxBack.addEventListener("click", function () {
     activateLauncherPanel("projects-panel");
   });
-  // resume IDの一部を入力すると、全グループの候補を絞り込む。
+  // 入力中はまず表示済みの候補（ID・要約）を絞り込み、2文字以上なら少し待って
+  // 全会話の本文検索に切り替える。空に戻したら直近一覧を復元する。
   var resumeIdFilter = document.getElementById("resume-id-filter");
+  var resumeSearchStatus = document.getElementById("resume-search-status");
+  var resumeRecentHtml = "";
+  var resumeShownQuery = "";
+  var resumeSearchTimer = null;
+  var resumeSearchController = null;
   if (resumeIdFilter) {
-    resumeIdFilter.addEventListener("input", filterResume);
+    resumeIdFilter.addEventListener("input", function () {
+      filterResume();
+      scheduleResumeSearch();
+    });
+  }
+  function resumeQuery() {
+    return resumeIdFilter ? resumeIdFilter.value.trim() : "";
   }
   function filterResume() {
-      var query = resumeIdFilter.value.trim().toLowerCase();
-      var forms = document.querySelectorAll("form[data-resume-id]");
+      var query = resumeQuery().toLowerCase();
+      var entries = document.querySelectorAll("[data-resume-id]");
       var matches = 0;
-      forms.forEach(function (form) {
-        var matched = !query || form.dataset.resumeId.toLowerCase().includes(query);
-        form.hidden = !matched;
+      entries.forEach(function (entry) {
+        var matched = !query || entry.dataset.resumeId.toLowerCase().includes(query)
+          || entry.textContent.toLowerCase().includes(query);
+        entry.hidden = !matched;
         if (matched) matches += 1;
       });
       document.querySelectorAll(".resume-group").forEach(function (group) {
-        group.hidden = !Array.from(group.querySelectorAll("form[data-resume-id]"))
-          .some(function (form) { return !form.hidden; });
+        group.hidden = !Array.from(group.querySelectorAll("[data-resume-id]"))
+          .some(function (entry) { return !entry.hidden; });
         if (query && !group.hidden) group.open = true;
       });
       var empty = document.getElementById("resume-filter-empty");
-      if (empty) empty.hidden = !query || matches > 0;
+      if (empty) empty.hidden = !query || matches > 0 || !entries.length;
+  }
+  function scheduleResumeSearch() {
+    clearTimeout(resumeSearchTimer);
+    var query = resumeQuery();
+    if (query.length < 2) {
+      cancelResumeSearch();
+      if (resumeShownQuery) restoreRecentResume();
+      return;
+    }
+    if (query === resumeShownQuery) return;
+    resumeSearchTimer = setTimeout(function () { searchResume(query); }, 350);
+  }
+  function cancelResumeSearch() {
+    if (resumeSearchController) resumeSearchController.abort();
+    resumeSearchController = null;
+    resumeSearchStatus.textContent = "";
+  }
+  function showResumeHtml(html) {
+    var target = document.getElementById("resume-groups");
+    // サーバー側で会話の値をHTMLエスケープ済みの同一オリジン断片。
+    target.innerHTML = html;
+    target.className = "";
+    target.querySelectorAll("form.launch").forEach(wireLaunchForm);
+  }
+  function restoreRecentResume() {
+    resumeShownQuery = "";
+    if (resumeRecentHtml) { showResumeHtml(resumeRecentHtml); filterResume(); }
+    else if (!resumeLoading) loadResume();
+  }
+  async function searchResume(query) {
+    if (!resumeLoaded && !resumeLoading) await loadResume();
+    if (resumeQuery() !== query) return;
+    cancelResumeSearch();
+    var controller = new AbortController();
+    resumeSearchController = controller;
+    resumeSearchStatus.textContent = "全会話を検索中…";
+    try {
+      var response = await fetch(
+        "/api/recent-conversations?q=" + encodeURIComponent(query)
+          + "&lang=" + encodeURIComponent(document.documentElement.lang),
+        {signal: controller.signal}
+      );
+      var data = await response.json();
+      if (controller !== resumeSearchController) return;
+      if (!response.ok) throw new Error(data.error || "会話を検索できませんでした");
+      resumeShownQuery = query;
+      showResumeHtml(data.html);
+      document.getElementById("resume-filter-empty").hidden = true;
+      resumeSearchStatus.textContent = data.count
+        ? data.count + "件のセッション" : "一致する会話はありません";
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      resumeSearchStatus.textContent = error.message;
+    } finally {
+      if (controller === resumeSearchController) resumeSearchController = null;
+    }
   }
   async function loadResume() {
     if (resumeLoading) return;
@@ -172,10 +241,9 @@
       var response = await fetch("/api/recent-conversations?lang=" + encodeURIComponent(document.documentElement.lang));
       var data = await response.json();
       if (!response.ok) throw new Error(data.error || "会話の取得に失敗しました");
-      // サーバー側で会話の値をHTMLエスケープ済みの同一オリジン断片。
-      target.innerHTML = data.html;
-      target.className = "";
-      target.querySelectorAll("form.launch").forEach(wireLaunchForm);
+      resumeRecentHtml = data.html;
+      resumeShownQuery = "";
+      showResumeHtml(data.html);
       resumeLoaded = true;
       filterResume();
     } catch (error) {
@@ -186,7 +254,11 @@
       refresh.disabled = false;
     }
   }
-  document.getElementById("resume-refresh").addEventListener("click", loadResume);
+  document.getElementById("resume-refresh").addEventListener("click", async function () {
+    cancelResumeSearch();
+    await loadResume();
+    scheduleResumeSearch();
+  });
   // 最初のプロンプト欄への画像ペースト。アップロードしてパスを本文に差し込む
   var promptBox = document.getElementById("prompt");
   var promptStatus = document.getElementById("prompt-status");

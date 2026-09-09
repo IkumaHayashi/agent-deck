@@ -337,7 +337,7 @@
   "タブを開くと読み込みます": "Open this tab to load",
   "最近の会話を再開": "Resume a recent conversation",
   "同じ会話の続きから起動します。権限設定のみ適用されます。": "Continue an existing conversation. Only the permission setting is applied.",
-  "resume IDで絞り込み": "Filter by resume ID",
+  "会話の本文・resume IDで検索": "Search by conversation text or resume ID",
   "一致する会話が見つかりません": "No matching conversations",
   "会話を再開しています...": "Resuming conversation...",
   "セッションを起動中...": "Starting session...",
