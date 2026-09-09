@@ -493,6 +493,10 @@ CLAUDE_CWD_LOCK = threading.Lock()
 CLAUDE_CWD_CACHE = {}
 CLAUDE_START_LOCK = threading.Lock()
 CLAUDE_START_CACHE = {}
+# cwd → セッション一覧に出すリポジトリ名。git 呼び出しを一覧更新のたびに
+# 繰り返さないよう、パス単位で保持する。
+REPO_LABEL_LOCK = threading.Lock()
+REPO_LABEL_CACHE = {}
 # 返事待ちセッションの「誰のアクション待ちか」分類。haiku 呼び出しは数秒かかるので
 # バックグラウンドで実行し、(mtime, size) キーで結果をメモ化する。
 WAIT_CLASS_LOCK = threading.Lock()
@@ -4497,8 +4501,24 @@ def terminate_session(name, cwd):
 
 
 def dir_label(cwd):
-    # セッション一覧にはフルパスでなくディレクトリ名だけを見せる
-    return os.path.basename((cwd or "").rstrip("/")) or cwd or ""
+    """セッション一覧に出すリポジトリ名を返す。
+
+    フルパスは長いので名前だけにする。worktree やリポジトリ配下の
+    サブディレクトリも、作成元リポジトリの名前へまとめる。
+    Git管理外のディレクトリはそのディレクトリ名を使う。
+    """
+    path = (cwd or "").rstrip("/")
+    if not path:
+        return ""
+    with REPO_LABEL_LOCK:
+        cached = REPO_LABEL_CACHE.get(path)
+    if cached is not None:
+        return cached
+    root = resume_group_dir(path).rstrip("/")
+    label = os.path.basename(root) or root or path
+    with REPO_LABEL_LOCK:
+        REPO_LABEL_CACHE[path] = label
+    return label
 
 
 def session_position(item):
