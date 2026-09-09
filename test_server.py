@@ -275,6 +275,53 @@ class CodexModelsTest(unittest.TestCase):
         )
 
 
+class SessionCacheTest(unittest.TestCase):
+    """起動/終了直後に古いセッション一覧を確定させない。"""
+
+    def setUp(self):
+        self.saved = dict(server.SESSION_CACHE)
+
+    def tearDown(self):
+        server.SESSION_CACHE.clear()
+        server.SESSION_CACHE.update(self.saved)
+
+    def test_reload_when_invalidated_during_fill(self):
+        stale = [{"name": "agent-old"}]
+        fresh = [*stale, {"name": "agent-new"}]
+        loads = []
+
+        def load_managed_sessions(persist=True):
+            loads.append(len(loads))
+            if len(loads) == 1:
+                # 一覧を読んでいる最中に新しいセッションが起動・登録された
+                server.invalidate_session_cache()
+                return stale
+            return fresh
+
+        server.SESSION_CACHE.update(
+            {"expires": 0, "items": [], "loading": True, "loaded": False}
+        )
+        with mock.patch.object(
+            server, "load_managed_sessions", side_effect=load_managed_sessions
+        ):
+            server.fill_session_cache()
+
+        self.assertEqual([0, 1], loads)
+        self.assertEqual(fresh, server.SESSION_CACHE["items"])
+        self.assertTrue(server.SESSION_CACHE["loaded"])
+        self.assertFalse(server.SESSION_CACHE["loading"])
+        self.assertTrue(server.valid_session("agent-new"))
+
+    def test_fill_releases_loading_flag_on_failure(self):
+        server.SESSION_CACHE.update({"loading": True, "loaded": False})
+        with mock.patch.object(
+            server, "load_managed_sessions", side_effect=RuntimeError("tmux")
+        ):
+            with self.assertRaises(RuntimeError):
+                server.fill_session_cache()
+        self.assertFalse(server.SESSION_CACHE["loading"])
+
+
 class SessionContextTest(unittest.TestCase):
     def test_fable_minor_version_uses_one_million_token_window(self):
         self.assertEqual(1_000_000, server.claude_context_window("claude-fable-5-1"))
