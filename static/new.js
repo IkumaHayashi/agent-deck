@@ -331,19 +331,12 @@
     if (!selector) {
       return clearGithubTargetPreview();
     }
-    var urlKind = selector.match(/^https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/(issues|pull)\/\d+\/?$/i);
-    if (urlKind) {
-      var inferred = urlKind[1].toLowerCase() === "issues" ? "issue" : "pull";
-      var inferredRadio = document.querySelector('.github-kinds input[value="' + inferred + '"]');
-      if (inferredRadio) inferredRadio.checked = true;
-    }
-    var kind = document.querySelector(".github-kinds input:checked").value;
     var dir = document.getElementById("github-project").value;
     if (githubPreviewController) githubPreviewController.abort();
     var controller = new AbortController(); githubPreviewController = controller;
     target.className = "cw-loading"; target.textContent = "GitHubから読み込み中...";
     try {
-      var query = new URLSearchParams({dir: dir, kind: kind, target: selector});
+      var query = new URLSearchParams({dir: dir, target: selector});
       var response = await fetch("/api/github-item?" + query.toString(), {signal: controller.signal});
       var item = await response.json();
       if (controller !== githubPreviewController) return;
@@ -368,11 +361,6 @@
   });
   document.getElementById("github-project").addEventListener("change", function () {
     if (document.getElementById("github-selector").value.trim()) loadGithubTargetPreview();
-  });
-  document.querySelectorAll(".github-kinds input").forEach(function (radio) {
-    radio.addEventListener("change", function () {
-      if (document.getElementById("github-selector").value.trim()) loadGithubTargetPreview();
-    });
   });
   async function loadReviews(force) {
     var target = document.getElementById("review-requests"); target.className = "cw-loading"; target.textContent = "読み込み中...";
