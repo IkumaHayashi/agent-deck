@@ -2580,7 +2580,6 @@ class DirectoryDiffTest(unittest.TestCase):
                 stdout="git@github.com:example/repo.git\n",
                 stderr="",
             ),
-            SimpleNamespace(returncode=1, stdout="", stderr="not an issue"),
             SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
         ]
         with (
@@ -2590,8 +2589,34 @@ class DirectoryDiffTest(unittest.TestCase):
             item = server.github_work_item_target("/tmp/repo", "", "9")
 
         self.assertEqual("pull", item["kind"])
-        self.assertEqual("issue", run.call_args_list[1].args[0][1])
-        self.assertEqual("pr", run.call_args_list[2].args[0][1])
+        self.assertEqual("pr", run.call_args_list[1].args[0][1])
+        self.assertEqual(2, run.call_count)
+
+    def test_github_number_falls_back_to_issue(self):
+        payload = {
+            "number": 31,
+            "title": "Issue対象",
+            "url": "https://github.com/example/repo/issues/31",
+            "state": "OPEN",
+        }
+        results = [
+            SimpleNamespace(
+                returncode=0,
+                stdout="git@github.com:example/repo.git\n",
+                stderr="",
+            ),
+            SimpleNamespace(returncode=1, stdout="", stderr="not a pull request"),
+            SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+        ]
+        with (
+            mock.patch.object(server, "find_bin", side_effect=lambda name: name),
+            mock.patch.object(server.subprocess, "run", side_effect=results) as run,
+        ):
+            item = server.github_work_item_target("/tmp/repo", "", "31")
+
+        self.assertEqual("issue", item["kind"])
+        self.assertEqual("pr", run.call_args_list[1].args[0][1])
+        self.assertEqual("issue", run.call_args_list[2].args[0][1])
 
     def test_github_worktree_paths_do_not_collide_between_repositories_or_clones(self):
         with mock.patch.object(server, "WORKTREES_DIR", "/tmp/worktrees"):

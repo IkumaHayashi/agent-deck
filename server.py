@@ -2911,8 +2911,9 @@ def github_work_item_target(cwd, kind, selector):
             raise LookupError("選択したプロジェクトのGitHub originを確認できません")
     fields = "number,title,url,state,body,author,labels,updatedAt"
     result = None
-    # URLならパスから即決できる。番号だけならissue、PRの順に問い合わせて判定する。
-    for candidate in [kind] if kind else ["issue", "pull"]:
+    # URLならパスから即決できる。番号だけならPRを先に問い合わせる。
+    # `gh issue view` はPR番号にも成功するため、Issueを先にすると誤判定する。
+    for candidate in [kind] if kind else ["pull", "issue"]:
         command = "issue" if candidate == "issue" else "pr"
         result = subprocess.run(
             [find_bin("gh"), command, "view", number, "--json", fields],
