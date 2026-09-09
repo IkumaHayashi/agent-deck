@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import urllib.parse
 from types import SimpleNamespace
 from unittest import mock
 
@@ -357,6 +358,21 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('id="bug-report"', sidebar)
         self.assertIn("🐛 バグを報告", sidebar)
 
+    def test_sidebar_has_cross_session_conversation_search(self):
+        with mock.patch.object(server, "managed_sessions", return_value=[]):
+            sidebar = server.build_sidebar(None, "ja")
+
+        self.assertIn('id="global-search-input"', sidebar)
+        self.assertIn("すべての会話を検索", sidebar)
+        self.assertIn("/api/conversation-search?q=", server.SIDEBAR_JS)
+        self.assertIn('hiddenInput("resume", item.id)', server.SIDEBAR_JS)
+        self.assertIn('hiddenInput("search", query)', server.SIDEBAR_JS)
+        self.assertIn(
+            "if (!globalSearchInput.value.trim()) closeGlobalSearch()",
+            server.SIDEBAR_JS,
+        )
+        self.assertIn("globalSearchController?.abort()", server.SIDEBAR_JS)
+
     def test_language_switch_preserves_other_query_parameters(self):
         switch = server.language_switch_html("en")
 
@@ -449,6 +465,37 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("完了という名前の作業", sidebar)
         self.assertNotIn("Language", sidebar)
 
+    def test_sidebar_links_to_github_item_with_number_and_title(self):
+        item = {
+            "name": "agent-test",
+            "tool": "codex",
+            "cwd": "/tmp/project",
+            "running": False,
+            "background": "",
+            "summary": "Issueから始めた作業",
+            "last_message": "",
+            "note": "",
+            "artifacts": [],
+            "context": None,
+            "position": "normal",
+            "pinned": False,
+            "github_item": {
+                "kind": "issue",
+                "number": 42,
+                "title": "一覧にも対象を表示する",
+                "url": "https://github.com/example/repo/issues/42",
+            },
+        }
+        with (
+            mock.patch.object(server, "managed_sessions", return_value=[item]),
+            mock.patch.object(server, "sidebar_status", return_value=("完了", "done")),
+        ):
+            sidebar = server.build_sidebar(None)
+
+        self.assertIn("Issue #42 一覧にも対象を表示する ↗", sidebar)
+        self.assertIn('href="https://github.com/example/repo/issues/42"', sidebar)
+        self.assertIn('class="github-item" target="_blank"', sidebar)
+
     def test_english_api_errors_are_localized_with_dynamic_details(self):
         handler = object.__new__(server.Handler)
         handler.path = "/api/session/diff?lang=en"
@@ -513,6 +560,8 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('data-panel="reviews-panel"', page)
         self.assertIn('data-panel="github-panel"', page)
         self.assertIn('id="github-selector"', page)
+        self.assertNotIn('name="github-kind"', page)
+        self.assertNotIn("github-kinds", page)
         self.assertIn('<details id="prompt-details" open>', page)
         self.assertNotIn("{static_version}", page)
 
@@ -937,6 +986,7 @@ class FrontendTemplateTest(unittest.TestCase):
             "cwd": "/tmp/project",
             "kind": "issue",
             "number": 42,
+            "title": "一覧へ対象を表示する",
             "url": "https://github.com/example/repo/issues/42",
         }
         with (
@@ -947,8 +997,8 @@ class FrontendTemplateTest(unittest.TestCase):
             mock.patch.object(
                 server, "wait_for_new_session_id", return_value="session-id"
             ),
-            mock.patch.object(server, "set_session_metadata"),
-            mock.patch.object(server, "upsert_registered_session"),
+            mock.patch.object(server, "set_session_metadata") as metadata,
+            mock.patch.object(server, "upsert_registered_session") as register,
             mock.patch.object(server, "invalidate_session_cache"),
             mock.patch.object(
                 server, "github_work_item_target", return_value=target
@@ -973,6 +1023,14 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("/tmp/worktrees/project-issue-42", command)
         self.assertIn(target["url"], command[-1])
         self.assertIn("追加条件も確認してください", command[-1])
+        expected_item = {
+            "kind": "issue",
+            "number": 42,
+            "title": "一覧へ対象を表示する",
+            "url": target["url"],
+        }
+        self.assertEqual(expected_item, metadata.call_args.kwargs["github_item"])
+        self.assertEqual(expected_item, register.call_args.args[0]["github_item"])
 
     def test_claude_resume_finds_moved_log_and_uses_its_latest_cwd(self):
         handler = object.__new__(server.Handler)
@@ -1079,6 +1137,17 @@ class FrontendTemplateTest(unittest.TestCase):
         )
         self.assertNotIn("selectedQuoteText || item.text", server.TERMINAL_PAGE)
         self.assertIn('line ? "> " + line : ">"', server.TERMINAL_PAGE)
+
+    def test_terminal_can_search_conversation_text_and_move_between_matches(self):
+        page = server.TERMINAL_PAGE
+
+        self.assertIn('id="search-toggle"', page)
+        self.assertIn('id="conversation-search-input"', page)
+        self.assertIn("mark.search-hit", page)
+        self.assertIn("updateConversationSearch(true)", page)
+        self.assertIn("event.shiftKey ? -1 : 1", page)
+        self.assertIn('event.key.toLowerCase() === "f"', page)
+        self.assertIn("initialConversationSearch", page)
 
     def test_local_markdown_images_have_caption_and_paging(self):
         page = server.TERMINAL_PAGE
@@ -1526,6 +1595,101 @@ class WorktreeRestoreTest(unittest.TestCase):
         self.assertEqual([3, 2], kept)
 
 
+class ConversationSearchTest(unittest.TestCase):
+    SESSION_ID = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+
+    def test_extracts_only_user_and_assistant_messages(self):
+        entries = [
+            {"type": "user", "message": {"content": "横断検索を追加して"}},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [{"type": "text", "text": "横断検索を追加しました"}]
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "name": "Bash",
+                            "input": {"command": "echo 横断検索"},
+                        }
+                    ]
+                },
+            },
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl") as log:
+            for entry in entries:
+                log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            log.flush()
+            hits = server.conversation_search_hits(log.name, "claude", "横断検索")
+
+        self.assertEqual(["user", "assistant"], [hit["role"] for hit in hits])
+        self.assertTrue(all("横断検索" in hit["snippet"] for hit in hits))
+
+    def test_loads_messages_around_an_old_match(self):
+        entries = [
+            {"type": "user", "message": {"content": "前の文脈"}},
+            {"type": "assistant", "message": {"content": "前の回答"}},
+            {"type": "user", "message": {"content": "古い一致文字列です"}},
+            {"type": "assistant", "message": {"content": "一致後の回答"}},
+        ]
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl") as log:
+            for entry in entries:
+                log.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            log.flush()
+            messages = server.session_messages_around_matches(
+                log.name, "claude", "一致文字列"
+            )
+
+        self.assertEqual(
+            ["前の文脈", "前の回答", "古い一致文字列です", "一致後の回答"],
+            [message["text"] for message in messages],
+        )
+
+    def test_returns_active_session_with_matching_snippet(self):
+        with tempfile.TemporaryDirectory() as home:
+            project = os.path.join(home, "project")
+            os.makedirs(project)
+            log_dir = os.path.join(home, ".claude", "projects", "-project")
+            os.makedirs(log_dir)
+            log_path = os.path.join(log_dir, self.SESSION_ID + ".jsonl")
+            with open(log_path, "w", encoding="utf-8") as log:
+                log.write(
+                    json.dumps(
+                        {"type": "user", "message": {"content": "検索対象の発言"}},
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+            active = {
+                "name": "agent-search",
+                "tool": "claude",
+                "session_id": self.SESSION_ID,
+                "log_path": log_path,
+                "history_paths": [],
+                "cwd": project,
+                "summary": "検索機能",
+            }
+            with (
+                mock.patch.object(server, "HOME", home),
+                mock.patch.object(server, "managed_sessions", return_value=[active]),
+                mock.patch.object(
+                    server, "conversation_search_paths", return_value=[log_path]
+                ),
+                mock.patch.object(server, "restorable_worktree", return_value=None),
+                mock.patch.object(server, "log_meta", return_value={}),
+                mock.patch.object(server, "RECENT_DIRS", []),
+            ):
+                results = server.search_conversations("検索対象")
+
+        self.assertEqual(1, len(results))
+        self.assertEqual("agent-search", results[0]["active_session"])
+        self.assertIn("検索対象", results[0]["hits"][0]["snippet"])
+
+
 class ResumeWorktreeLaunchTest(unittest.TestCase):
     """削除済みworktreeの会話を、起動時に作り直してから再開することを確かめる。"""
 
@@ -1556,14 +1720,23 @@ class ResumeWorktreeLaunchTest(unittest.TestCase):
             mock.patch.object(server, "set_session_metadata"),
             mock.patch.object(server, "upsert_registered_session"),
             mock.patch.object(server, "invalidate_session_cache"),
-            mock.patch.object(handler, "_redirect"),
+            mock.patch.object(handler, "_redirect") as redirect,
         ):
-            handler._launch(worktree, tool="claude", resume=self.SESSION_ID)
+            handler._launch(
+                worktree,
+                tool="claude",
+                resume=self.SESSION_ID,
+                search="探していた文字列",
+            )
 
         restore.assert_called_once_with(os.path.realpath(worktree))
         self.assertEqual(2, validate.call_count)
         self.assertIn(worktree, run.call_args.args[0])
         self.assertIn(self.SESSION_ID, run.call_args.args[0])
+        self.assertIn(
+            "&search=" + urllib.parse.quote("探していた文字列"),
+            redirect.call_args.args[0],
+        )
 
     def test_new_session_does_not_recreate_worktrees(self):
         handler = object.__new__(server.Handler)
@@ -1613,6 +1786,12 @@ class SessionRestoreTest(unittest.TestCase):
             "note": "確認待ち",
             "position": "top",
             "pull_request": "https://github.com/example/repo/pull/42",
+            "github_item": {
+                "kind": "issue",
+                "number": 31,
+                "title": "復元後も表示する",
+                "url": "https://github.com/example/repo/issues/31",
+            },
             "bypass": True,
             "restore_model": "gpt-5.6",
         }
@@ -1633,6 +1812,7 @@ class SessionRestoreTest(unittest.TestCase):
         self.assertEqual(1, len(items))
         self.assertEqual(self.SESSION_ID, items[0]["session_id"])
         self.assertEqual("gpt-5.6", items[0]["model"])
+        self.assertEqual("復元後も表示する", items[0]["github_item"]["title"])
         self.assertEqual(0o600, os.stat(server.SESSION_REGISTRY_PATH).st_mode & 0o777)
 
     def test_restores_missing_session_with_its_metadata_and_options(self):
@@ -2380,19 +2560,63 @@ class DirectoryDiffTest(unittest.TestCase):
             ),
         ):
             item = server.github_work_item_target(
-                "/tmp/other", "pull", "https://github.com/example/repo/pull/9"
+                "/tmp/other", "", "https://github.com/example/repo/pull/9"
             )
 
+        self.assertEqual("pull", item["kind"])
         self.assertEqual("/tmp/matched", item["cwd"])
         self.assertEqual("/tmp/matched", run.call_args_list[1].kwargs["cwd"])
 
-    def test_github_url_kind_must_match_selection(self):
-        with self.assertRaisesRegex(ValueError, "種別"):
-            server.github_work_item_target(
-                "/tmp/repo",
-                "issue",
-                "https://github.com/example/repo/pull/9",
-            )
+    def test_github_number_detects_pull_request_without_kind_selection(self):
+        payload = {
+            "number": 9,
+            "title": "PR対象",
+            "url": "https://github.com/example/repo/pull/9",
+            "state": "OPEN",
+        }
+        results = [
+            SimpleNamespace(
+                returncode=0,
+                stdout="git@github.com:example/repo.git\n",
+                stderr="",
+            ),
+            SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+        ]
+        with (
+            mock.patch.object(server, "find_bin", side_effect=lambda name: name),
+            mock.patch.object(server.subprocess, "run", side_effect=results) as run,
+        ):
+            item = server.github_work_item_target("/tmp/repo", "", "9")
+
+        self.assertEqual("pull", item["kind"])
+        self.assertEqual("pr", run.call_args_list[1].args[0][1])
+        self.assertEqual(2, run.call_count)
+
+    def test_github_number_falls_back_to_issue(self):
+        payload = {
+            "number": 31,
+            "title": "Issue対象",
+            "url": "https://github.com/example/repo/issues/31",
+            "state": "OPEN",
+        }
+        results = [
+            SimpleNamespace(
+                returncode=0,
+                stdout="git@github.com:example/repo.git\n",
+                stderr="",
+            ),
+            SimpleNamespace(returncode=1, stdout="", stderr="not a pull request"),
+            SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr=""),
+        ]
+        with (
+            mock.patch.object(server, "find_bin", side_effect=lambda name: name),
+            mock.patch.object(server.subprocess, "run", side_effect=results) as run,
+        ):
+            item = server.github_work_item_target("/tmp/repo", "", "31")
+
+        self.assertEqual("issue", item["kind"])
+        self.assertEqual("pr", run.call_args_list[1].args[0][1])
+        self.assertEqual("issue", run.call_args_list[2].args[0][1])
 
     def test_github_worktree_paths_do_not_collide_between_repositories_or_clones(self):
         with mock.patch.object(server, "WORKTREES_DIR", "/tmp/worktrees"):
@@ -2690,6 +2914,24 @@ class SessionPositionTest(unittest.TestCase):
             ),
             calls,
         )
+
+    def test_github_item_metadata_is_saved(self):
+        calls = []
+        item = {
+            "kind": "issue",
+            "number": 42,
+            "title": "対象タイトル",
+            "url": "https://github.com/example/repo/issues/42",
+        }
+        with mock.patch.object(
+            server,
+            "tmux_run",
+            side_effect=lambda *args: calls.append(args) or SimpleNamespace(),
+        ):
+            server.set_session_metadata("agent-new", github_item=item)
+
+        option = next(call for call in calls if "@launcher_github_item" in call)
+        self.assertEqual(item, json.loads(option[-1]))
 
     @staticmethod
     def _session(name, pinned=False, position=None):

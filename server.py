@@ -11,6 +11,7 @@
 
 import base64
 import binascii
+import collections
 import datetime
 import hashlib
 import html
@@ -2489,6 +2490,35 @@ GITHUB_ITEM_URL_RE = re.compile(
 )
 
 
+def github_item_metadata(raw):
+    """セッションへ保存してよいIssue / PR情報だけを正規化する。"""
+    if not isinstance(raw, dict):
+        return {}
+    url = str(raw.get("url") or "").strip().rstrip("/")
+    match = GITHUB_ITEM_URL_RE.fullmatch(url)
+    if not match:
+        return {}
+    kind = "issue" if match.group("kind") == "issues" else "pull"
+    try:
+        number = int(raw.get("number"))
+    except (TypeError, ValueError):
+        return {}
+    if number <= 0 or number != int(match.group("number")):
+        return {}
+    title = " ".join(str(raw.get("title") or "").split())[:300]
+    return {"kind": kind, "number": number, "title": title, "url": url}
+
+
+def parse_github_item_metadata(value):
+    """tmux optionまたはregistryの値からIssue / PR情報を読み取る。"""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return {}
+    return github_item_metadata(value)
+
+
 def normalize_pr_selector(value):
     """gh に安全に渡せる PR 番号またはURLを返す。"""
     value = (value or "").strip()
@@ -2839,17 +2869,15 @@ def pull_request_target(selector):
 
 
 def github_work_item_target(cwd, kind, selector):
-    """Issue / PR指定を検証し、プレビューとworktree作成に使う情報を返す。"""
-    if kind not in {"issue", "pull"}:
-        raise ValueError("IssueまたはPull Requestを選択してください")
+    """Issue / PR指定から種別を判定し、プレビューとworktree用情報を返す。"""
+    if kind and kind not in {"issue", "pull"}:
+        raise ValueError("Issue / PRの種別指定が不正です")
     selector = (selector or "").strip()
     url_match = GITHUB_ITEM_URL_RE.fullmatch(selector)
     if not url_match and not re.fullmatch(r"\d+", selector):
         raise ValueError("Issue / PR番号またはGitHub URLを入力してください")
     if url_match:
-        url_kind = "issue" if url_match.group("kind") == "issues" else "pull"
-        if url_kind != kind:
-            raise ValueError("選択した種別とGitHub URLの種別が一致しません")
+        kind = "issue" if url_match.group("kind") == "issues" else "pull"
         repository = url_match.group("repo").lower()
         number = url_match.group("number")
         selected_repository = ""
@@ -2881,16 +2909,24 @@ def github_work_item_target(cwd, kind, selector):
         repository = github_repo_name(remote.stdout) if remote.returncode == 0 else ""
         if not repository:
             raise LookupError("選択したプロジェクトのGitHub originを確認できません")
-    command = "issue" if kind == "issue" else "pr"
     fields = "number,title,url,state,body,author,labels,updatedAt"
-    result = subprocess.run(
-        [find_bin("gh"), command, "view", number, "--json", fields],
-        cwd=cwd,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        env={**os.environ, "NO_COLOR": "1"},
-    )
+    result = None
+    # URLならパスから即決できる。番号だけならPRを先に問い合わせる。
+    # `gh issue view` はPR番号にも成功するため、Issueを先にすると誤判定する。
+    for candidate in [kind] if kind else ["pull", "issue"]:
+        command = "issue" if candidate == "issue" else "pr"
+        result = subprocess.run(
+            [find_bin("gh"), command, "view", number, "--json", fields],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env={**os.environ, "NO_COLOR": "1"},
+        )
+        if result.returncode == 0:
+            kind = candidate
+            break
+    assert result is not None
     if result.returncode != 0:
         raise LookupError(result.stderr.strip() or "Issue / PRが見つかりません")
     try:
@@ -3483,6 +3519,238 @@ def recent_conversations(limit=24):
     return items
 
 
+def conversation_search_paths(query):
+    """文字列を含む会話ログを ripgrep で絞り込む。
+
+    会話ログ全体は数GBになるため、Pythonで全ファイルをJSONパースしない。まず
+    ripgrepの固定文字列検索で該当ファイルだけを集め、表示用の抽出は後段で行う。
+    """
+    candidates = [
+        shutil.which("rg"),
+        "/opt/homebrew/bin/rg",
+        "/usr/local/bin/rg",
+        *sorted(
+            glob.glob(f"{HOME}/.codex/packages/standalone/releases/*/codex-path/rg"),
+            reverse=True,
+        ),
+    ]
+    executable = next(
+        (path for path in candidates if path and os.access(path, os.X_OK)), None
+    )
+    if not executable:
+        raise FileNotFoundError("rgコマンドが見つかりません")
+    roots = [
+        path
+        for path in (f"{HOME}/.claude/projects", f"{HOME}/.codex/sessions")
+        if os.path.isdir(path)
+    ]
+    if not roots:
+        return []
+    result = subprocess.run(
+        [
+            executable,
+            "--files-with-matches",
+            "--fixed-strings",
+            "--ignore-case",
+            "--glob",
+            "*.jsonl",
+            "--",
+            query,
+            *roots,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    # ripgrepは一致なしを1で返す。
+    if result.returncode not in (0, 1):
+        raise RuntimeError(result.stderr.strip() or "会話ログを検索できませんでした")
+    return [path for path in result.stdout.splitlines() if os.path.isfile(path)]
+
+
+def searchable_message_parts(item, tool):
+    """検索対象にするユーザー・アシスタント発言を返す（ツール入出力は除外）。"""
+    entry = user_message_entry(item, tool)
+    if entry:
+        return [entry]
+    if tool == "claude" and item.get("type") == "assistant":
+        content = (item.get("message") or {}).get("content", [])
+        if isinstance(content, str):
+            return (
+                [{"role": "assistant", "text": content.strip()}]
+                if content.strip()
+                else []
+            )
+        return [
+            {"role": "assistant", "text": part["text"].strip()}
+            for part in content or []
+            if part.get("type") == "text" and part.get("text", "").strip()
+        ]
+    if tool == "codex" and item.get("type") == "response_item":
+        payload = item.get("payload") or {}
+        if payload.get("role") != "assistant":
+            return []
+        return [
+            {"role": "assistant", "text": part["text"].strip()}
+            for part in payload.get("content") or []
+            if part.get("type") == "output_text" and part.get("text", "").strip()
+        ]
+    return []
+
+
+def conversation_search_hits(path, tool, query, limit=3):
+    """1ログから一致する発言を抽出し、短い抜粋を返す。"""
+    folded = query.casefold()
+    hits = []
+    try:
+        with open(path, encoding="utf-8", errors="replace") as source:
+            for line in source:
+                # JSONパースより先に安い固定文字列判定を行う。
+                if folded not in line.casefold():
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for part in searchable_message_parts(item, tool):
+                    text = part["text"]
+                    index = text.casefold().find(folded)
+                    if index < 0:
+                        continue
+                    start = max(0, index - 90)
+                    end = min(len(text), index + len(query) + 140)
+                    snippet = " ".join(text[start:end].split())
+                    if start:
+                        snippet = "…" + snippet
+                    if end < len(text):
+                        snippet += "…"
+                    hits.append({"role": part["role"], "snippet": snippet})
+                    if len(hits) >= limit:
+                        return hits
+    except OSError:
+        return []
+    return hits
+
+
+def session_messages_around_matches(path, tool, query, history=(), limit=120):
+    """検索一致の前後を含むメッセージを、古いログも含めて返す。"""
+    folded = query.casefold()
+    before = collections.deque(maxlen=3)
+    selected = []
+    after = 0
+    for source_path in (*history, path):
+        try:
+            source = open(source_path, encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with source:
+            for line in source:
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                parts = searchable_message_parts(item, tool)
+                for part in parts:
+                    matched = folded in part["text"].casefold()
+                    if matched:
+                        selected.extend(before)
+                        before.clear()
+                        selected.append(part)
+                        after = 3
+                    elif after:
+                        selected.append(part)
+                        after -= 1
+                    else:
+                        before.append(part)
+                    if len(selected) >= limit:
+                        return selected[:limit]
+    return selected
+
+
+def search_conversations(query, limit=30):
+    """実行中・終了済みを含む会話履歴を新しい順に検索する。"""
+    active_items = managed_sessions()
+    active_by_id = {
+        (item["tool"], item.get("session_id")): item
+        for item in active_items
+        if item.get("session_id")
+    }
+    active_by_path = {}
+    for item in active_items:
+        for path in (item.get("log_path"), *(item.get("history_paths") or ())):
+            if path:
+                active_by_path[os.path.realpath(path)] = item
+
+    entries = []
+    for path in conversation_search_paths(query):
+        resolved = os.path.realpath(path)
+        if resolved.startswith(os.path.realpath(f"{HOME}/.claude/projects") + os.sep):
+            tool = "claude"
+            session_id = os.path.basename(path).removesuffix(".jsonl")
+            if not re.fullmatch(r"[0-9a-f-]{36}", session_id):
+                continue
+            cwd = claude_session_cwd(path)
+        elif resolved.startswith(os.path.realpath(f"{HOME}/.codex/sessions") + os.sep):
+            tool = "codex"
+            head = codex_session_head(path)
+            if head["thread_source"] == "subagent" or head["subagent"]:
+                continue
+            session_id, cwd = head["id"], head["cwd"]
+            if not re.fullmatch(r"[0-9a-f-]{36}", session_id or ""):
+                continue
+        else:
+            continue
+        active = active_by_path.get(resolved) or active_by_id.get((tool, session_id))
+        if active:
+            cwd = active["cwd"]
+        elif not (cwd == HOME or cwd.startswith(HOME + os.sep)):
+            continue
+        elif RECENT_DIRS and not any(
+            cwd == base or cwd.startswith(base + os.sep) for base in RECENT_DIRS
+        ):
+            continue
+        restorable = bool(restorable_worktree(cwd))
+        if not active and not restorable and not os.path.isdir(cwd):
+            continue
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        entries.append((mtime, path, tool, session_id, cwd, active, restorable))
+
+    entries.sort(key=lambda entry: entry[0], reverse=True)
+    results = []
+    seen = set()
+    for mtime, path, tool, session_id, cwd, active, restorable in entries:
+        key = ("active", active["name"]) if active else (tool, session_id)
+        if key in seen:
+            continue
+        hits = conversation_search_hits(path, tool, query)
+        if not hits:
+            continue
+        seen.add(key)
+        meta = log_meta(path, tool)
+        results.append(
+            {
+                "tool": tool,
+                "id": session_id,
+                "cwd": cwd,
+                "dir": short_path(cwd),
+                "summary": (
+                    active.get("summary", "") if active else meta.get("summary", "")
+                )
+                or meta.get("last_message", ""),
+                "label": time.strftime("%Y/%m/%d %H:%M", time.localtime(mtime)),
+                "active_session": active["name"] if active else "",
+                "restorable": restorable,
+                "hits": hits,
+            }
+        )
+        if len(results) >= limit:
+            break
+    return results
+
+
 def resume_group_dir(cwd):
     """会話再開一覧でまとめる基準ディレクトリを返す。
 
@@ -3640,6 +3908,7 @@ def _restorable_session(item):
         "note": str(item.get("note", ""))[:1000],
         "position": position,
         "pull_request": str(item.get("pull_request", "")),
+        "github_item": parse_github_item_metadata(item.get("github_item")),
         "bypass": bool(item.get("bypass")),
         "model": str(item.get("restore_model") or item.get("model") or ""),
     }
@@ -3831,6 +4100,7 @@ def restore_registered_sessions():
                 item["position"],
                 item.get("model", ""),
                 thread_history=item.get("thread_history") or (),
+                github_item=item.get("github_item"),
             )
             restored_item = {**item, "name": new_name}
             resulting.append(restored_item)
@@ -3960,6 +4230,11 @@ def load_managed_sessions(persist=True):
             pull_request = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_pull_request"
             ).stdout.strip()
+            github_item = parse_github_item_metadata(
+                tmux_run(
+                    "show-option", "-qv", "-t", parts[0], "@launcher_github_item"
+                ).stdout.strip()
+            )
             restore_model = tmux_run(
                 "show-option", "-qv", "-t", parts[0], "@launcher_restore_model"
             ).stdout.strip()
@@ -4082,6 +4357,7 @@ def load_managed_sessions(persist=True):
                     "pinned": pinned,
                     "position": position,
                     "pull_request": pull_request,
+                    "github_item": github_item,
                     "session_id": session_id,
                     "bypass": bypass,
                     "ephemeral": ephemeral,
@@ -4255,12 +4531,42 @@ def tool_label(tool):
     return f'<span class="tool">{escaped}</span>'
 
 
+def github_item_link_html(item):
+    """起動元のIssue / PRをセッションカード用リンクとして返す。"""
+    item = github_item_metadata(item)
+    if not item:
+        return ""
+    kind = "Issue" if item["kind"] == "issue" else "PR"
+    label = f"{kind} #{item['number']}"
+    if item["title"]:
+        label += f" {item['title']}"
+    return (
+        '<a class="github-item" target="_blank" rel="noopener" '
+        f'href="{html.escape(item["url"], quote=True)}" '
+        f'title="{html.escape(label, quote=True)}">'
+        f"{html.escape(label)} ↗</a>"
+    )
+
+
 def build_sidebar(active, language="ja"):
     """2ペイン表示のサイドバーHTMLを組み立てる。activeは選択中のセッション名。"""
     new_label = translate("＋ 新規起動", language)
     sidebar = (
         f'<a class="new-link new-link-desktop" href="/">{new_label}</a>'
         f'<a class="new-link new-link-mobile" href="/new">{new_label}</a>'
+    )
+    sidebar += (
+        '<form id="global-search" role="search">'
+        f'<input type="search" id="global-search-input" minlength="2" maxlength="200" '
+        f'placeholder="{translate("すべての会話を検索", language)}" '
+        f'aria-label="{translate("すべての会話を検索", language)}">'
+        f'<button type="submit" aria-label="{translate("検索", language)}" '
+        f'title="{translate("検索", language)}">⌕</button>'
+        f'<button type="button" id="global-search-clear" '
+        f'aria-label="{translate("検索を閉じる", language)}" '
+        f'title="{translate("検索を閉じる", language)}" hidden>×</button></form>'
+        '<div id="global-search-status" aria-live="polite"></div>'
+        '<div id="global-search-results" hidden></div>'
     )
     sidebar += (
         '<label class="filter-toggle"><input type="checkbox" id="filter-need">'
@@ -4310,7 +4616,8 @@ def build_sidebar(active, language="ja"):
             f'<span class="st st-{status_class}">'
             f"{html.escape(translate(status_text, language))}</span>"
             f"{context_chip(other.get('context'))}</strong>"
-            f"{lines}</a>{position_button_html(other, language)}</div>"
+            f"{lines}</a>{github_item_link_html(other.get('github_item'))}"
+            f"{position_button_html(other, language)}</div>"
         )
     sidebar += "</div>"
     # バージョンとAI使用量は一覧が短いときもサイドバー最下部へ置く。
@@ -4702,6 +5009,7 @@ def set_session_metadata(
     position="",
     model="",
     thread_history=(),
+    github_item=None,
 ):
     if not name:
         return
@@ -4730,6 +5038,15 @@ def set_session_metadata(
         tmux_run("set-option", "-t", name, "@launcher_pinned", "1")
     if pull_request:
         tmux_run("set-option", "-t", name, "@launcher_pull_request", pull_request)
+    github_item = github_item_metadata(github_item)
+    if github_item:
+        tmux_run(
+            "set-option",
+            "-t",
+            name,
+            "@launcher_github_item",
+            json.dumps(github_item, ensure_ascii=False, separators=(",", ":")),
+        )
     if model and model != "default":
         tmux_run("set-option", "-t", name, "@launcher_restore_model", model)
 
@@ -4929,6 +5246,38 @@ SIDEBAR_CSS = r"""
   aside #side-sessions a small:not(.first) { -webkit-line-clamp: 1; }
   aside .new-link { text-align: center; color: #8ab4f8; border-style: dashed; }
   aside .new-link-mobile { display: none; }
+  #global-search { display: flex; gap: 6px; margin: 1px 0 8px; }
+  #global-search input { min-width: 0; flex: 1; padding: 8px 9px;
+    border: 1px solid #484f58; border-radius: 8px; background: #0d1117;
+    color: #e6edf3; font: inherit; font-size: .82rem; }
+  #global-search button { flex: 0 0 auto; width: 34px; padding: 0;
+    border: 1px solid #484f58; border-radius: 8px; background: #21262d;
+    color: #e6edf3; cursor: pointer; }
+  #global-search button:disabled { opacity: .5; cursor: default; }
+  #global-search-status { min-height: 0; margin: -2px 2px 7px; color: #8b949e;
+    font-size: .74rem; }
+  #global-search-status:empty { display: none; }
+  #global-search-results { min-height: 0; flex: 1 1 auto; overflow-y: auto;
+    margin-right: -5px; padding-right: 5px; }
+  #global-search-results[hidden] { display: none; }
+  body.global-searching aside .filter-toggle,
+  body.global-searching aside #side-sessions { display: none; }
+  #global-search-results .search-result { margin: 7px 0; padding: 10px;
+    border: 1px solid #30363d; border-radius: 8px; background: #161b22; }
+  #global-search-results .search-result:hover { border-color: #58a6ff; }
+  #global-search-results .search-result > a, #global-search-results form,
+  #global-search-results button { display: block; width: 100%; margin: 0;
+    padding: 0; border: 0; background: transparent; color: inherit; font: inherit;
+    text-align: left; cursor: pointer; }
+  #global-search-results .search-title { display: block; color: #cdd9e5;
+    font-size: .82rem; font-weight: 600; line-height: 1.35; }
+  #global-search-results .search-meta { display: block; margin-top: 4px;
+    color: #8b949e; font-size: .7rem; }
+  #global-search-results .search-snippet { display: block; margin-top: 7px;
+    color: #adbac7; font-size: .76rem; line-height: 1.4; overflow-wrap: anywhere; }
+  #global-search-results mark { padding: 0 2px; border-radius: 3px;
+    background: #bb8009; color: #fff; }
+  #global-search-results .search-state { color: #58a6ff; }
   aside .wez { margin: 7px 0; padding: 10px; border: 1px dashed #30363d; border-radius: 8px;
     overflow-wrap: anywhere; opacity: .75; }
   .st { margin-left: 8px; padding: 1px 8px; font-size: .68rem; font-weight: 600;
@@ -4971,6 +5320,10 @@ SIDEBAR_CSS = r"""
   aside .deferred-heading small { order: 2; display: inline; margin: 0; font-size: .7rem; }
   aside .session-card { position: relative; }
   aside .session-card > a { padding-right: 40px; }
+  aside .session-card > a.github-item { margin: -3px 40px 7px 10px; padding: 0;
+    border: 0; border-radius: 0; color: #8ab4f8; font-size: .76rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  aside .session-card > a.github-item:hover { color: #b6d7ff; text-decoration: underline; }
   aside .session-card.is-later > a { opacity: .68; }
   aside .session-card.is-later:hover > a, aside .session-card.is-later > a.active { opacity: 1; }
   aside .side-position { position: absolute; top: 12px; right: 7px; z-index: 1;
@@ -5102,6 +5455,133 @@ SIDEBAR_JS = r"""
       document.body.classList.toggle("filter-need", filterNeed.checked);
     });
   }
+  // 実行中・終了済みを含む全会話の本文検索。終了済みの結果はその場でresumeする。
+  const globalSearch = document.getElementById("global-search");
+  const globalSearchInput = document.getElementById("global-search-input");
+  const globalSearchClear = document.getElementById("global-search-clear");
+  const globalSearchStatus = document.getElementById("global-search-status");
+  const globalSearchResults = document.getElementById("global-search-results");
+  let globalSearchController = null;
+  function appendSearchHighlight(parent, text, query) {
+    const foldedText = text.toLocaleLowerCase();
+    const foldedQuery = query.toLocaleLowerCase();
+    const index = foldedText.indexOf(foldedQuery);
+    if (index < 0) { parent.textContent = text; return; }
+    parent.append(document.createTextNode(text.slice(0, index)));
+    const mark = document.createElement("mark");
+    mark.textContent = text.slice(index, index + query.length);
+    parent.append(mark, document.createTextNode(text.slice(index + query.length)));
+  }
+  function hiddenInput(name, value) {
+    const input = document.createElement("input");
+    input.type = "hidden"; input.name = name; input.value = value;
+    return input;
+  }
+  function renderGlobalSearchResults(items, query) {
+    const nodes = [];
+    for (const item of items) {
+      const card = document.createElement("div");
+      card.className = "search-result";
+      let target;
+      if (item.active_session) {
+        target = document.createElement("a");
+        target.href = "/terminal?session=" + encodeURIComponent(item.active_session)
+          + "&search=" + encodeURIComponent(query);
+      } else {
+        target = document.createElement("form");
+        target.method = "post"; target.action = "/launch";
+        target.append(
+          hiddenInput("dir", item.cwd), hiddenInput("tool", item.tool),
+          hiddenInput("resume", item.id), hiddenInput("search", query)
+        );
+        const button = document.createElement("button");
+        button.type = "submit"; target.append(button); target = button;
+        card.append(button.closest("form"));
+      }
+      const title = document.createElement("span");
+      title.className = "search-title";
+      title.textContent = item.summary || "（タイトルなし）";
+      const meta = document.createElement("span");
+      meta.className = "search-meta";
+      const state = item.active_session ? "起動中" : "終了済み・開くと再開";
+      meta.textContent = item.tool + " · " + item.dir + " · " + item.label + " · ";
+      const stateNode = document.createElement("span");
+      stateNode.className = "search-state"; stateNode.textContent = state;
+      meta.append(stateNode);
+      target.append(title, meta);
+      for (const hit of item.hits) {
+        const snippet = document.createElement("span");
+        snippet.className = "search-snippet";
+        snippet.title = hit.role === "user" ? "あなた" : item.tool;
+        appendSearchHighlight(snippet, hit.snippet, query);
+        target.append(snippet);
+      }
+      if (item.active_session) card.append(target);
+      nodes.push(card);
+    }
+    globalSearchResults.replaceChildren(...nodes);
+  }
+  function closeGlobalSearch() {
+    globalSearchController?.abort();
+    globalSearchController = null;
+    const submit = globalSearch?.querySelector('[type="submit"]');
+    if (submit) submit.disabled = false;
+    document.body.classList.remove("global-searching");
+    globalSearchResults.hidden = true;
+    globalSearchResults.replaceChildren();
+    globalSearchStatus.textContent = "";
+    globalSearchClear.hidden = true;
+  }
+  globalSearch?.addEventListener("submit", async event => {
+    event.preventDefault();
+    const query = globalSearchInput.value.trim();
+    if (query.length < 2) {
+      globalSearchStatus.textContent = "2文字以上入力してください";
+      globalSearchInput.focus(); return;
+    }
+    const submit = globalSearch.querySelector('[type="submit"]');
+    globalSearchController?.abort();
+    const controller = new AbortController();
+    globalSearchController = controller;
+    submit.disabled = true;
+    globalSearchClear.hidden = false;
+    globalSearchStatus.textContent = "全会話を検索中…";
+    document.body.classList.add("global-searching");
+    globalSearchResults.hidden = false;
+    globalSearchResults.replaceChildren();
+    try {
+      const response = await fetch(
+        "/api/conversation-search?q=" + encodeURIComponent(query),
+        {signal: controller.signal}
+      );
+      const data = await response.json();
+      if (controller !== globalSearchController) return;
+      if (!response.ok) throw new Error(data.error || "会話を検索できませんでした");
+      renderGlobalSearchResults(data.items || [], query);
+      globalSearchStatus.textContent = data.items.length
+        ? data.items.length + "件のセッション" : "一致する会話はありません";
+    } catch (error) {
+      if (error.name === "AbortError") return;
+      globalSearchStatus.textContent = error.message;
+    } finally {
+      if (controller === globalSearchController) {
+        globalSearchController = null;
+        submit.disabled = false;
+      }
+    }
+  });
+  globalSearchInput?.addEventListener("input", () => {
+    if (!globalSearchInput.value.trim()) closeGlobalSearch();
+  });
+  globalSearchClear?.addEventListener("click", () => {
+    globalSearchInput.value = ""; closeGlobalSearch(); globalSearchInput.focus();
+  });
+  document.addEventListener("keydown", event => {
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f"
+        && (event.shiftKey || session === null)) {
+      event.preventDefault(); globalSearchInput?.focus(); globalSearchInput?.select();
+    }
+  });
   // サイドバーのセッション一覧を定期更新する（状態バッジと最終メッセージ）
   const sideSessions = document.getElementById("side-sessions");
   const positionOrder = {top: 0, normal: 1, later: 2};
@@ -5294,13 +5774,27 @@ SIDEBAR_JS = r"""
           }
           link.append(arts);
         }
+        let githubItemLink = null;
+        if (item.github_item && item.github_item.url) {
+          githubItemLink = document.createElement("a");
+          githubItemLink.className = "github-item";
+          githubItemLink.href = item.github_item.url;
+          githubItemLink.target = "_blank";
+          githubItemLink.rel = "noopener";
+          const kind = item.github_item.kind === "issue" ? "Issue" : "PR";
+          githubItemLink.textContent = kind + " #" + item.github_item.number
+            + (item.github_item.title ? " " + item.github_item.title : "") + " ↗";
+          githubItemLink.title = githubItemLink.textContent.slice(0, -2);
+        }
         const positionButton = document.createElement("button");
         positionButton.type = "button";
         positionButton.className = "side-position" + (position !== "normal" ? " placed" : "");
         positionButton.dataset.position = position;
         positionButton.textContent = positionMeta[position].icon;
         positionButton.title = positionButton.ariaLabel = "並び位置を変更";
-        card.append(link, positionButton);
+        card.append(link);
+        if (githubItemLink) card.append(githubItemLink);
+        card.append(positionButton);
         nodes.push(card);
       }
       sideSessions.replaceChildren(...nodes);
@@ -5468,6 +5962,17 @@ TERMINAL_PAGE = r"""<!doctype html>
     border-bottom: 1px solid #30363d; background: #161b22; flex-shrink: 0; }}
   #artifacts:empty {{ display: none; }}
   #artifacts .art {{ font-size: .78rem; }}
+  #conversation-search {{ flex-shrink: 0; display: flex; align-items: center; gap: 7px;
+    padding: 8px 12px; border-bottom: 1px solid #30363d; background: #161b22; }}
+  #conversation-search[hidden], body.review-open #conversation-search {{ display: none; }}
+  #conversation-search input {{ min-width: 0; flex: 1; padding: 8px 10px;
+    border: 1px solid #484f58; border-radius: 8px; background: #0d1117;
+    color: #e6edf3; font: inherit; font-size: .88rem; }}
+  #conversation-search .search-count {{ flex: 0 0 auto; min-width: 54px;
+    color: #8b949e; font-size: .76rem; text-align: center; }}
+  #conversation-search button {{ flex: 0 0 auto; width: 36px; height: 34px; padding: 0;
+    font-size: .9rem; cursor: pointer; }}
+  #conversation-search button:disabled {{ opacity: .4; cursor: default; }}
   .message.user .bubble {{ cursor: pointer; }}
   .message.user .bubble:hover {{ border-color: #58a6ff; }}
   .bubble .image-card {{ width: fit-content; max-width: 100%; margin: 10px 0;
@@ -5626,6 +6131,9 @@ TERMINAL_PAGE = r"""<!doctype html>
     border: 1px solid #3d444d; border-radius: 18px 18px 5px 18px; background: #21262d; }}
   .message.assistant .bubble {{ padding: 4px 2px; }}
   .message.pending .bubble {{ opacity: .55; }}
+  .bubble mark.search-hit {{ padding: 1px 2px; border-radius: 3px;
+    background: #bb8009; color: #fff; }}
+  .bubble mark.search-hit.current {{ background: #f0883e; outline: 2px solid #f0c36b; }}
   .bubble.collapsed {{ max-height: 320px; overflow: hidden; position: relative; }}
   .bubble.collapsed::after {{ content: ""; position: absolute; inset: auto 0 0 0; height: 72px;
     background: linear-gradient(transparent, #0d1117); pointer-events: none; }}
@@ -5758,9 +6266,17 @@ TERMINAL_PAGE = r"""<!doctype html>
 <header><a id="back-link" href="/">←<span class="label"> 一覧</span></a><div><strong>{tool_html}{model_badge}{context_badge}</strong>
 <small title="{cwd_full}">{cwd}</small></div><div class="actions" id="header-actions">{restart_button}{note_button}</div>
 <button type="button" id="history"><span class="label">ターミナル</span><span class="icon">▤</span></button>
+<button type="button" id="search-toggle" title="会話を検索" aria-label="会話を検索"><span class="label">検索</span><span class="icon">⌕</span></button>
 <button type="button" id="review-toggle" title="デフォルトブランチとの差分"><span class="label">差分</span><span class="icon">±</span></button>
 <button type="button" id="menu-toggle" aria-label="メニュー">☰</button></header>
 <div id="artifacts">{artifacts_html}</div>
+<div id="conversation-search" role="search" hidden>
+  <input type="search" id="conversation-search-input" placeholder="会話内を検索" aria-label="会話内を検索">
+  <span class="search-count" id="conversation-search-count" aria-live="polite"></span>
+  <button type="button" id="conversation-search-prev" title="前の一致" aria-label="前の一致">↑</button>
+  <button type="button" id="conversation-search-next" title="次の一致" aria-label="次の一致">↓</button>
+  <button type="button" id="conversation-search-close" title="検索を閉じる" aria-label="検索を閉じる">×</button>
+</div>
 <div id="chat"><div class="chat-empty">会話を読み込み中...</div></div>
 <pre id="screen" hidden>接続中...</pre>
 <section id="review-pane" aria-label="デフォルトブランチとの差分">
@@ -5822,6 +6338,8 @@ TERMINAL_PAGE = r"""<!doctype html>
 </div></div>
 <script>
   const session = {session_json};
+  const initialConversationSearch = {search_json};
+  let globalSearchLanding = !!initialConversationSearch;
   const bootId = {boot_json};
   let sessionNote = {note_json};
   let sessionPinned = {pinned_json};
@@ -5881,6 +6399,11 @@ TERMINAL_PAGE = r"""<!doctype html>
 {sidebar_js}
   const screen = document.getElementById("screen");
   const chat = document.getElementById("chat");
+  const conversationSearch = document.getElementById("conversation-search");
+  const conversationSearchInput = document.getElementById("conversation-search-input");
+  const conversationSearchCount = document.getElementById("conversation-search-count");
+  const conversationSearchPrev = document.getElementById("conversation-search-prev");
+  const conversationSearchNext = document.getElementById("conversation-search-next");
   const generationStatus = document.getElementById("generation-status");
   const generationDetail = document.getElementById("generation-detail");
   const input = document.getElementById("input");
@@ -6301,6 +6824,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     }} else {{ reviewDiff.textContent = "変更ファイルはありません"; }}
   }}
   function openReview() {{
+    closeConversationSearch();
     document.body.classList.add("review-open");
     document.body.classList.remove("review-closed");
     reviewToggle.querySelector(".label").textContent = "チャット";
@@ -6464,6 +6988,107 @@ TERMINAL_PAGE = r"""<!doctype html>
   // 長文をユーザーが展開したら、再描画後も開いたままにするためのキー集合
   const expandedBubbles = new Set();
   let pendingTimer = null;
+  let conversationSearchMatches = [];
+  let conversationSearchIndex = -1;
+  function clearConversationSearchHighlights() {{
+    for (const mark of chat.querySelectorAll("mark.search-hit")) {{
+      const parent = mark.parentNode;
+      mark.replaceWith(document.createTextNode(mark.textContent));
+      parent?.normalize();
+    }}
+    conversationSearchMatches = [];
+  }}
+  function selectConversationSearchMatch(index, scroll = true) {{
+    conversationSearchMatches.forEach(mark => mark.classList.remove("current"));
+    if (!conversationSearchMatches.length) {{
+      conversationSearchIndex = -1;
+      conversationSearchCount.textContent = conversationSearchInput.value ? "0件" : "";
+      conversationSearchPrev.disabled = conversationSearchNext.disabled = true;
+      return;
+    }}
+    conversationSearchIndex = (index + conversationSearchMatches.length)
+      % conversationSearchMatches.length;
+    const mark = conversationSearchMatches[conversationSearchIndex];
+    mark.classList.add("current");
+    const bubble = mark.closest(".bubble");
+    bubble?.classList.remove("collapsed");
+    const toggle = mark.closest(".message")?.querySelector(".expand-toggle");
+    if (toggle) toggle.textContent = "▴ 折りたたむ";
+    conversationSearchCount.textContent = (conversationSearchIndex + 1)
+      + " / " + conversationSearchMatches.length;
+    conversationSearchPrev.disabled = conversationSearchNext.disabled = false;
+    if (scroll) mark.scrollIntoView({{behavior: "smooth", block: "center"}});
+  }}
+  function updateConversationSearch(reset = true, scroll = true) {{
+    const previous = conversationSearchIndex;
+    clearConversationSearchHighlights();
+    const query = conversationSearchInput.value;
+    if (!query) return selectConversationSearchMatch(-1, false);
+    const escaped = query.replace(/[.*+?^${{}}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(escaped, "giu");
+    for (const bubble of chat.querySelectorAll(".message .bubble")) {{
+      const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT);
+      const nodes = [];
+      while (walker.nextNode()) nodes.push(walker.currentNode);
+      for (const node of nodes) {{
+        if (!node.data || node.parentElement?.closest("button")) continue;
+        const matches = Array.from(node.data.matchAll(pattern));
+        if (!matches.length) continue;
+        const fragment = document.createDocumentFragment();
+        let cursor = 0;
+        for (const match of matches) {{
+          fragment.append(document.createTextNode(node.data.slice(cursor, match.index)));
+          const mark = document.createElement("mark");
+          mark.className = "search-hit"; mark.textContent = match[0]; fragment.append(mark);
+          cursor = match.index + match[0].length;
+        }}
+        fragment.append(document.createTextNode(node.data.slice(cursor)));
+        node.replaceWith(fragment);
+      }}
+    }}
+    conversationSearchMatches = Array.from(chat.querySelectorAll("mark.search-hit"));
+    selectConversationSearchMatch(reset ? 0 : Math.max(0, previous), scroll);
+  }}
+  function openConversationSearch(query = "") {{
+    if (document.body.classList.contains("review-open")) closeReview();
+    showingHistory = true;
+    const historyButton = document.getElementById("history");
+    historyButton.querySelector(".label").textContent = "ターミナル";
+    historyButton.querySelector(".icon").textContent = "▤";
+    screen.hidden = true; chat.hidden = false;
+    conversationSearch.hidden = false;
+    if (query) conversationSearchInput.value = query;
+    conversationSearchInput.focus(); conversationSearchInput.select();
+  }}
+  function closeConversationSearch() {{
+    const reloadLatest = globalSearchLanding;
+    globalSearchLanding = false;
+    conversationSearch.hidden = true;
+    conversationSearchInput.value = "";
+    clearConversationSearchHighlights();
+    conversationSearchCount.textContent = "";
+    if (reloadLatest) {{ lastMessages = ""; loadChat(); }}
+  }}
+  document.getElementById("search-toggle").addEventListener("click", openConversationSearch);
+  document.getElementById("conversation-search-close").addEventListener("click", closeConversationSearch);
+  conversationSearchInput.addEventListener("input", () => updateConversationSearch(true));
+  conversationSearchInput.addEventListener("keydown", event => {{
+    if (event.key === "Enter") {{
+      event.preventDefault();
+      selectConversationSearchMatch(conversationSearchIndex + (event.shiftKey ? -1 : 1));
+    }} else if (event.key === "Escape") {{
+      event.preventDefault(); closeConversationSearch();
+    }}
+  }});
+  conversationSearchPrev.addEventListener("click", () =>
+    selectConversationSearchMatch(conversationSearchIndex - 1));
+  conversationSearchNext.addEventListener("click", () =>
+    selectConversationSearchMatch(conversationSearchIndex + 1));
+  document.addEventListener("keydown", event => {{
+    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "f") {{
+      event.preventDefault(); openConversationSearch();
+    }}
+  }});
   function scrollToLatest() {{
     requestAnimationFrame(() => requestAnimationFrame(() => {{
       screen.scrollTop = screen.scrollHeight;
@@ -6903,9 +7528,12 @@ TERMINAL_PAGE = r"""<!doctype html>
     const savedScrollTop = chat.scrollTop;
     followChat = shouldFollow;
     lastMessages = serialized; hideSelectionQuote(); chat.replaceChildren();
+    conversationSearchMatches = [];
     if (!messages.length && !activity && !question && !auth) {{
       const empty = document.createElement("div"); empty.className = "chat-empty";
-      empty.textContent = "まだ会話はありません"; chat.append(empty); return;
+      empty.textContent = "まだ会話はありません"; chat.append(empty);
+      if (conversationSearchInput.value) selectConversationSearchMatch(-1, false);
+      return;
     }}
     const lastItem = messages[messages.length - 1];
     const collapsible = [];
@@ -7038,6 +7666,9 @@ TERMINAL_PAGE = r"""<!doctype html>
     requestAnimationFrame(() => {{
       chat.scrollTop = shouldFollow ? chat.scrollHeight : savedScrollTop;
       lastChatScrollTop = chat.scrollTop;
+      if (!conversationSearch.hidden && conversationSearchInput.value) {{
+        updateConversationSearch(false);
+      }}
     }});
   }}
   async function answerQuestion(choices) {{
@@ -7051,8 +7682,12 @@ TERMINAL_PAGE = r"""<!doctype html>
     }} catch (error) {{ status.textContent = error.message; }}
   }}
   async function loadChat() {{
+    if (globalSearchLanding && lastMessages) return;
     try {{
-      const response = await fetch("/api/sessions/" + encodeURIComponent(session) + "/transcript");
+      const transcriptUrl = "/api/sessions/" + encodeURIComponent(session) + "/transcript"
+        + (globalSearchLanding
+          ? "?search=" + encodeURIComponent(initialConversationSearch) : "");
+      const response = await fetch(transcriptUrl);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "会話履歴を取得できませんでした");
       serverMessages = data.messages || [];
@@ -7261,6 +7896,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   document.getElementById("history").addEventListener("click", async event => {{
     const historyButton = event.currentTarget;
     if (document.body.classList.contains("review-open")) {{
+      closeConversationSearch();
       document.body.classList.remove("review-open");
       document.body.classList.add("review-closed");
       reviewToggle.querySelector(".label").textContent = "差分";
@@ -7272,6 +7908,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       lastOutput = ""; await refresh(); return;
     }}
     if (showingHistory) {{
+      closeConversationSearch();
       showingHistory = false; historyButton.querySelector(".label").textContent = "チャット";
       historyButton.querySelector(".icon").textContent = "💬";
       chat.hidden = true; screen.hidden = false;
@@ -7402,6 +8039,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     event.preventDefault();
     await uploadFiles(images);
   }});
+  if (initialConversationSearch) openConversationSearch(initialConversationSearch);
   loadChat(); setInterval(() => showingHistory ? loadChat() : refresh(), 1000);
   if (!document.body.classList.contains("readonly")) input.focus();
 </script></body></html>"""
@@ -7761,6 +8399,24 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"html": render_resume_items(language)})
             except (OSError, subprocess.SubprocessError):
                 return self._json({"error": "会話の取得に失敗しました"}, 500)
+        if parsed.path == "/api/conversation-search":
+            query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].strip()
+            if len(query) < 2:
+                return self._json(
+                    {"error": "検索文字列は2文字以上入力してください"}, 400
+                )
+            if len(query) > 200:
+                return self._json({"error": "検索文字列は200文字までです"}, 400)
+            try:
+                return self._json(
+                    {"items": search_conversations(query), "query": query}
+                )
+            except FileNotFoundError:
+                return self._json({"error": "rgコマンドが見つかりません"}, 503)
+            except subprocess.TimeoutExpired:
+                return self._json({"error": "会話の検索がタイムアウトしました"}, 504)
+            except (OSError, RuntimeError) as exc:
+                return self._json({"error": str(exc)}, 500)
         if parsed.path == "/new":
             embedded = urllib.parse.parse_qs(parsed.query).get("embedded") == ["1"]
             return self._page(render(view="new", language=language, embedded=embedded))
@@ -7783,6 +8439,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/terminal":
             terminal_qs = urllib.parse.parse_qs(parsed.query)
             session = terminal_qs.get("session", [""])[0]
+            initial_search = terminal_qs.get("search", [""])[0][:200]
             diff_open = "always" if terminal_qs.get("review") == ["1"] else DIFF_OPEN
             if not valid_session(session):
                 message = translate("セッションが見つかりません", language)
@@ -7821,6 +8478,7 @@ class Handler(BaseHTTPRequestHandler):
                         if value in choices
                     ),
                     session_json=json.dumps(session),
+                    search_json=json.dumps(initial_search),
                     boot_json=json.dumps(BOOT_ID),
                     diff_open_json=json.dumps(diff_open),
                     pr_selector_json=json.dumps(item.get("pull_request", "")),
@@ -7963,6 +8621,7 @@ class Handler(BaseHTTPRequestHandler):
                         "note": entry.get("note", ""),
                         "pinned": bool(entry.get("pinned")),
                         "position": session_position(entry),
+                        "github_item": entry.get("github_item", {}),
                         "artifacts": entry.get("artifacts", []),
                     }
                 )
@@ -8041,11 +8700,24 @@ class Handler(BaseHTTPRequestHandler):
                             }
                         )
                     history_paths = item.get("history_paths") or ()
+                    transcript_query = urllib.parse.parse_qs(parsed.query).get(
+                        "search", [""]
+                    )[0][:200]
+                    messages = (
+                        session_messages_around_matches(
+                            item["log_path"],
+                            item["tool"],
+                            transcript_query,
+                            history_paths,
+                        )
+                        if transcript_query
+                        else session_messages(
+                            item["log_path"], item["tool"], history=history_paths
+                        )
+                    )
                     return self._json(
                         {
-                            "messages": session_messages(
-                                item["log_path"], item["tool"], history=history_paths
-                            ),
+                            "messages": messages,
                             "queued": queued_inputs(item["log_path"]),
                             "question": pending_question(session, item["tool"]),
                             "auth": pending_shell_auth(session, item["tool"]),
@@ -8491,6 +9163,7 @@ class Handler(BaseHTTPRequestHandler):
                 qs.get("pull_request", [""])[0],
                 qs.get("github_kind", [""])[0],
                 qs.get("github_target", [""])[0],
+                qs.get("search", [""])[0],
             )
         self._page(render(language=self._language()), 404)
 
@@ -8610,6 +9283,7 @@ class Handler(BaseHTTPRequestHandler):
             session_position(item),
             restore_model,
             thread_history=item.get("thread_history") or (),
+            github_item=item.get("github_item"),
         )
         forget_registered_session(session)
         upsert_registered_session(
@@ -8661,6 +9335,7 @@ class Handler(BaseHTTPRequestHandler):
             bool(item.get("pinned")),
             item.get("pull_request", ""),
             session_position(item),
+            github_item=item.get("github_item"),
         )
         result = tmux_run("kill-session", "-t", session)
         if result.returncode != 0:
@@ -8694,6 +9369,7 @@ class Handler(BaseHTTPRequestHandler):
         pull_request: str = "",
         github_kind: str = "",
         github_target: str = "",
+        search: str = "",
     ):
         language = self._language()
 
@@ -8753,12 +9429,14 @@ class Handler(BaseHTTPRequestHandler):
                 path = pull_request_worktree(pull_request_target(pull_request))
             except (LookupError, RuntimeError, ValueError) as exc:
                 return launch_page(str(exc))
+        github_item = {}
         if github_target:
             if resume or pull_request:
                 return launch_page("Issue / PR指定は新規の通常起動でのみ使用できます")
             try:
                 target = github_work_item_target(path, github_kind, github_target)
                 path = github_work_item_worktree(target)
+                github_item = github_item_metadata(target)
             except FileNotFoundError:
                 return launch_page("ghまたはgit CLIが見つかりません")
             except subprocess.TimeoutExpired:
@@ -8767,7 +9445,7 @@ class Handler(BaseHTTPRequestHandler):
                 return launch_page(str(exc))
             target_instruction = (
                 "以下の GitHub Issue に対応してください。"
-                if github_kind == "issue"
+                if target["kind"] == "issue"
                 else "以下の GitHub Pull Request に対応してください。"
             )
             target_prompt = (
@@ -8781,6 +9459,7 @@ class Handler(BaseHTTPRequestHandler):
         prompt = prompt.strip()
         if len(prompt) > 8000:
             return launch_page("プロンプトが長すぎます（8000文字まで）")
+        search = search.strip()[:200]
         cmd = [*TOOLS[tool], path]
         if resume:
             cmd += ["--resume", resume] if tool == "claude" else ["resume", resume]
@@ -8813,6 +9492,7 @@ class Handler(BaseHTTPRequestHandler):
                     skip_permissions,
                     pull_request=pull_request,
                     model=model,
+                    github_item=github_item,
                 )
                 session_id = resume
             else:
@@ -8824,6 +9504,7 @@ class Handler(BaseHTTPRequestHandler):
                     skip_permissions,
                     pull_request=pull_request,
                     model=model,
+                    github_item=github_item,
                 )
             if session_name:
                 upsert_registered_session(
@@ -8836,6 +9517,7 @@ class Handler(BaseHTTPRequestHandler):
                         "note": "",
                         "position": "normal",
                         "pull_request": pull_request,
+                        "github_item": github_item,
                         "bypass": skip_permissions,
                         "restore_model": model,
                     }
@@ -8845,6 +9527,7 @@ class Handler(BaseHTTPRequestHandler):
                     "/terminal?session="
                     + urllib.parse.quote(session_name)
                     + ("&review=1" if pull_request else "")
+                    + ("&search=" + urllib.parse.quote(search) if search else "")
                 )
             detail = translate("起動したセッション名を取得できませんでした", language)
         else:
