@@ -475,7 +475,14 @@ def _js_regex_escape(path):
 UPLOAD_PREFIX_ALT_JS = "|".join(_js_regex_escape(p) for p in UPLOAD_PATH_PREFIXES)
 CW_LOCK = threading.Lock()
 SESSION_CACHE_LOCK = threading.Lock()
-SESSION_CACHE = {"expires": 0, "items": [], "loading": False, "loaded": False}
+SESSION_CACHE = {
+    "expires": 0,
+    "items": [],
+    "loading": False,
+    "loaded": False,
+    # invalidate のたびに進める。読み込み中に起動/終了が起きたことを検知する
+    "generation": 0,
+}
 SESSION_CACHE_TTL = 5
 # セッション一覧での手動配置。既存の @launcher_pinned は top として読み替える。
 SESSION_POSITIONS = {"top", "normal", "later"}
@@ -4394,18 +4401,26 @@ def load_managed_sessions(persist=True):
 
 
 def fill_session_cache():
-    try:
-        items = load_managed_sessions()
-    except Exception:
-        # loading を握ったまま死ぬと以降の更新が止まるので必ず戻す。
+    while True:
         with SESSION_CACHE_LOCK:
+            generation = SESSION_CACHE["generation"]
+        try:
+            items = load_managed_sessions()
+        except Exception:
+            # loading を握ったまま死ぬと以降の更新が止まるので必ず戻す。
+            with SESSION_CACHE_LOCK:
+                SESSION_CACHE["loading"] = False
+            raise
+        with SESSION_CACHE_LOCK:
+            if SESSION_CACHE["generation"] != generation:
+                # 読み込み中に起動/終了があった。tmux を見る前の古い一覧を
+                # 確定させると起動直後の /terminal が 404 になるので読み直す。
+                continue
+            SESSION_CACHE["items"] = items
+            SESSION_CACHE["loaded"] = True
+            SESSION_CACHE["expires"] = time.time() + SESSION_CACHE_TTL
             SESSION_CACHE["loading"] = False
-        raise
-    with SESSION_CACHE_LOCK:
-        SESSION_CACHE["items"] = items
-        SESSION_CACHE["loaded"] = True
-        SESSION_CACHE["expires"] = time.time() + SESSION_CACHE_TTL
-        SESSION_CACHE["loading"] = False
+            return
 
 
 def managed_sessions():
@@ -4447,6 +4462,7 @@ def invalidate_session_cache():
     with SESSION_CACHE_LOCK:
         SESSION_CACHE["expires"] = 0
         SESSION_CACHE["loaded"] = False
+        SESSION_CACHE["generation"] += 1
 
 
 def register_live_sessions_for_restore():
