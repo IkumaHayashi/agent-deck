@@ -919,6 +919,30 @@ class FrontendTemplateTest(unittest.TestCase):
 
         self.assertEqual("/Users/demo/project", group)
 
+    def test_dir_label_uses_repository_name_for_worktrees(self):
+        result = SimpleNamespace(
+            returncode=0,
+            stdout="/Users/demo/project/.git\n",
+            stderr="",
+        )
+        with (
+            mock.patch.object(server, "REPO_LABEL_CACHE", {}),
+            mock.patch.object(server.subprocess, "run", return_value=result),
+        ):
+            label = server.dir_label("/Users/demo/worktrees/project-pr-12")
+
+        self.assertEqual("project", label)
+
+    def test_dir_label_falls_back_to_directory_name_outside_git(self):
+        result = SimpleNamespace(returncode=128, stdout="", stderr="not a repository")
+        with (
+            mock.patch.object(server, "REPO_LABEL_CACHE", {}),
+            mock.patch.object(server.subprocess, "run", return_value=result),
+        ):
+            label = server.dir_label("/Users/demo/notes/")
+
+        self.assertEqual("notes", label)
+
     def test_inbox_is_a_prompt_helper(self):
         with (
             mock.patch.object(server, "CW_ENABLED", True),
