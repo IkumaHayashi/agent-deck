@@ -367,6 +367,11 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("/api/conversation-search?q=", server.SIDEBAR_JS)
         self.assertIn('hiddenInput("resume", item.id)', server.SIDEBAR_JS)
         self.assertIn('hiddenInput("search", query)', server.SIDEBAR_JS)
+        self.assertIn(
+            "if (!globalSearchInput.value.trim()) closeGlobalSearch()",
+            server.SIDEBAR_JS,
+        )
+        self.assertIn("globalSearchController?.abort()", server.SIDEBAR_JS)
 
     def test_language_switch_preserves_other_query_parameters(self):
         switch = server.language_switch_html("en")

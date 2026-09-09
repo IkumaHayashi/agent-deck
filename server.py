@@ -5460,6 +5460,7 @@ SIDEBAR_JS = r"""
   const globalSearchClear = document.getElementById("global-search-clear");
   const globalSearchStatus = document.getElementById("global-search-status");
   const globalSearchResults = document.getElementById("global-search-results");
+  let globalSearchController = null;
   function appendSearchHighlight(parent, text, query) {
     const foldedText = text.toLocaleLowerCase();
     const foldedQuery = query.toLocaleLowerCase();
@@ -5520,6 +5521,10 @@ SIDEBAR_JS = r"""
     globalSearchResults.replaceChildren(...nodes);
   }
   function closeGlobalSearch() {
+    globalSearchController?.abort();
+    globalSearchController = null;
+    const submit = globalSearch?.querySelector('[type="submit"]');
+    if (submit) submit.disabled = false;
     document.body.classList.remove("global-searching");
     globalSearchResults.hidden = true;
     globalSearchResults.replaceChildren();
@@ -5534,6 +5539,9 @@ SIDEBAR_JS = r"""
       globalSearchInput.focus(); return;
     }
     const submit = globalSearch.querySelector('[type="submit"]');
+    globalSearchController?.abort();
+    const controller = new AbortController();
+    globalSearchController = controller;
     submit.disabled = true;
     globalSearchClear.hidden = false;
     globalSearchStatus.textContent = "全会話を検索中…";
@@ -5541,17 +5549,28 @@ SIDEBAR_JS = r"""
     globalSearchResults.hidden = false;
     globalSearchResults.replaceChildren();
     try {
-      const response = await fetch("/api/conversation-search?q=" + encodeURIComponent(query));
+      const response = await fetch(
+        "/api/conversation-search?q=" + encodeURIComponent(query),
+        {signal: controller.signal}
+      );
       const data = await response.json();
+      if (controller !== globalSearchController) return;
       if (!response.ok) throw new Error(data.error || "会話を検索できませんでした");
       renderGlobalSearchResults(data.items || [], query);
       globalSearchStatus.textContent = data.items.length
         ? data.items.length + "件のセッション" : "一致する会話はありません";
     } catch (error) {
+      if (error.name === "AbortError") return;
       globalSearchStatus.textContent = error.message;
     } finally {
-      submit.disabled = false;
+      if (controller === globalSearchController) {
+        globalSearchController = null;
+        submit.disabled = false;
+      }
     }
+  });
+  globalSearchInput?.addEventListener("input", () => {
+    if (!globalSearchInput.value.trim()) closeGlobalSearch();
   });
   globalSearchClear?.addEventListener("click", () => {
     globalSearchInput.value = ""; closeGlobalSearch(); globalSearchInput.focus();
