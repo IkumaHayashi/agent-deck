@@ -8170,50 +8170,104 @@ def render_settings(language="ja"):
     )
 
 
-def render_resume_items(language="ja"):
-    """再開タブを開いたときだけログを走査し、会話一覧を描画する。"""
+def highlight_html(text, query):
+    """HTMLエスケープした文字列に、検索語の最初の一致だけ <mark> を付ける。"""
+    if not query:
+        return html.escape(text)
+    index = text.casefold().find(query.casefold())
+    if index < 0:
+        return html.escape(text)
+    end = index + len(query)
+    return (
+        f"{html.escape(text[:index])}<mark>{html.escape(text[index:end])}</mark>"
+        f"{html.escape(text[end:])}"
+    )
+
+
+def render_resume_item(item, language="ja", query=""):
+    """再開一覧の1件を描画する。検索中は一致箇所の抜粋も添える。"""
+    # 削除済みworktreeの会話は、起動時に作り直すことを先に伝える
+    restore_note = (
+        f'<small class="resume-restore">🌱 '
+        f"{translate('worktreeを作り直して再開します', language)}</small>"
+        if item.get("restorable")
+        else ""
+    )
+    snippets = "".join(
+        f'<small class="resume-snippet" title="'
+        f"{html.escape(translate('あなた', language) if hit['role'] == 'user' else item['tool'])}"
+        f'">{highlight_html(hit["snippet"], query)}</small>'
+        for hit in item.get("hits") or ()
+    )
+    meta = f"{html.escape(short_path(item['cwd']))} · {item['tool']} · {item['label']}"
+    active_session = item.get("active_session")
+    if active_session:
+        # 実行中のセッションは二重起動せず、検索語付きでそのセッションを開く
+        href = "/terminal?" + urllib.parse.urlencode(
+            {"session": active_session, "search": query}
+            if query
+            else {"session": active_session}
+        )
+        return (
+            f'<a class="proj resume-active" href="{html.escape(href, quote=True)}"'
+            f' data-resume-id="{html.escape(item["id"])}">'
+            f'<span class="resume-summary">▶️ {html.escape(item["summary"])}</span>'
+            f'<small>{meta} · <span class="resume-state">'
+            f"{translate('起動中', language)}</span></small>"
+            f"{snippets}"
+            f'<small class="resume-id">ID: {html.escape(item["id"])}</small></a>'
+        )
+    search_field = (
+        f'<input type="hidden" name="search" value="{html.escape(query, quote=True)}">'
+        if query
+        else ""
+    )
+    return (
+        f'<form class="launch" method="post" action="/launch" data-resume="1"'
+        f' data-resume-id="{html.escape(item["id"])}">'
+        f'<input type="hidden" name="dir" value="{html.escape(item["cwd"])}">'
+        f'<input type="hidden" name="tool" value="{item["tool"]}">'
+        f'<input type="hidden" name="resume" value="{item["id"]}">'
+        f"{search_field}"
+        f'<button class="proj" type="submit">'
+        f'<span class="resume-summary">🕘 {html.escape(item["summary"])}</span>'
+        f"<small>{meta}</small>"
+        f"{restore_note}"
+        f"{snippets}"
+        f'<small class="resume-id">ID: {html.escape(item["id"])}</small>'
+        f"</button></form>"
+    )
+
+
+def render_resume_items(language="ja", query=""):
+    """再開タブを開いたときだけログを走査し、会話一覧を描画する。
+
+    query があれば直近の会話ではなく、実行中・終了済みを含む全会話を本文で検索した
+    結果を描画する。検索時はすべてのグループを開いた状態にする。
+    """
+    items = search_conversations(query) if query else recent_conversations()
     resume_groups = {}
     group_dirs = {}
-    for item in recent_conversations():
+    for item in items:
         cwd = item["cwd"]
         if cwd not in group_dirs:
             group_dirs[cwd] = resume_group_dir(cwd)
         resume_groups.setdefault(group_dirs[cwd], []).append(item)
     rendered_groups = []
-    for index, (group_dir, items) in enumerate(resume_groups.items()):
-        forms = []
-        for item in items:
-            # 削除済みworktreeの会話は、起動時に作り直すことを先に伝える
-            restore_note = (
-                f'<small class="resume-restore">🌱 '
-                f"{translate('worktreeを作り直して再開します', language)}</small>"
-                if item.get("restorable")
-                else ""
-            )
-            forms.append(
-                f'<form class="launch" method="post" action="/launch" data-resume="1"'
-                f' data-resume-id="{html.escape(item["id"])}">'
-                f'<input type="hidden" name="dir" value="{html.escape(item["cwd"])}">'
-                f'<input type="hidden" name="tool" value="{item["tool"]}">'
-                f'<input type="hidden" name="resume" value="{item["id"]}">'
-                f'<button class="proj" type="submit">'
-                f'<span class="resume-summary">🕘 {html.escape(item["summary"])}</span>'
-                f"<small>{html.escape(short_path(item['cwd']))} · {item['tool']}"
-                f" · {item['label']}</small>"
-                f"{restore_note}"
-                f'<small class="resume-id">ID: {html.escape(item["id"])}</small>'
-                f"</button></form>"
-            )
+    for index, (group_dir, group_items) in enumerate(resume_groups.items()):
+        forms = [render_resume_item(item, language, query) for item in group_items]
+        opened = " open" if query or index == 0 else ""
         rendered_groups.append(
-            f'<details class="resume-group"{" open" if index == 0 else ""}>'
+            f'<details class="resume-group"{opened}>'
             f"<summary>📁 {html.escape(short_path(group_dir))} "
-            f"<small>({item_count(len(items), language)})</small></summary>"
+            f"<small>({item_count(len(group_items), language)})</small></summary>"
             f'<div class="resume-grid">{"".join(forms)}</div></details>'
         )
+    empty = "一致する会話はありません" if query else "再開できる会話が見つかりません"
     return (
         "\n".join(rendered_groups)
-        or f'<div class="cw-empty">{translate("再開できる会話が見つかりません", language)}</div>'
-    )
+        or f'<div class="cw-empty">{translate(empty, language)}</div>'
+    ), len(items)
 
 
 def render(message="", view="new", language="ja", embedded=False):
@@ -8415,8 +8469,22 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
         if parsed.path == "/api/recent-conversations":
+            query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0].strip()
+            if query and len(query) < 2:
+                return self._json(
+                    {"error": "検索文字列は2文字以上入力してください"}, 400
+                )
+            if len(query) > 200:
+                return self._json({"error": "検索文字列は200文字までです"}, 400)
             try:
-                return self._json({"html": render_resume_items(language)})
+                fragment, count = render_resume_items(language, query)
+                return self._json({"html": fragment, "count": count, "query": query})
+            except FileNotFoundError:
+                return self._json({"error": "rgコマンドが見つかりません"}, 503)
+            except subprocess.TimeoutExpired:
+                return self._json({"error": "会話の検索がタイムアウトしました"}, 504)
+            except RuntimeError as exc:
+                return self._json({"error": str(exc)}, 500)
             except (OSError, subprocess.SubprocessError):
                 return self._json({"error": "会話の取得に失敗しました"}, 500)
         if parsed.path == "/api/conversation-search":

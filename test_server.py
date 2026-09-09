@@ -629,6 +629,48 @@ class FrontendTemplateTest(unittest.TestCase):
             {"error": "会話の取得に失敗しました"}, 500
         )
 
+    def test_recent_conversations_api_searches_when_query_is_given(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/api/recent-conversations?lang=en&q=%20%E6%A4%9C%E7%B4%A2%20"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {}
+        handler._json = mock.Mock()
+        with mock.patch.object(
+            server, "render_resume_items", return_value=("<p>hit</p>", 3)
+        ) as render_items:
+            handler.do_GET()
+        render_items.assert_called_once_with("en", "検索")
+        handler._json.assert_called_once_with(
+            {"html": "<p>hit</p>", "count": 3, "query": "検索"}
+        )
+
+    def test_recent_conversations_api_rejects_short_query(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/api/recent-conversations?q=a"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {}
+        handler._json = mock.Mock()
+        with mock.patch.object(server, "render_resume_items") as render_items:
+            handler.do_GET()
+        render_items.assert_not_called()
+        handler._json.assert_called_once_with(
+            {"error": "検索文字列は2文字以上入力してください"}, 400
+        )
+
+    def test_recent_conversations_api_reports_missing_rg(self):
+        handler = object.__new__(server.Handler)
+        handler.path = "/api/recent-conversations?q=%E6%A4%9C%E7%B4%A2"
+        handler.client_address = ("127.0.0.1", 12345)
+        handler.headers = {}
+        handler._json = mock.Mock()
+        with mock.patch.object(
+            server, "search_conversations", side_effect=FileNotFoundError
+        ):
+            handler.do_GET()
+        handler._json.assert_called_once_with(
+            {"error": "rgコマンドが見つかりません"}, 503
+        )
+
     def test_github_preview_cancels_stale_requests_and_clears_old_card(self):
         with open(os.path.join(server.STATIC_DIR, "new.js"), encoding="utf-8") as f:
             script = f.read()
@@ -879,12 +921,90 @@ class FrontendTemplateTest(unittest.TestCase):
                 server, "resume_group_dir", return_value=conversation["cwd"]
             ),
         ):
-            page = server.render_resume_items()
+            page, count = server.render_resume_items()
 
+        self.assertEqual(1, count)
         self.assertIn('id="resume-id-filter"', server.render())
         self.assertIn(f'data-resume-id="{conversation["id"]}"', page)
         self.assertIn(f"ID: {conversation['id']}", page)
         self.assertIn('class="resume-group"', page)
+        self.assertNotIn('name="search"', page)
+
+    def test_resume_conversation_can_be_searched_by_text(self):
+        ended = {
+            "cwd": "/Users/demo/project",
+            "tool": "claude",
+            "id": "019fd08a-e352-7a22-9aa5-0b5d0de94eba",
+            "dir": "project",
+            "summary": "検索対象の会話",
+            "label": "2026/09/09 12:34",
+            "active_session": "",
+            "restorable": False,
+            "hits": [{"role": "user", "snippet": "…前の <b>本文</b> に検索語がある…"}],
+        }
+        active = {
+            "cwd": "/Users/demo/other",
+            "tool": "codex",
+            "id": "119fd08a-e352-7a22-9aa5-0b5d0de94eba",
+            "dir": "other",
+            "summary": "実行中の会話",
+            "label": "2026/09/10 08:00",
+            "active_session": "agent-other-1",
+            "restorable": False,
+            "hits": [{"role": "assistant", "snippet": "検索語を含む返答"}],
+        }
+        with (
+            mock.patch.object(
+                server, "search_conversations", return_value=[ended, active]
+            ) as search,
+            mock.patch.object(server, "recent_conversations") as recent,
+            mock.patch.object(server, "resume_group_dir", side_effect=lambda cwd: cwd),
+        ):
+            page, count = server.render_resume_items("en", "検索語")
+
+        search.assert_called_once_with("検索語")
+        recent.assert_not_called()
+        self.assertEqual(2, count)
+        # 終了済みの会話は検索語付きで resume し、開いた直後に一致箇所へ移動できる
+        self.assertIn(f'name="resume" value="{ended["id"]}"', page)
+        self.assertIn('name="search" value="検索語"', page)
+        self.assertIn(
+            "…前の &lt;b&gt;本文&lt;/b&gt; に<mark>検索語</mark>がある…", page
+        )
+        self.assertIn('title="You"', page)
+        # 実行中の会話は二重起動せず、そのセッションを検索語付きで開く
+        self.assertNotIn(f'name="resume" value="{active["id"]}"', page)
+        self.assertIn(
+            'href="/terminal?session=agent-other-1&amp;search=%E6%A4%9C%E7%B4%A2%E8%AA%9E"',
+            page,
+        )
+        self.assertIn("Active", page)
+        self.assertIn('title="codex"', page)
+        # 検索中は全グループを開いた状態にする
+        self.assertEqual(2, page.count('<details class="resume-group" open>'))
+
+    def test_resume_search_reports_no_matches(self):
+        with (
+            mock.patch.object(server, "search_conversations", return_value=[]),
+            mock.patch.object(server, "recent_conversations") as recent,
+        ):
+            page, count = server.render_resume_items("ja", "見つからない語")
+
+        recent.assert_not_called()
+        self.assertEqual(0, count)
+        self.assertIn("一致する会話はありません", page)
+
+    def test_resume_panel_searches_conversation_text_after_a_pause(self):
+        with open(os.path.join(server.STATIC_DIR, "new.js"), encoding="utf-8") as f:
+            script = f.read()
+
+        self.assertIn(
+            '"/api/recent-conversations?q=" + encodeURIComponent(query)', script
+        )
+        self.assertIn("setTimeout(function () { searchResume(query); }, 350)", script)
+        self.assertIn("resumeSearchController.abort()", script)
+        self.assertIn("restoreRecentResume()", script)
+        self.assertIn("entry.textContent.toLowerCase().includes(query)", script)
 
     def test_removed_worktree_conversation_announces_its_recreation(self):
         conversation = {
@@ -903,7 +1023,7 @@ class FrontendTemplateTest(unittest.TestCase):
                 server, "resume_group_dir", return_value="/Users/demo/project"
             ),
         ):
-            page = server.render_resume_items()
+            page, _ = server.render_resume_items()
 
         self.assertIn("worktreeを作り直して再開します", page)
         self.assertIn(f'value="{conversation["cwd"]}"', page)
