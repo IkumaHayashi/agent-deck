@@ -1340,6 +1340,28 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn('event.key.toLowerCase() === "f"', page)
         self.assertIn("initialConversationSearch", page)
 
+    def test_review_mode_initial_open_does_not_touch_search_state_before_declaration(
+        self,
+    ):
+        # review=1 で開くと body に review-open が付いた状態で openReview() が
+        # 初期化の途中で呼ばれる。let 宣言前の検索用変数に触れると例外で
+        # 初期化が止まり、差分が「読み込み中」のまま固まる。
+        page = server.TERMINAL_PAGE
+
+        initial_open = page.index(
+            'if (document.body.classList.contains("review-open")) openReview();'
+        )
+        search_state = page.index("let conversationSearchMatches = [];")
+        self.assertLess(initial_open, search_state)
+        self.assertIn(
+            "if (!conversationSearch.hidden) closeConversationSearch();", page
+        )
+        open_review = page.index("function openReview() {")
+        self.assertNotIn(
+            "\n    closeConversationSearch();",
+            page[open_review : page.index("function loadDirectoryDiff", open_review)],
+        )
+
     def test_local_markdown_images_have_caption_and_paging(self):
         page = server.TERMINAL_PAGE
 
