@@ -6860,7 +6860,10 @@ TERMINAL_PAGE = r"""<!doctype html>
     }} else {{ reviewDiff.textContent = "変更ファイルはありません"; }}
   }}
   function openReview() {{
-    closeConversationSearch();
+    // review=1 で開いた直後は検索用の変数がまだ宣言前（let の TDZ）なので、
+    // 検索を開いているときだけ閉じる。ここで例外になると以降の初期化が
+    // 止まり、差分の自動読み込みも会話ポーリングも始まらない。
+    if (!conversationSearch.hidden) closeConversationSearch();
     document.body.classList.add("review-open");
     document.body.classList.remove("review-closed");
     reviewToggle.querySelector(".label").textContent = "チャット";
