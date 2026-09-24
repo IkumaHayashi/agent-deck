@@ -3293,6 +3293,27 @@ class ClaudeProjectDirTest(unittest.TestCase):
 
 
 class ClaudeShellCommandTest(unittest.TestCase):
+    def test_pasted_content_tags_are_removed_from_user_message(self):
+        text = (
+            '\n\n<pasted_content id="21ed">\n'
+            "PR がちょうどあるんだけど\n"
+            "<\\pasted_content> は本文\n"
+            '</pasted_content id="21ed">\n'
+        )
+        item = {"type": "user", "message": {"content": text}}
+
+        self.assertEqual(
+            {
+                "role": "user",
+                "text": "PR がちょうどあるんだけど\n<pasted_content> は本文",
+            },
+            server.user_message_entry(item, "claude"),
+        )
+        self.assertEqual(
+            "PR がちょうどあるんだけど <pasted_content> は本文",
+            server.user_summary_text(item, "claude"),
+        )
+
     def test_image_scale_metadata_is_not_shown_as_user_message(self):
         text = (
             "[Image: original 4032x3024, displayed at 2000x1500. "

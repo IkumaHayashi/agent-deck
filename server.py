@@ -461,6 +461,9 @@ UPLOAD_MENTION_RE = re.compile(
     r"(?:" + "|".join(re.escape(p) for p in UPLOAD_PATH_PREFIXES) + r")"
     r"/uploads/[^\s\]]+\]?"
 )
+# Claude Code 2.1.277 以降、貼り付けた本文は会話ログ上でこのタグに包まれる
+# （TUI は表示時に外す）。Web からの送信は bracketed paste なのでほぼ全件が対象。
+PASTED_CONTENT_TAG_RE = re.compile(r'</?pasted_content id="[0-9a-f]{4}">\n?')
 CODEX_FILE_CITATION_RE = re.compile(
     r':codex-file-citation\{path="([^"\r\n]+)"\s+purpose="output"\}'
 )
@@ -951,6 +954,10 @@ def user_message_raw(item, tool):
                 ),
                 "",
             )
+    if tool == "claude" and "pasted_content" in text:
+        text = PASTED_CONTENT_TAG_RE.sub("", text)
+        # 本文中の同名タグは Claude Code が「<\」付きにエスケープしている。
+        text = text.replace("<\\pasted_content", "<pasted_content")
     text = text.strip()
     # Claude Code が画像を読み込むたびに、表示用の縮尺情報を内部 user 発言として
     # 記録する。元画像は直前の発言でカード表示済みなので、チャットには出さない。
