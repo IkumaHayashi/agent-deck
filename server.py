@@ -644,7 +644,8 @@ def models_for_tool(tool, *, cached=False):
         )
         if discovered:
             return [("default", "デフォルト"), *discovered]
-    return DEFAULT_MODELS[tool]
+    # shell セッションなどモデルを持たないツールは選択肢なし。
+    return DEFAULT_MODELS.get(tool, [])
 
 
 # 権限バイパス起動時に渡すフラグ。

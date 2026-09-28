@@ -2444,6 +2444,9 @@ class ShellCommandTest(unittest.TestCase):
         self.assertEqual(os.path.realpath(cwd), launch[launch.index("-c") + 1])
         self.assertIn("npm install\nnpm test", launch[-1])
 
+    def test_shell_session_has_no_model_choices(self):
+        self.assertEqual([], server.models_for_tool("shell"))
+
     def test_reports_tmux_shell_launch_failure(self):
         result = SimpleNamespace(returncode=1, stdout="", stderr="start failed")
         with (
