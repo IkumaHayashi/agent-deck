@@ -420,5 +420,12 @@
   "worktreeを元と同じ場所に作り直せませんでした": "Could not recreate the worktree at its original path",
   "worktreeの作成元リポジトリが見つかりません: ": "The repository this worktree came from is missing: ",
   "worktreeを作り直せませんでした: ": "Could not recreate the worktree: ",
-  "会話の作業ディレクトリを使用できません: worktreeを作り直せませんでした: ": "The conversation's working directory is unavailable: could not recreate the worktree: "
+  "会話の作業ディレクトリを使用できません: worktreeを作り直せませんでした: ": "The conversation's working directory is unavailable: could not recreate the worktree: ",
+  "更新完了・再起動待ち": "Updated · restart required",
+  "Codexの更新が完了しました。再起動すると同じ会話を再開できます。": "Codex has been updated. Restart to resume this conversation.",
+  "更新処理が終了": "Update process ended",
+  "Codexの更新処理が終了しました。ターミナルで結果を確認してください。": "The Codex update process ended. Check the terminal for the result.",
+  "Codexを更新中": "Updating Codex",
+  "Codex本体を更新しています。完了するまでメッセージには応答できません。": "Codex is being updated and cannot respond to messages until it finishes.",
+  "再起動して会話を再開": "Restart and resume conversation"
 }
