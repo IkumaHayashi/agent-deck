@@ -1437,6 +1437,48 @@ def screen_background_label(screen):
     )
 
 
+def codex_update_status(screen, tool):
+    """CLI自身の更新出力を拾う。再起動後の古い更新履歴は無視する。"""
+    if tool != "codex":
+        return None
+    starts = list(re.finditer(r"^Updating Codex via `", screen, re.M))
+    if not starts:
+        return None
+    output = screen[starts[-1].start() :]
+    if re.search(r"^\s*│?\s*>_ OpenAI Codex\b", output, re.M):
+        return None
+    if "Update ran successfully! Please restart Codex." in output:
+        return {
+            "state": "restart",
+            "label": "更新完了・再起動待ち",
+            "message": "Codexの更新が完了しました。再起動すると同じ会話を再開できます。",
+            "detail": "",
+        }
+    if "[セッションが終了しました]" in output:
+        return {
+            "state": "stopped",
+            "label": "更新処理が終了",
+            "message": "Codexの更新処理が終了しました。ターミナルで結果を確認してください。",
+            "detail": "",
+        }
+    progress = [line.strip() for line in output.splitlines() if line.startswith("==>")]
+    return {
+        "state": "updating",
+        "label": "Codexを更新中",
+        "message": "Codex本体を更新しています。完了するまでメッセージには応答できません。",
+        "detail": progress[-1].removeprefix("==> ") if progress else "",
+    }
+
+
+def session_update_status(name, tool):
+    if tool != "codex":
+        return None
+    try:
+        return codex_update_status(capture_session(name), tool)
+    except RuntimeError:
+        return None
+
+
 def session_running(name, tool=None):
     """TUI がまだ処理中かを返す。"""
     try:
@@ -1701,6 +1743,7 @@ def parse_codex_question_screen(screen):
             for i in range(len(lines) - 1, -1, -1)
             if "enter to submit" in lines[i].lower()
             or re.search(r"\benter to select\b", lines[i], re.I)
+            or re.search(r"\benter continue\b.*\besc skip\b", lines[i], re.I)
         ),
         None,
     )
@@ -1735,6 +1778,16 @@ def parse_codex_question_screen(screen):
         )
         if event_index is not None:
             scan_start = event_index + 1
+        update_index = next(
+            (
+                i
+                for i in range(prompt_index - 1, scan_start - 1, -1)
+                if lines[i].strip().startswith("Update available")
+            ),
+            None,
+        )
+        if update_index is not None:
+            scan_start = update_index
     choices = []
     current = None
     first_choice = None
@@ -1987,6 +2040,9 @@ def classify_wait(path, tool):
 
 def sidebar_status(item):
     """サイドバーに出す状態ラベルと css クラスを返す。"""
+    update = item.get("cli_update")
+    if update:
+        return update["label"], "run" if update["state"] == "updating" else "need"
     if item.get("running"):
         text = "考え中"
         if item.get("log_path"):
@@ -4381,6 +4437,7 @@ def load_managed_sessions(persist=True):
                     "bypass": bypass,
                     "ephemeral": ephemeral,
                     "running": running,
+                    "cli_update": codex_update_status(screen, tool or parts[3]),
                     "background": "" if running else screen_background_label(screen),
                     "model": current_model(parts[0], exact, agent),
                     "restore_model": restore_model,
@@ -6195,6 +6252,13 @@ TERMINAL_PAGE = r"""<!doctype html>
   #generation-status::before {{ content: "✻"; flex-shrink: 0;
     animation: activity-pulse 1.3s ease-in-out infinite; }}
   #generation-status strong {{ flex-shrink: 0; font-size: inherit; }}
+  #cli-update {{ flex-shrink: 0; margin: 10px max(16px, 6vw); padding: 12px 14px;
+    border: 1px solid #d29922; border-radius: 10px; background: #d2992212;
+    color: #e6edf3; font-size: .92rem; }}
+  #cli-update[hidden] {{ display: none; }}
+  #cli-update p {{ margin: 6px 0; }}
+  #cli-update-detail {{ color: #8b949e; overflow-wrap: anywhere; }}
+  #cli-update button {{ margin-top: 6px; }}
   #generation-detail {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     color: #8b949e; }}
   @media (prefers-reduced-motion: reduce) {{
@@ -6340,6 +6404,12 @@ TERMINAL_PAGE = r"""<!doctype html>
   </div>
 </section>
 <button type="button" id="selection-quote" hidden>↩ 選択部分を引用</button>
+<div id="cli-update" role="status" aria-live="polite" hidden>
+  <strong id="cli-update-label"></strong>
+  <p id="cli-update-message"></p>
+  <p id="cli-update-detail"></p>
+  <button type="button" id="cli-update-restart" data-restart="keep" hidden>再起動して会話を再開</button>
+</div>
 <div id="generation-status" role="status" aria-live="polite" hidden>
   <strong>回答を生成中</strong><span id="generation-detail"></span>
 </div>
@@ -6450,6 +6520,11 @@ TERMINAL_PAGE = r"""<!doctype html>
   const conversationSearchNext = document.getElementById("conversation-search-next");
   const generationStatus = document.getElementById("generation-status");
   const generationDetail = document.getElementById("generation-detail");
+  const cliUpdate = document.getElementById("cli-update");
+  const cliUpdateLabel = document.getElementById("cli-update-label");
+  const cliUpdateMessage = document.getElementById("cli-update-message");
+  const cliUpdateDetail = document.getElementById("cli-update-detail");
+  const cliUpdateRestart = document.getElementById("cli-update-restart");
   const input = document.getElementById("input");
   const attachmentPreview = document.getElementById("attachment-preview");
   const status = document.getElementById("status");
@@ -7743,6 +7818,13 @@ TERMINAL_PAGE = r"""<!doctype html>
       serverQueued = data.queued || [];
       serverQuestion = data.question || null;
       serverAuth = data.auth || "";
+      const update = data.cli_update;
+      cliUpdate.hidden = !update;
+      cliUpdateLabel.textContent = update?.label || "";
+      cliUpdateMessage.textContent = update?.message || "";
+      cliUpdateDetail.textContent = update?.detail || "";
+      cliUpdateRestart.hidden = update?.state !== "restart"
+        || !document.querySelector('#header-actions [data-restart="keep"]');
       if (modelBadge && data.model && data.model !== modelBadge.textContent) {{
         modelBadge.textContent = data.model;
       }}
@@ -7758,6 +7840,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       }}
       renderArtifacts(data.artifacts || []);
       renderMessages(withPending(serverMessages, serverQueued), serverActivity, serverQuestion, serverAuth);
+      if (update) generationStatus.hidden = true;
       if (Date.now() >= statusMessageUntil) status.textContent = "接続中";
     }} catch (error) {{
       generationStatus.hidden = true;
@@ -8794,6 +8877,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "セッションが見つかりません"}, 404)
             try:
                 if view == "transcript":
+                    cli_update = session_update_status(session, item["tool"])
+                    if cli_update:
+                        cli_update = {
+                            key: translate(value, language)
+                            if key in {"label", "message"}
+                            else value
+                            for key, value in cli_update.items()
+                        }
                     if not item["log_path"]:
                         # 起動直後はJSONLがまだ無いが、MCP承認や信頼確認などの
                         # 起動時ダイアログはこの段階で出る。画面から拾った選択肢
@@ -8801,6 +8892,7 @@ class Handler(BaseHTTPRequestHandler):
                         return self._json(
                             {
                                 "messages": [],
+                                "cli_update": cli_update,
                                 "queued": [],
                                 "question": pending_question(session, item["tool"]),
                                 "auth": pending_shell_auth(session, item["tool"]),
@@ -8833,6 +8925,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(
                         {
                             "messages": messages,
+                            "cli_update": cli_update,
                             "queued": queued_inputs(item["log_path"]),
                             "question": pending_question(session, item["tool"]),
                             "auth": pending_shell_auth(session, item["tool"]),
@@ -9217,6 +9310,10 @@ class Handler(BaseHTTPRequestHandler):
                         or "Enter selections" in screen
                         or "Enter y/n" in screen
                         or "enter to submit" in screen.lower()
+                        or (
+                            "enter continue" in screen.lower()
+                            and parse_codex_question_screen(screen) is not None
+                        )
                     ):
                         tmux_run("send-keys", "-t", session, "Enter")
                 elif action == "key":

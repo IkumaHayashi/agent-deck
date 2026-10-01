@@ -3889,6 +3889,103 @@ class SessionActivityTest(unittest.TestCase):
             self.assertEqual("", server.session_activity("agent-test", "", "codex"))
 
 
+class CodexUpdateTest(unittest.TestCase):
+    UPDATE = "Updating Codex via `sh -c 'installer'`...\n"
+    COMPLETE = "🎉 Update ran successfully! Please restart Codex.\n"
+    PROMPT = """│ >_ OpenAI Codex (v0.156.1) │
+  Resuming session…
+  Update available · 0.156.1 → 0.159.3
+  Release notes: https://github.com/openai/codex/releases/latest
+› 1. Update now (runs `installer`)
+  2. Skip
+  3. Skip until next version
+  enter continue · esc skip
+"""
+
+    def test_reports_latest_installer_progress(self):
+        status = server.codex_update_status(
+            self.PROMPT
+            + self.UPDATE
+            + "==> Resolved version: 0.159.3\n==> Downloading Codex CLI\n",
+            "codex",
+        )
+        self.assertEqual("updating", status["state"])
+        self.assertEqual("Downloading Codex CLI", status["detail"])
+
+    def test_complete_remains_visible_after_exit_and_shell_input(self):
+        status = server.codex_update_status(
+            self.UPDATE
+            + self.COMPLETE
+            + "[セッションが終了しました]\nikuma@mac project % 1\nzsh: command not found: 1\n",
+            "codex",
+        )
+        self.assertEqual("restart", status["state"])
+        self.assertEqual(
+            ("更新完了・再起動待ち", "need"),
+            server.sidebar_status({"cli_update": status}),
+        )
+
+    def test_ended_without_success_does_not_claim_still_updating(self):
+        status = server.codex_update_status(
+            self.UPDATE + "curl: download failed\n[セッションが終了しました]\n", "codex"
+        )
+        self.assertEqual("stopped", status["state"])
+
+    def test_old_update_is_ignored_after_codex_restarts(self):
+        self.assertIsNone(
+            server.codex_update_status(
+                self.UPDATE
+                + self.COMPLETE
+                + "│ >_ OpenAI Codex (v0.159.3) │\n› hello\n",
+                "codex",
+            )
+        )
+
+    def test_update_offer_and_other_agents_are_not_updating(self):
+        self.assertIsNone(server.codex_update_status(self.PROMPT, "codex"))
+        self.assertIsNone(server.codex_update_status(self.UPDATE, "claude"))
+        self.assertIsNone(
+            server.codex_update_status("• Updating Codex via `installer`", "codex")
+        )
+
+    def test_latest_update_attempt_wins(self):
+        status = server.codex_update_status(
+            self.UPDATE + self.COMPLETE + self.UPDATE, "codex"
+        )
+        self.assertEqual("updating", status["state"])
+
+    def test_offer_is_shown_as_question_only_while_waiting(self):
+        question = server.parse_codex_question_screen(self.PROMPT)
+        self.assertTrue(question["question"].startswith("Update available"))
+        self.assertEqual(3, len(question["choices"]))
+        self.assertIsNone(server.parse_codex_question_screen(self.PROMPT + self.UPDATE))
+
+    def test_transcript_exposes_update_with_and_without_conversation_log(self):
+        for path in ("", "/tmp/codex-update-test.jsonl"):
+            with self.subTest(path=path):
+                handler = object.__new__(server.Handler)
+                handler.client_address = ("127.0.0.1", 12345)
+                handler.headers = {}
+                handler.path = "/api/sessions/agent-test/transcript?lang=en"
+                item = {"name": "agent-test", "tool": "codex", "log_path": path}
+                with (
+                    mock.patch.object(server, "managed_sessions", return_value=[item]),
+                    mock.patch.object(
+                        server,
+                        "capture_session",
+                        return_value=self.UPDATE + self.COMPLETE,
+                    ),
+                    mock.patch.object(server, "pending_question", return_value=None),
+                    mock.patch.object(server, "pending_shell_auth", return_value=""),
+                    mock.patch.object(server, "session_activity", return_value=""),
+                    mock.patch.object(handler, "_json") as response,
+                ):
+                    handler.do_GET()
+                update = response.call_args.args[0]["cli_update"]
+                self.assertEqual("restart", update["state"])
+                self.assertEqual("Updated · restart required", update["label"])
+
+
 class ScreenRunningTest(unittest.TestCase):
     def test_codex_ignores_spinner_before_completed_short_response(self):
         screen = "\n".join(
