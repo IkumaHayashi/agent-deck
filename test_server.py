@@ -274,6 +274,20 @@ class CodexModelsTest(unittest.TestCase):
             models,
         )
 
+    def test_codex_models_are_switchable_after_launch(self):
+        with (
+            mock.patch.object(server, "CONFIG", {"models": {}}),
+            mock.patch.object(
+                server,
+                "available_codex_models",
+                return_value=[("gpt-6-astra", "6 Astra")],
+            ),
+        ):
+            choices = server.switchable_models("codex")
+
+        self.assertEqual(["gpt-6-astra"], choices)
+        self.assertEqual([], server.switchable_models("shell"))
+
 
 class SessionCacheTest(unittest.TestCase):
     """起動/終了直後に古いセッション一覧を確定させない。"""
