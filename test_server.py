@@ -2459,6 +2459,52 @@ class ShellCommandTest(unittest.TestCase):
 
 
 class SessionArtifactTest(unittest.TestCase):
+    def test_codex_exec_ignores_examples_in_strings_and_comments(self):
+        source = """
+          const example = 'tools.exec_command({cmd:"gh pr create"})';
+          // tools.exec_command({cmd:"gh pr create"});
+          /* tools.exec_command({cmd:"gh pr create"}); */
+          await tools.exec_command({cmd:"gh pr list"});
+        """
+        self.assertEqual(["gh pr list"], list(server._codex_exec_commands(source)))
+
+    def test_codex_exec_handles_argument_order_and_json_output(self):
+        url = "https://github.com/example/repo/pull/42"
+        for source in (
+            'text(await tools.exec_command({workdir:"/tmp/repo", cmd:"gh pr create --body-file /tmp/body"}));',
+            "text(await tools.exec_command({env:{note:'{example}'}, workdir:'/tmp/repo', cmd:'gh pr create --body-file /tmp/body'}));",
+        ):
+            with self.subTest(source=source):
+                state = {"kinds": [], "items": {}}
+                server._artifact_scan_codex(
+                    state,
+                    json.dumps(
+                        {
+                            "payload": {
+                                "type": "custom_tool_call",
+                                "name": "exec",
+                                "input": source,
+                            }
+                        }
+                    ).encode(),
+                )
+                output = "Script completed\nOutput:\n" + json.dumps(
+                    {"output": url + "\n", "exit_code": 0}
+                )
+                server._artifact_scan_codex(
+                    state,
+                    json.dumps(
+                        {
+                            "payload": {
+                                "type": "custom_tool_call_output",
+                                "output": [{"type": "text", "text": output}],
+                            }
+                        }
+                    ).encode(),
+                )
+                self.assertEqual("pr", state["items"][url]["kind"])
+                self.assertEqual([], state["kinds"])
+
     def test_codex_exec_creates_pr_from_custom_tool_result(self):
         state = {"kinds": [], "items": {}}
         source = 'const result = await tools.exec_command({cmd:"gh pr create --body-file /tmp/pr-body.txt"}); text(result.output);'

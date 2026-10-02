@@ -9,6 +9,7 @@
 設定ファイルが無くてもすべて既定値で動く。
 """
 
+import ast
 import base64
 import binascii
 import collections
@@ -2441,10 +2442,19 @@ def _codex_command(arguments):
     return command if isinstance(command, str) else ""
 
 
-def _codex_output_texts(value, skip_keys=("command", "arguments", "cmd")):
+def _codex_output_texts(value, skip_keys=("command", "arguments", "cmd", "input")):
     """payload内の出力系文字列を集める。コマンドのエコーはURL誤検出源なので除く。"""
     if isinstance(value, str):
         yield value
+        # functions.execのtext(result)は実行結果をJSON文字列として包む。
+        # 前後に実行時間の案内が付くこともあるので、行単位で展開する。
+        for line in value.splitlines():
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(parsed, (dict, list)):
+                yield from _codex_output_texts(parsed, skip_keys)
     elif isinstance(value, dict):
         for key, item in value.items():
             if key not in skip_keys:
@@ -2455,15 +2465,42 @@ def _codex_output_texts(value, skip_keys=("command", "arguments", "cmd")):
 
 
 def _codex_exec_commands(source):
-    """functions.exec内でexec_commandへ渡すJSON文字列のコマンドを拾う。"""
-    for match in re.finditer(
-        r'\btools\.exec_command\s*\(\s*\{\s*cmd\s*:\s*("(?:\\.|[^"\\])*")',
-        source,
-    ):
-        try:
-            yield json.loads(match[1])
-        except ValueError:
+    """functions.execの引数オブジェクトから文字列リテラルのcmdを拾う。"""
+    string = r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`"""
+    quoted = re.compile(string)
+    command = re.compile(r"""(?:cmd|"cmd"|'cmd')\s*:\s*(""" + string + ")")
+    tokens = re.compile(
+        r"//[^\n]*|/\*[\s\S]*?\*/|" + string + r"|\btools\.exec_command\s*\(\s*\{"
+    )
+    for call in tokens.finditer(source):
+        if not call[0].startswith("tools.exec_command"):
             continue
+        pos, depth = call.end(), 1
+        while pos < len(source) and depth:
+            match = command.match(source, pos) if depth == 1 else None
+            if match and (pos == call.end() or not source[pos - 1].isalnum()):
+                literal = match[1]
+                try:
+                    if literal.startswith("`"):
+                        if "${" not in literal:
+                            yield ast.literal_eval(
+                                '"' + literal[1:-1].replace('"', '\\"') + '"'
+                            )
+                    else:
+                        yield ast.literal_eval(literal)
+                except (ValueError, SyntaxError):
+                    pass
+                pos = match.end()
+                continue
+            match = quoted.match(source, pos)
+            if match:
+                pos = match.end()
+                continue
+            if source[pos] in "{[":
+                depth += 1
+            elif source[pos] in "}]":
+                depth -= 1
+            pos += 1
 
 
 def _artifact_scan_codex(state, line):
