@@ -3936,6 +3936,69 @@ to toggle, Enter to submit or Escape to cancel:
             [choice["label"] for choice in result["choices"]],
         )
 
+    QUOTED_QUESTION = """\
+tool: Bash (確認コマンド)
+Allowed by auto mode classifier
+ ☐ 再ビルド
+> backend 側の再ビルド入力をどうしますか？
+> 設定を外すとイメージに残るファイルは
+> 1つだけですが、コードはこのファイルを
+> 参照していません。環境変数から参照している
+> 可能性は未確認です。残す場合は
+> PR 本文に理由を記録します。
+1. 残す (Recommended) — 要件どおり
+入力を残す。
+2. 外す — 入力を削除する。
+3. Other
+4. Chat about this
+Select with numbers [1-4]. Then Enter to submit or Escape to cancel:
+"""
+    FULL_QUESTION = (
+        "backend 側の再ビルド入力をどうしますか？ "
+        "設定を外すとイメージに残るファイルは "
+        "1つだけですが、コードはこのファイルを "
+        "参照していません。環境変数から参照している "
+        "可能性は未確認です。残す場合は PR 本文に理由を記録します。"
+    )
+
+    def test_preserves_entire_quoted_question_without_terminal_markers(self):
+        result = server.parse_question_screen(self.QUOTED_QUESTION)
+        self.assertEqual(self.FULL_QUESTION, result["question"])
+        self.assertEqual(
+            ["残す (Recommended)", "外す", "Other", "Chat about this"],
+            [choice["label"] for choice in result["choices"]],
+        )
+        self.assertEqual("要件どおり 入力を残す。", result["choices"][0]["description"])
+
+    def test_preserves_quoted_question_in_other_input(self):
+        screen = self.QUOTED_QUESTION.replace(
+            "Select with numbers [1-4]. Then Enter to submit or Escape to cancel:",
+            "Enter text for option 3 (Other), or Escape for the list:",
+        )
+        result = server.parse_question_screen(screen)
+        self.assertTrue(result["custom"])
+        self.assertEqual(self.FULL_QUESTION, result["question"])
+
+    def test_preserves_long_unquoted_question_below_header(self):
+        screen = self.QUOTED_QUESTION.replace(
+            "☐ 再ビルド", "←   ☐ 再ビルド   ✔ Submit   →"
+        ).replace("> ", "")
+        self.assertEqual(
+            self.FULL_QUESTION, server.parse_question_screen(screen)["question"]
+        )
+
+    def test_only_removes_quote_prefix_and_preserves_comparison_operator(self):
+        screen = self.QUOTED_QUESTION.replace(
+            "> PR 本文に理由を記録します。",
+            ">\n> 件数 > 0 のときも残しますか？",
+        )
+        self.assertEqual(
+            self.FULL_QUESTION.replace(
+                "PR 本文に理由を記録します。", "件数 > 0 のときも残しますか？"
+            ),
+            server.parse_question_screen(screen)["question"],
+        )
+
     def test_parses_other_custom_answer_prompt(self):
         screen = """\
 ←   ☐ 自動化範囲   ☐ 起票先   ✔ Submit   →
