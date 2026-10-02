@@ -2469,6 +2469,15 @@ gh pr create --body-file /tmp/body`,
         commands = list(server._codex_exec_commands(source))
         self.assertEqual(["cd /tmp/repo\ngh pr create --body-file /tmp/body"], commands)
         self.assertEqual(["pr"], server.GH_CREATE_RE.findall(commands[0]))
+        continued = (
+            "await tools.exec_command({cmd:`gh pr create "
+            + "\\"
+            + "\n  --body-file /tmp/body`});"
+        )
+        self.assertEqual(
+            ["gh pr create   --body-file /tmp/body"],
+            list(server._codex_exec_commands(continued)),
+        )
         self.assertEqual(
             ["gh pr create --title '日本語'"],
             list(

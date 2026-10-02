@@ -2467,11 +2467,12 @@ def _codex_output_texts(value, skip_keys=("command", "arguments", "cmd", "input"
 def _codex_exec_commands(source):
     """functions.execの引数オブジェクトから文字列リテラルのcmdを拾う。"""
     string = r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`"""
-    quoted = re.compile(string)
+    quoted = re.compile(string, re.DOTALL)
     comment = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/")
-    command = re.compile(r"""(?:cmd|"cmd"|'cmd')\s*:\s*(""" + string + ")")
+    command = re.compile(r"""(?:cmd|"cmd"|'cmd')\s*:\s*(""" + string + ")", re.DOTALL)
     tokens = re.compile(
-        r"//[^\n]*|/\*[\s\S]*?\*/|" + string + r"|\btools\.exec_command\s*\(\s*\{"
+        r"//[^\n]*|/\*[\s\S]*?\*/|" + string + r"|\btools\.exec_command\s*\(\s*\{",
+        re.DOTALL,
     )
     for call in tokens.finditer(source):
         if not call[0].startswith("tools.exec_command"):
