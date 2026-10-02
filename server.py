@@ -6225,6 +6225,14 @@ TERMINAL_PAGE = r"""<!doctype html>
   #screen {{ flex: 1; min-height: 0; margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap;
     overflow-wrap: anywhere; font: 18px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }}
   #chat {{ flex: 1; min-height: 0; overflow-y: auto; padding: 22px max(16px, 6vw); }}
+  #chat-navigation {{ position: relative; flex: 0 0 0; }}
+  #chat[hidden] ~ #chat-navigation, body.review-open #chat-navigation {{ display: none; }}
+  #jump-latest {{ position: absolute; right: 16px; bottom: 12px; min-height: 44px;
+    padding: 10px 16px; border: 1px solid #484f58; border-radius: 999px;
+    background: #21262d; color: #e6edf3; font: inherit; font-size: .85rem;
+    box-shadow: 0 3px 12px #0006; cursor: pointer; }}
+  #jump-latest:hover {{ border-color: #58a6ff; background: #30363d; }}
+  #jump-latest:focus-visible {{ outline: 2px solid #58a6ff; outline-offset: 2px; }}
   .message {{ max-width: 860px; margin: 0 auto 22px; }}
   .message.user {{ display: flex; flex-direction: column; align-items: flex-end; }}
   .bubble {{ overflow-wrap: anywhere; line-height: 1.65; }}
@@ -6387,6 +6395,9 @@ TERMINAL_PAGE = r"""<!doctype html>
 </div>
 <div id="chat"><div class="chat-empty">会話を読み込み中...</div></div>
 <pre id="screen" hidden>接続中...</pre>
+<div id="chat-navigation">
+  <button type="button" id="jump-latest" aria-controls="chat" hidden>↓ 最新メッセージに移動</button>
+</div>
 <section id="review-pane" aria-label="デフォルトブランチとの差分">
   <div class="review-head">
     <div class="review-title-row"><strong id="review-title">変更差分</strong>
@@ -6513,6 +6524,7 @@ TERMINAL_PAGE = r"""<!doctype html>
 {sidebar_js}
   const screen = document.getElementById("screen");
   const chat = document.getElementById("chat");
+  const jumpLatest = document.getElementById("jump-latest");
   const conversationSearch = document.getElementById("conversation-search");
   const conversationSearchInput = document.getElementById("conversation-search-input");
   const conversationSearchCount = document.getElementById("conversation-search-count");
@@ -7217,6 +7229,20 @@ TERMINAL_PAGE = r"""<!doctype html>
       followOutput = true;
     }}));
   }}
+  function updateJumpLatest() {{
+    const distanceFromBottom = chat.scrollHeight - chat.scrollTop - chat.clientHeight;
+    jumpLatest.hidden = !globalSearchLanding && distanceFromBottom < 30;
+  }}
+  jumpLatest.addEventListener("click", () => {{
+    followChat = true;
+    closeConversationSearch();
+    chat.scrollTop = chat.scrollHeight;
+    lastChatScrollTop = chat.scrollTop;
+    updateJumpLatest();
+  }});
+  new ResizeObserver(updateJumpLatest).observe(chat);
+  chat.addEventListener("load", updateJumpLatest, true);
+  chat.addEventListener("click", () => requestAnimationFrame(updateJumpLatest));
   screen.addEventListener("scroll", () => {{
     const distanceFromBottom = screen.scrollHeight - screen.scrollTop - screen.clientHeight;
     followOutput = distanceFromBottom < 80;
@@ -7228,6 +7254,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     if (current < lastChatScrollTop - 2) followChat = false;
     else if (distanceFromBottom < 30) followChat = true;
     lastChatScrollTop = current;
+    updateJumpLatest();
   }});
   function appendInlineMarkdown(target, text) {{
     // 素の URL は RFC 3986 の ASCII 文字だけで止める。直後に続く全角の
@@ -7655,6 +7682,7 @@ TERMINAL_PAGE = r"""<!doctype html>
       const empty = document.createElement("div"); empty.className = "chat-empty";
       empty.textContent = "まだ会話はありません"; chat.append(empty);
       if (conversationSearchInput.value) selectConversationSearchMatch(-1, false);
+      updateJumpLatest();
       return;
     }}
     const lastItem = messages[messages.length - 1];
@@ -7788,6 +7816,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     requestAnimationFrame(() => {{
       chat.scrollTop = shouldFollow ? chat.scrollHeight : savedScrollTop;
       lastChatScrollTop = chat.scrollTop;
+      updateJumpLatest();
       if (!conversationSearch.hidden && conversationSearchInput.value) {{
         updateConversationSearch(false);
       }}
