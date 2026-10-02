@@ -2454,6 +2454,18 @@ def _codex_output_texts(value, skip_keys=("command", "arguments", "cmd")):
             yield from _codex_output_texts(item)
 
 
+def _codex_exec_commands(source):
+    """functions.exec内でexec_commandへ渡すJSON文字列のコマンドを拾う。"""
+    for match in re.finditer(
+        r'\btools\.exec_command\s*\(\s*\{\s*cmd\s*:\s*("(?:\\.|[^"\\])*")',
+        source,
+    ):
+        try:
+            yield json.loads(match[1])
+        except ValueError:
+            continue
+
+
 def _artifact_scan_codex(state, line):
     """codexログ1行を見て gh pr/issue create の実行と後続出力のURLを拾う。
 
@@ -2473,7 +2485,14 @@ def _artifact_scan_codex(state, line):
     if kind_type == "function_call":
         command = _codex_command(payload.get("arguments") or "")
         state["kinds"] += GH_CREATE_RE.findall(command)
-    elif kind_type in ("function_call_output", "exec_command_end") and state["kinds"]:
+    elif kind_type == "custom_tool_call" and payload.get("name") == "exec":
+        for command in _codex_exec_commands(payload.get("input") or ""):
+            state["kinds"] += GH_CREATE_RE.findall(command)
+    elif (
+        kind_type
+        in ("function_call_output", "custom_tool_call_output", "exec_command_end")
+        and state["kinds"]
+    ):
         for text in _codex_output_texts(payload):
             for match in _standalone_urls(text):
                 if _artifact_add(state, match, state["kinds"]):
@@ -2882,10 +2901,20 @@ def set_pr_file_viewed(item, path, viewed, expected_head, expected_base, expecte
         )
     mutation = "markFileAsViewed" if viewed else "unmarkFileAsViewed"
     input_type = "MarkFileAsViewedInput" if viewed else "UnmarkFileAsViewedInput"
-    query = f"mutation($input: {input_type}!) {{ {mutation}(input: $input) {{ pullRequest {{ id }} }} }}"
-    github_graphql(
+    query = f"mutation($input: {input_type}!) {{ {mutation}(input: $input) {{ pullRequest {{ id headRefOid }} }} }}"
+    result = github_graphql(
         query, {"input": {"pullRequestId": pr["id"], "path": path}}, item["cwd"]
     )
+    if result[mutation]["pullRequest"]["headRefOid"] != expected_head:
+        # GitHubのViewed mutationにはHEADを指定する条件がないため、
+        # 検査中のpushを応答でも検出し、新しい内容を確認済みにしないよう解除する。
+        if viewed:
+            github_graphql(
+                "mutation($input: UnmarkFileAsViewedInput!) { unmarkFileAsViewed(input: $input) { pullRequest { id } } }",
+                {"input": {"pullRequestId": pr["id"], "path": path}},
+                item["cwd"],
+            )
+        raise ValueError("操作中にPRが更新されました。差分を再読み込みしてください")
     return {
         "ok": True,
         "path": path,
@@ -8283,6 +8312,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     finally {{ headerLinksLoading = false; }}
   }}
   refreshHeaderLinks();
+  setInterval(() => refreshHeaderLinks(), 60000);
   const modelBadge = document.querySelector("header .model");
   const ctxBadge = document.getElementById("ctx");
   const modelModal = document.getElementById("model-modal");

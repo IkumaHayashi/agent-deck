@@ -2459,6 +2459,41 @@ class ShellCommandTest(unittest.TestCase):
 
 
 class SessionArtifactTest(unittest.TestCase):
+    def test_codex_exec_creates_pr_from_custom_tool_result(self):
+        state = {"kinds": [], "items": {}}
+        source = 'const result = await tools.exec_command({cmd:"gh pr create --body-file /tmp/pr-body.txt"}); text(result.output);'
+        server._artifact_scan_codex(
+            state,
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "input": source,
+                    }
+                }
+            ).encode(),
+        )
+        url = "https://github.com/example/repo/pull/42"
+        server._artifact_scan_codex(
+            state,
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "output": [
+                            {
+                                "type": "text",
+                                "text": "Script completed\nOutput:\n" + url + "\n",
+                            }
+                        ],
+                    }
+                }
+            ).encode(),
+        )
+        self.assertEqual("pr", state["items"][url]["kind"])
+        self.assertEqual([], state["kinds"])
+
     def test_create_command_with_environment_variable_is_detected(self):
         command = "cd /tmp/repo && SKIP_REVIEW_GATE=1 gh pr create --base develop"
 
@@ -2544,7 +2579,17 @@ class GitHubReviewSyncTest(unittest.TestCase):
     def test_mark_and_unmark_use_authenticated_mutation(self):
         with (
             mock.patch.object(server, "github_pr_connection", return_value=self.pr),
-            mock.patch.object(server, "github_graphql", return_value={}) as graphql,
+            mock.patch.object(
+                server,
+                "github_graphql",
+                side_effect=lambda query, variables, cwd: {
+                    "unmarkFileAsViewed"
+                    if "unmarkFileAsViewed(" in query
+                    else "markFileAsViewed": {
+                        "pullRequest": {"id": "PR_42", "headRefOid": self.head}
+                    }
+                },
+            ) as graphql,
         ):
             for viewed, mutation in (
                 (True, "markFileAsViewed"),
@@ -2561,6 +2606,29 @@ class GitHubReviewSyncTest(unittest.TestCase):
                 self.assertEqual(
                     "VIEWED" if viewed else "UNVIEWED", result["viewerViewedState"]
                 )
+
+    def test_push_during_viewed_mutation_unmarks_the_new_revision(self):
+        with (
+            mock.patch.object(server, "github_pr_connection", return_value=self.pr),
+            mock.patch.object(
+                server,
+                "github_graphql",
+                side_effect=[
+                    {
+                        "markFileAsViewed": {
+                            "pullRequest": {"id": "PR_42", "headRefOid": "new-head"}
+                        }
+                    },
+                    {"unmarkFileAsViewed": {"pullRequest": {"id": "PR_42"}}},
+                ],
+            ) as graphql,
+        ):
+            with self.assertRaisesRegex(ValueError, "操作中にPRが更新"):
+                server.set_pr_file_viewed(
+                    self.item, "a.txt", True, self.head, self.base, self.PR_URL
+                )
+            self.assertEqual(2, graphql.call_count)
+            self.assertIn("unmarkFileAsViewed(input:", graphql.call_args.args[0])
 
     def test_stale_review_dirty_file_and_unknown_path_never_mutate(self):
         with (
