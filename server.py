@@ -2226,10 +2226,10 @@ def short_path(path):
 
 
 def switchable_models(tool):
-    """起動後に切り替えられるモデル。Codex の /model は引数を取らないので対象外。"""
-    if tool != "claude":
+    """起動後に切り替えられるモデル。どちらも --model 付きの resume 再起動で切り替える。"""
+    if tool not in ("claude", "codex"):
         return []
-    return [value for value, _ in models_for_tool("claude") if value != "default"]
+    return [value for value, _ in models_for_tool(tool) if value != "default"]
 
 
 def model_label(model, tool):
