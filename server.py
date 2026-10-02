@@ -2547,10 +2547,12 @@ def _art_class(item):
 
 
 def artifact_links(items):
-    """ターミナルヘッダー下に出すPR/issueリンク。"""
+    """ターミナルヘッダー下に出す種別付きリンク。Issueは関連PR経由だけ渡す。"""
     return "".join(
         f'<a class="{_art_class(item)}" target="_blank" rel="noopener" '
-        f'href="{html.escape(item["url"])}">{html.escape(item["repo"])}#{item["number"]}</a>'
+        f'href="{html.escape(item["url"])}">'
+        f"{'PR' if item['kind'] == 'pr' else 'Issue'} "
+        f"{html.escape(item['repo'])}#{item['number']}</a>"
         for item in items
     )
 
@@ -2603,6 +2605,292 @@ def normalize_pr_selector(value):
     if not match:
         raise ValueError("PR番号またはGitHubのPR URLを入力してください")
     return value.rstrip("/") if value.startswith("https://") else match.group(1)
+
+
+def github_graphql(query, variables, cwd):
+    """認証済みghのユーザーとしてGraphQLを実行する。変数は標準入力で渡す。"""
+    result = subprocess.run(
+        [GH_BIN, "api", "graphql", "--input", "-"],
+        input=json.dumps({"query": query, "variables": variables}),
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "GitHubから取得できませんでした")
+    payload = json.loads(result.stdout)
+    if payload.get("errors"):
+        raise RuntimeError("GitHub: " + payload["errors"][0]["message"])
+    return payload["data"]
+
+
+def github_pr_connection(selector, cwd, connection):
+    """PRの変更ファイルまたはDevelopmentの関連Issueを全ページ取得する。"""
+    fields = {
+        "files": "path viewerViewedState",
+        "closingIssuesReferences": "number url title state repository { nameWithOwner }",
+    }
+    node_fields = fields[connection]
+    selector = normalize_pr_selector(selector)
+    match = GITHUB_PR_URL_RE.fullmatch(selector)
+    if not match:
+        result = subprocess.run(
+            [GH_BIN, "pr", "view", selector, "--json", "url"],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        if result.returncode != 0:
+            raise LookupError(result.stderr.strip() or "PRが見つかりません")
+        match = GITHUB_PR_URL_RE.fullmatch(json.loads(result.stdout)["url"])
+    if not match:
+        raise ValueError("GitHubのPR URLを入力してください")
+    owner, name = match.group("repo").split("/")
+    query = """
+        query($owner: String!, $name: String!, $number: Int!, $after: String) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $number) {
+              id url number title state baseRefName baseRefOid headRefOid
+              CONNECTION(first: 100, after: $after) {
+                nodes { FIELDS }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+    """.replace("CONNECTION", connection).replace("FIELDS", node_fields)
+    variables = {"owner": owner, "name": name, "number": int(match.group("number"))}
+    nodes = []
+    revision = None
+    while True:
+        data = github_graphql(query, variables, cwd)
+        pr = (data.get("repository") or {}).get("pullRequest")
+        if not pr:
+            raise LookupError("PRが見つかりません")
+        current_revision = (pr["baseRefOid"], pr["headRefOid"])
+        if revision and revision != current_revision:
+            raise RuntimeError("取得中にPRが更新されました。再読み込みしてください")
+        revision = current_revision
+        page = pr[connection]
+        nodes.extend(page["nodes"])
+        if not page["pageInfo"]["hasNextPage"]:
+            pr[connection] = nodes
+            return pr
+        cursor = page["pageInfo"]["endCursor"]
+        if not cursor or cursor == variables.get("after"):
+            raise RuntimeError("GitHubの続きを取得できませんでした")
+        variables["after"] = cursor
+
+
+def session_pr_selector(item):
+    """レビュー対象、起動対象、作成した最新PRの順で差分に対応するPRを選ぶ。"""
+    if item.get("pull_request"):
+        return item["pull_request"]
+    target = item.get("github_item") or {}
+    if target.get("kind") == "pull":
+        return target["url"]
+    return next(
+        (
+            art["url"]
+            for art in reversed(item.get("artifacts", []))
+            if art["kind"] == "pr"
+        ),
+        "",
+    )
+
+
+def session_pr_artifacts(item):
+    """上部に表示するPRをURLで重複排除する。単独Issueは含めない。"""
+    items = {
+        art["url"]: art for art in item.get("artifacts", []) if art["kind"] == "pr"
+    }
+    target = item.get("github_item") or {}
+    selectors = [item.get("pull_request", "")]
+    if target.get("kind") == "pull":
+        selectors.append(target["url"])
+    for selector in selectors:
+        match = GITHUB_PR_URL_RE.fullmatch(selector)
+        if match:
+            url = selector.rstrip("/")
+            items.setdefault(
+                url,
+                {
+                    "kind": "pr",
+                    "repo": match.group("repo").split("/")[-1],
+                    "number": int(match.group("number")),
+                    "url": url,
+                },
+            )
+    return list(items.values())
+
+
+PR_LINK_CACHE = {}
+PR_LINK_LOCK = threading.Lock()
+PR_LINK_TTL = 60
+
+
+def session_pr_links(item):
+    """PRと、Developmentで手動/自動リンクされたIssueだけを返す。"""
+    prs = session_pr_artifacts(item)
+    selector = item.get("pull_request", "")
+    if selector and not GITHUB_PR_URL_RE.fullmatch(selector):
+        pr = github_pr_connection(selector, item["cwd"], "closingIssuesReferences")
+        prs.append(
+            {
+                "kind": "pr",
+                "repo": pr["url"].split("/")[4],
+                "number": pr["number"],
+                "url": pr["url"],
+            }
+        )
+    links = {}
+    for art in prs:
+        url = art["url"]
+        with PR_LINK_LOCK:
+            cached = PR_LINK_CACHE.get(url)
+        try:
+            if not cached or time.monotonic() - cached["checked"] >= PR_LINK_TTL:
+                pr = github_pr_connection(url, item["cwd"], "closingIssuesReferences")
+                fetched = [dict(art, state=pr["state"].lower(), title=pr["title"])]
+                fetched.extend(
+                    {
+                        "kind": "issue",
+                        "repo": issue["repository"]["nameWithOwner"],
+                        "number": issue["number"],
+                        "url": issue["url"],
+                        "title": issue["title"],
+                        "state": issue["state"].lower(),
+                    }
+                    for issue in pr["closingIssuesReferences"]
+                )
+                cached = {"checked": time.monotonic(), "items": fetched}
+                with PR_LINK_LOCK:
+                    PR_LINK_CACHE[url] = cached
+            for link in cached["items"]:
+                links.setdefault(link["url"], link)
+        except (
+            OSError,
+            ValueError,
+            RuntimeError,
+            LookupError,
+            subprocess.SubprocessError,
+        ):
+            # GitHubへの接続失敗時も既知のリンクは残す。次回のポーリングで再試行。
+            for link in cached["items"] if cached else [art]:
+                links.setdefault(link["url"], link)
+    return list(links.values())
+
+
+def pr_viewed_files(cwd, diff, pr):
+    """PRと比較元・HEAD・ファイル内容が一致する場合だけViewed操作を許可する。"""
+    git = find_bin("git")
+    head = subprocess.run(
+        [git, "rev-parse", "HEAD"], cwd=cwd, capture_output=True, text=True, timeout=5
+    )
+    base = subprocess.run(
+        [git, "merge-base", pr["baseRefOid"], pr["headRefOid"]],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    reason = ""
+    if head.returncode != 0 or head.stdout.strip() != pr["headRefOid"]:
+        reason = "ローカルのHEADがPRの最新コミットと異なります"
+    elif base.returncode != 0 or base.stdout.strip() != diff["mergeBaseOid"]:
+        reason = "比較元がGitHubのPRと異なります。ブランチを更新してください"
+    dirty = subprocess.run(
+        [
+            git,
+            "diff",
+            "--no-ext-diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            pr["headRefOid"],
+            "--",
+        ],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if dirty.returncode != 0:
+        reason = reason or "ローカルの変更を確認できませんでした"
+    dirty_paths = set(dirty.stdout.split("\0"))
+    states = {file["path"]: file["viewerViewedState"] for file in pr["files"]}
+    for file in diff["files"]:
+        path = file["path"]
+        file_reason = reason
+        if path not in states:
+            file_reason = "GitHubのPRに含まれていないファイルです"
+        elif path in dirty_paths:
+            file_reason = file_reason or "このファイルにはローカルの変更があります"
+        file.update(
+            viewerViewedState=states.get(path),
+            viewedSyncEnabled=not file_reason,
+            viewedReason=file_reason,
+        )
+    return diff
+
+
+def session_directory_diff(item):
+    selector = session_pr_selector(item)
+    if not selector:
+        return directory_diff(item["cwd"])
+    try:
+        pr = github_pr_connection(selector, item["cwd"], "files")
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        LookupError,
+        subprocess.SubprocessError,
+    ) as exc:
+        # Viewedの取得失敗でローカル差分の閲覧まで止めない。比較元を明示する。
+        diff = directory_diff(item["cwd"])
+        diff["viewedError"] = (
+            f"GitHubのPR情報を取得できませんでした。デフォルトブランチとの比較を表示しています: {exc}"
+        )
+        return diff
+    diff = directory_diff(item["cwd"], pr["baseRefName"])
+    diff["pullRequest"] = {"url": pr["url"], "headRefOid": pr["headRefOid"]}
+    try:
+        return pr_viewed_files(item["cwd"], diff, pr)
+    except (OSError, subprocess.SubprocessError) as exc:
+        diff["viewedError"] = f"Viewedの同期状態を確認できませんでした: {exc}"
+        return diff
+
+
+def set_pr_file_viewed(item, path, viewed, expected_head, expected_base, expected_url):
+    selector = session_pr_selector(item)
+    if not selector:
+        raise ValueError("セッションにPRが紐づいていません")
+    pr = github_pr_connection(selector, item["cwd"], "files")
+    if pr["url"] != expected_url or pr["headRefOid"] != expected_head:
+        raise ValueError("PRが更新されました。差分を再読み込みしてください")
+    diff = directory_diff(item["cwd"], pr["baseRefName"])
+    if diff["mergeBaseOid"] != expected_base:
+        raise ValueError("比較元が更新されました。差分を再読み込みしてください")
+    pr_viewed_files(item["cwd"], diff, pr)
+    file = next((file for file in diff["files"] if file["path"] == path), None)
+    if not file or not file["viewedSyncEnabled"]:
+        raise ValueError(
+            file["viewedReason"] if file else "PRの変更ファイルではありません"
+        )
+    mutation = "markFileAsViewed" if viewed else "unmarkFileAsViewed"
+    input_type = "MarkFileAsViewedInput" if viewed else "UnmarkFileAsViewedInput"
+    query = f"mutation($input: {input_type}!) {{ {mutation}(input: $input) {{ pullRequest {{ id }} }} }}"
+    github_graphql(
+        query, {"input": {"pullRequestId": pr["id"], "path": path}}, item["cwd"]
+    )
+    return {
+        "ok": True,
+        "path": path,
+        "viewerViewedState": "VIEWED" if viewed else "UNVIEWED",
+    }
 
 
 def _verified_git_ref(git, cwd, ref):
@@ -2829,6 +3117,7 @@ def directory_diff(cwd, base_branch=""):
     return {
         "baseRefName": branch,
         "headRefName": head,
+        "mergeBaseOid": merge_base.stdout.strip(),
         "files": files,
         "patch": diff.stdout,
     }
@@ -6127,7 +6416,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   #review-pane {{ flex: 1; min-height: 0; display: none;
     flex-direction: column; background: #0d1117; }}
   body.review-open #review-pane {{ display: flex; }}
-  body.review-open #chat, body.review-open #screen, body.review-open #artifacts {{ display: none; }}
+  body.review-open #chat, body.review-open #screen {{ display: none; }}
   .review-head {{ flex-shrink: 0; padding: 10px 12px; border-bottom: 1px solid #30363d;
     background: #161b22; }}
   .review-title-row {{ display: flex; align-items: center; gap: 8px; }}
@@ -6145,6 +6434,14 @@ TERMINAL_PAGE = r"""<!doctype html>
     background: #161b22; font: .78rem ui-monospace, SFMono-Regular, Menlo, monospace; }}
   .review-dir:hover, .review-file:hover {{ background: #21262d; }}
   .review-file.active {{ background: #1f6feb22; color: #fff; }}
+  .review-file-row {{ display: flex; align-items: center; }}
+  .review-file-row .review-file {{ flex: 1; min-width: 0; }}
+  .review-file.viewed .path {{ color: #8b949e; }}
+  .review-viewed {{ flex: 0 0 auto; display: flex; align-items: center; gap: 4px;
+    padding: 4px 10px 4px 4px; font-size: .75rem; cursor: pointer; color: #8b949e; }}
+  .review-viewed input {{ width: auto; margin: 0; accent-color: #3fb950; }}
+  #review-sync-message {{ color: #e3b341; font-size: .76rem; padding-top: 4px; }}
+  #review-sync-message[hidden] {{ display: none; }}
   .review-dir .chevron {{ flex: 0 0 auto; width: 12px; color: #8b949e;
     transition: transform .1s; }}
   .review-dir.collapsed .chevron {{ transform: rotate(-90deg); }}
@@ -6405,6 +6702,8 @@ TERMINAL_PAGE = r"""<!doctype html>
       <button type="button" id="review-close" title="チャットに戻る">×</button>
     </div>
     <div class="review-meta" id="review-meta">デフォルトブランチと比較します</div>
+    <div class="review-meta" id="review-progress" hidden></div>
+    <div id="review-sync-message" role="status" hidden></div>
   </div>
   <div id="review-content">
     <div id="review-message">差分を読み込み中...</div>
@@ -6560,6 +6859,49 @@ TERMINAL_PAGE = r"""<!doctype html>
   reviewMeta.textContent = reviewBaseLabel + "と比較します";
   reviewToggle.title = reviewDiffLabel;
   let reviewData = null;
+  let reviewLoadGeneration = 0;
+  let activeReviewPath = "";
+  const reviewProgress = document.getElementById("review-progress");
+  const reviewSyncMessage = document.getElementById("review-sync-message");
+  function updateViewedProgress() {{
+    const files = (reviewData?.files || []).filter(file => file.viewerViewedState);
+    reviewProgress.hidden = !reviewData?.pullRequest;
+    reviewProgress.textContent = "GitHub Viewed · "
+      + files.filter(file => file.viewerViewedState === "VIEWED").length + " / " + files.length;
+  }}
+  function showViewedMessage(message) {{
+    reviewSyncMessage.textContent = message || "";
+    reviewSyncMessage.hidden = !message;
+  }}
+  function viewedSyncReason(data) {{
+    const reasons = [...new Set((data.files || []).map(file => file.viewedReason).filter(Boolean))];
+    return data.viewedError || reasons.join(" · ");
+  }}
+  async function changeViewed(file, checkbox, button) {{
+    const data = reviewData;
+    const viewed = checkbox.checked;
+    checkbox.disabled = true;
+    showViewedMessage(viewedSyncReason(data));
+    try {{
+      const response = await fetch("/api/sessions/" + encodeURIComponent(session) + "/viewed", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/x-www-form-urlencoded", "X-Agent-Deck-Request": "viewed"}},
+        signal: AbortSignal.timeout(55000),
+        body: new URLSearchParams({{path: file.path, viewed: viewed ? "1" : "0",
+          head: data.pullRequest.headRefOid, base: data.mergeBaseOid, pr: data.pullRequest.url}})
+      }});
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Viewedを更新できませんでした");
+      if (reviewData !== data) return;
+      file.viewerViewedState = result.viewerViewedState;
+      button.classList.toggle("viewed", result.viewerViewedState === "VIEWED");
+      updateViewedProgress();
+    }} catch (error) {{
+      if (reviewData !== data) return;
+      checkbox.checked = file.viewerViewedState === "VIEWED";
+      showViewedMessage(error.message + " · ↻で最新状態を取得できます");
+    }} finally {{ checkbox.disabled = !file.viewedSyncEnabled; }}
+  }}
   let reviewManuallyOpened = false;
   const selectedDiffLines = new Map();
   let lastSelectedLine = null;
@@ -6929,7 +7271,21 @@ TERMINAL_PAGE = r"""<!doctype html>
       button.append(fileStatusBadge(file.status), path, adds, dels);
       button.addEventListener("click", () => selectFile(file, button));
       buttons.set(file.path, button);
-      container.append(button);
+      const row = document.createElement("div"); row.className = "review-file-row";
+      row.append(button);
+      if (reviewData.pullRequest) {{
+        const label = document.createElement("label"); label.className = "review-viewed";
+        const checkbox = document.createElement("input"); checkbox.type = "checkbox";
+        checkbox.checked = file.viewerViewedState === "VIEWED";
+        checkbox.disabled = !file.viewedSyncEnabled;
+        checkbox.setAttribute("aria-label", file.path + " Viewed");
+        label.title = file.viewedReason || reviewData.viewedError || "GitHubのViewedと同期";
+        label.append(checkbox, document.createTextNode("Viewed"));
+        checkbox.addEventListener("change", () => changeViewed(file, checkbox, button));
+        button.classList.toggle("viewed", checkbox.checked);
+        row.append(label);
+      }}
+      container.append(row);
     }}
   }}
   function renderDirectoryDiff(data) {{
@@ -6938,20 +7294,22 @@ TERMINAL_PAGE = r"""<!doctype html>
     reviewMeta.textContent = data.baseRefName + " ← " + data.headRefName + " · "
       + (data.files || []).length + " files";
     reviewMessage.hidden = true; reviewFiles.hidden = false; reviewDiff.hidden = false;
+    updateViewedProgress();
+    showViewedMessage(viewedSyncReason(data));
     const patches = splitPatch(data.patch);
     const files = data.files || [];
     const selectFile = (file, button) => {{
       reviewFiles.querySelectorAll(".review-file").forEach(item => item.classList.remove("active"));
       button.classList.add("active");
+      activeReviewPath = file.path;
       renderDiffFile(file, patches.get(file.path) || []);
     }};
     const buttons = new Map();
     reviewFiles.replaceChildren();
     renderFileTree(buildFileTree(files), 0, reviewFiles, buttons, selectFile);
     if (files.length) {{
-      const first = buttons.get(files[0].path);
-      if (first) first.classList.add("active");
-      renderDiffFile(files[0], patches.get(files[0].path) || []);
+      const active = files.find(file => file.path === activeReviewPath) || files[0];
+      selectFile(active, buttons.get(active.path));
     }} else {{ reviewDiff.textContent = "変更ファイルはありません"; }}
   }}
   function openReview() {{
@@ -6966,23 +7324,27 @@ TERMINAL_PAGE = r"""<!doctype html>
     reviewToggle.title = "チャットに戻る";
   }}
   async function loadDirectoryDiff(userInitiated = false) {{
+    const generation = ++reviewLoadGeneration;
     clearDiffSelection();
     reviewMessage.hidden = false; reviewMessage.textContent = "差分を読み込み中...";
     reviewFiles.hidden = true; reviewDiff.hidden = true;
     reviewTitle.textContent = "変更差分";
+    reviewProgress.hidden = true; showViewedMessage("");
     try {{
       // サーバ側のGit呼び出しを超えて待ち続けないよう
       // クライアント側でも打ち切り、↻で再試行できるようにする
       const response = await fetch(
         "/api/sessions/" + encodeURIComponent(session) + "/diff",
-        {{signal: AbortSignal.timeout(55000)}});
+        {{signal: AbortSignal.timeout(90000)}});
       const data = await response.json();
+      if (generation !== reviewLoadGeneration) return;
       if (!response.ok) throw new Error(data.error || "差分を取得できませんでした");
       renderDirectoryDiff(data);
       seedReviewContext();
       if (userInitiated) openReview();
       else if (reviewOpenMode !== "never") openReview();
     }} catch (error) {{
+      if (generation !== reviewLoadGeneration) return;
       reviewMeta.textContent = reviewBaseLabel + "と比較します";
       reviewMessage.textContent = error.name === "TimeoutError"
         ? "差分の取得がタイムアウトしました。↻で再試行してください"
@@ -7012,7 +7374,7 @@ TERMINAL_PAGE = r"""<!doctype html>
     if (opening) {{
       reviewManuallyOpened = true;
       openReview();
-      if (!reviewData) loadDirectoryDiff(true);
+      loadDirectoryDiff(true);
     }} else closeReview();
   }});
   if (document.body.classList.contains("review-open")) openReview();
@@ -7867,7 +8229,7 @@ TERMINAL_PAGE = r"""<!doctype html>
           ctxBadge.classList.toggle("ctx-high", data.context >= 90);
         }}
       }}
-      renderArtifacts(data.artifacts || []);
+      refreshHeaderLinks(data.artifacts || []);
       renderMessages(withPending(serverMessages, serverQueued), serverActivity, serverQuestion, serverAuth);
       if (update) generationStatus.hidden = true;
       if (Date.now() >= statusMessageUntil) status.textContent = "接続中";
@@ -7897,10 +8259,30 @@ TERMINAL_PAGE = r"""<!doctype html>
       link.target = "_blank";
       link.rel = "noopener";
       link.className = "art art-" + item.kind + (item.state ? " art-" + item.state : "");
-      link.textContent = item.repo + "#" + item.number;
+      link.textContent = (item.kind === "pr" ? "PR " : "Issue ") + item.repo + "#" + item.number;
+      link.title = item.title || "";
       return link;
     }}));
   }}
+  let headerLinksKey = "";
+  let headerLinksChecked = 0;
+  let headerLinksLoading = false;
+  async function refreshHeaderLinks(artifacts = []) {{
+    const key = JSON.stringify(artifacts.filter(item => item.kind === "pr"));
+    if (headerLinksLoading || (key === headerLinksKey && Date.now() - headerLinksChecked < 60000)) return;
+    headerLinksLoading = true;
+    try {{
+      const response = await fetch("/api/sessions/" + encodeURIComponent(session) + "/links",
+        {{signal: AbortSignal.timeout(55000)}});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error);
+      renderArtifacts(data.items || []);
+      headerLinksKey = key;
+      headerLinksChecked = Date.now();
+    }} catch {{ /* 接続失敗時も表示済みリンクを残す */ }}
+    finally {{ headerLinksLoading = false; }}
+  }}
+  refreshHeaderLinks();
   const modelBadge = document.querySelector("header .model");
   const ctxBadge = document.getElementById("ctx");
   const modelModal = document.getElementById("model-modal");
@@ -8708,7 +9090,7 @@ class Handler(BaseHTTPRequestHandler):
                     search_json=json.dumps(initial_search),
                     boot_json=json.dumps(BOOT_ID),
                     diff_open_json=json.dumps(diff_open),
-                    pr_selector_json=json.dumps(item.get("pull_request", "")),
+                    pr_selector_json=json.dumps(session_pr_selector(item)),
                     upload_prefix_alt=UPLOAD_PREFIX_ALT_JS,
                     note_json=json.dumps(item.get("note", "")),
                     pinned_json=json.dumps(bool(item.get("pinned"))),
@@ -8762,7 +9144,7 @@ class Handler(BaseHTTPRequestHandler):
                         if diff_open != "always"
                         else ' class="review-open"'
                     ),
-                    artifacts_html=artifact_links(item.get("artifacts", [])),
+                    artifacts_html=artifact_links(session_pr_artifacts(item)),
                 )
             )
         if parsed.path == "/api/usage":
@@ -8853,6 +9235,30 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 )
             return self._json({"items": items, "boot": BOOT_ID})
+        links_match = re.fullmatch(
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/links", parsed.path
+        )
+        if links_match:
+            item = next(
+                (
+                    entry
+                    for entry in managed_sessions()
+                    if entry["name"] == links_match[1]
+                ),
+                None,
+            )
+            if not item:
+                return self._json({"error": "セッションが見つかりません"}, 404)
+            try:
+                return self._json({"items": session_pr_links(item)})
+            except (
+                ValueError,
+                LookupError,
+                RuntimeError,
+                OSError,
+                subprocess.SubprocessError,
+            ) as exc:
+                return self._json({"error": str(exc)}, 502)
         diff_match = re.fullmatch(
             r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/diff", parsed.path
         )
@@ -8867,11 +9273,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "セッションが見つかりません"}, 404)
             started = time.monotonic()
             try:
-                base_branch = ""
-                pull_request = item.get("pull_request", "")
-                if pull_request:
-                    base_branch = pull_request_target(pull_request)["baseRefName"]
-                return self._json(directory_diff(cwd, base_branch))
+                return self._json(session_directory_diff(item))
             except ValueError as exc:
                 return self._json({"error": str(exc)}, 400)
             except LookupError as exc:
@@ -9104,6 +9506,42 @@ class Handler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(body.decode("utf-8"))
         except UnicodeDecodeError:
             return self._json({"error": "送信データを読み取れませんでした"}, 400)
+        viewed_match = re.fullmatch(
+            r"/api/sessions/(agent-[A-Za-z0-9_.-]+)/viewed", self.path
+        )
+        if viewed_match:
+            if self.headers.get("X-Agent-Deck-Request") != "viewed":
+                return self._json({"error": "差分画面から操作してください"}, 403)
+            item = next(
+                (
+                    entry
+                    for entry in managed_sessions()
+                    if entry["name"] == viewed_match[1]
+                ),
+                None,
+            )
+            if not item:
+                return self._json({"error": "セッションが見つかりません"}, 404)
+            viewed = qs.get("viewed", [""])[0]
+            if viewed not in {"0", "1"}:
+                return self._json({"error": "Viewedの指定が不正です"}, 400)
+            try:
+                return self._json(
+                    set_pr_file_viewed(
+                        item,
+                        qs.get("path", [""])[0],
+                        viewed == "1",
+                        qs.get("head", [""])[0],
+                        qs.get("base", [""])[0],
+                        qs.get("pr", [""])[0],
+                    )
+                )
+            except ValueError as exc:
+                return self._json({"error": str(exc)}, 409)
+            except LookupError as exc:
+                return self._json({"error": str(exc)}, 404)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                return self._json({"error": str(exc)}, 502)
         if self.path == "/api/settings":
             if self.headers.get("X-Agent-Deck-Request") != "settings":
                 return self._json({"error": "設定画面から操作してください"}, 403)

@@ -2470,6 +2470,197 @@ class SessionArtifactTest(unittest.TestCase):
         self.assertEqual([], server.GH_CREATE_RE.findall(command))
 
 
+class GitHubReviewSyncTest(unittest.TestCase):
+    PR_URL = "https://github.com/example/repo/pull/42"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.cwd = self.temp.name
+        self.git("init", "-b", "main")
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "user.name", "test")
+        for path in ("a.txt", "b.txt", "gone.txt"):
+            self.write(path, "before\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "比較元を作成")
+        self.base = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-b", "feature/review")
+        self.write("a.txt", "after\n")
+        self.write("b.txt", "after\n")
+        self.git("mv", "gone.txt", "renamed.txt")
+        self.git("add", ".")
+        self.git("commit", "-m", "変更を作成")
+        self.head = self.git("rev-parse", "HEAD")
+        self.pr = {
+            "id": "PR_42",
+            "url": self.PR_URL,
+            "number": 42,
+            "title": "PRタイトル",
+            "state": "OPEN",
+            "baseRefName": "main",
+            "baseRefOid": self.base,
+            "headRefOid": self.head,
+            "files": [
+                {"path": path, "viewerViewedState": "UNVIEWED"}
+                for path in ("a.txt", "b.txt", "renamed.txt")
+            ],
+        }
+        self.item = {"cwd": self.cwd, "pull_request": self.PR_URL}
+
+    def git(self, *args):
+        result = server.subprocess.run(
+            ["git", *args], cwd=self.cwd, capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+
+    def write(self, path, content):
+        with open(os.path.join(self.cwd, path), "w") as fh:
+            fh.write(content)
+
+    def test_matching_files_and_rename_can_sync_but_dirty_file_cannot(self):
+        self.write("a.txt", "local change\n")
+        diff = server.directory_diff(self.cwd, "main")
+        server.pr_viewed_files(self.cwd, diff, self.pr)
+        files = {file["path"]: file for file in diff["files"]}
+        self.assertFalse(files["a.txt"]["viewedSyncEnabled"])
+        self.assertIn("ローカルの変更", files["a.txt"]["viewedReason"])
+        self.assertTrue(files["b.txt"]["viewedSyncEnabled"])
+        self.assertTrue(files["renamed.txt"]["viewedSyncEnabled"])
+
+    def test_different_head_or_comparison_base_disables_sync(self):
+        for field in ("headRefOid", "baseRefOid"):
+            with self.subTest(field=field):
+                pr = dict(
+                    self.pr,
+                    **{field: self.base if field == "headRefOid" else self.head},
+                )
+                diff = server.directory_diff(self.cwd, "main")
+                server.pr_viewed_files(self.cwd, diff, pr)
+                self.assertTrue(
+                    all(not file["viewedSyncEnabled"] for file in diff["files"])
+                )
+
+    def test_mark_and_unmark_use_authenticated_mutation(self):
+        with (
+            mock.patch.object(server, "github_pr_connection", return_value=self.pr),
+            mock.patch.object(server, "github_graphql", return_value={}) as graphql,
+        ):
+            for viewed, mutation in (
+                (True, "markFileAsViewed"),
+                (False, "unmarkFileAsViewed"),
+            ):
+                result = server.set_pr_file_viewed(
+                    self.item, "a.txt", viewed, self.head, self.base, self.PR_URL
+                )
+                self.assertIn(mutation + "(input:", graphql.call_args.args[0])
+                self.assertEqual(
+                    {"input": {"pullRequestId": "PR_42", "path": "a.txt"}},
+                    graphql.call_args.args[1],
+                )
+                self.assertEqual(
+                    "VIEWED" if viewed else "UNVIEWED", result["viewerViewedState"]
+                )
+
+    def test_stale_review_dirty_file_and_unknown_path_never_mutate(self):
+        with (
+            mock.patch.object(server, "github_pr_connection", return_value=self.pr),
+            mock.patch.object(server, "github_graphql") as graphql,
+        ):
+            for path, head, base, url in (
+                ("a.txt", self.base, self.base, self.PR_URL),
+                ("a.txt", self.head, self.head, self.PR_URL),
+                ("a.txt", self.head, self.base, self.PR_URL.replace("42", "43")),
+                ("../outside.txt", self.head, self.base, self.PR_URL),
+            ):
+                with (
+                    self.subTest(path=path, head=head, base=base, url=url),
+                    self.assertRaises(ValueError),
+                ):
+                    server.set_pr_file_viewed(self.item, path, True, head, base, url)
+            self.write("a.txt", "ローカル変更\n")
+            with self.assertRaisesRegex(ValueError, "ローカルの変更"):
+                server.set_pr_file_viewed(
+                    self.item, "a.txt", True, self.head, self.base, self.PR_URL
+                )
+            graphql.assert_not_called()
+
+    def test_connection_paginates_and_keeps_viewed_and_outdated_states(self):
+        pages = []
+        for index, state in enumerate(("VIEWED", "UNVIEWED", "DISMISSED")):
+            pages.append(
+                {
+                    "repository": {
+                        "pullRequest": dict(
+                            self.pr,
+                            files={
+                                "nodes": [
+                                    {"path": str(index), "viewerViewedState": state}
+                                ],
+                                "pageInfo": {
+                                    "hasNextPage": index < 2,
+                                    "endCursor": str(index),
+                                },
+                            },
+                        )
+                    }
+                }
+            )
+        with mock.patch.object(server, "github_graphql", side_effect=pages) as graphql:
+            pr = server.github_pr_connection(self.PR_URL, self.cwd, "files")
+            self.assertEqual(3, len(pr["files"]))
+            self.assertEqual("VIEWED", pr["files"][0]["viewerViewedState"])
+            self.assertEqual("1", graphql.call_args.args[1]["after"])
+
+    def test_header_excludes_standalone_issue_and_includes_linked_issues(self):
+        issue = {
+            "number": 9,
+            "url": "https://github.com/other/project/issues/9",
+            "title": "関連Issue",
+            "state": "OPEN",
+            "repository": {"nameWithOwner": "other/project"},
+        }
+        item = dict(
+            self.item,
+            artifacts=[
+                {"kind": "pr", "repo": "repo", "number": 42, "url": self.PR_URL},
+                {
+                    "kind": "issue",
+                    "repo": "repo",
+                    "number": 99,
+                    "url": "https://github.com/example/repo/issues/99",
+                },
+            ],
+        )
+        with (
+            mock.patch.object(server, "PR_LINK_CACHE", {}),
+            mock.patch.object(
+                server,
+                "github_pr_connection",
+                return_value=dict(self.pr, closingIssuesReferences=[issue]),
+            ) as fetch,
+        ):
+            links = server.session_pr_links(item)
+            self.assertEqual(["pr", "issue"], [link["kind"] for link in links])
+            self.assertEqual([42, 9], [link["number"] for link in links])
+            html = server.artifact_links(links)
+            self.assertIn("PR repo#42", html)
+            self.assertIn("Issue other/project#9", html)
+            self.assertNotIn("#99", html)
+            self.assertEqual(links, server.session_pr_links(item))
+            fetch.assert_called_once()
+            self.assertEqual("closingIssuesReferences", fetch.call_args.args[2])
+
+    def test_github_failure_still_returns_local_diff(self):
+        with mock.patch.object(
+            server, "github_pr_connection", side_effect=RuntimeError("接続失敗")
+        ):
+            diff = server.session_directory_diff(self.item)
+        self.assertEqual(3, len(diff["files"]))
+        self.assertIn("接続失敗", diff["viewedError"])
+        self.assertNotIn("pullRequest", diff)
+
+
 class DirectoryDiffTest(unittest.TestCase):
     def test_normalizes_number_and_github_url(self):
         self.assertEqual("123", server.normalize_pr_selector("123"))
@@ -2588,15 +2779,24 @@ class DirectoryDiffTest(unittest.TestCase):
             mock.patch.object(server, "managed_sessions", return_value=[item]),
             mock.patch.object(
                 server,
-                "pull_request_target",
-                return_value={"baseRefName": "feature/stack-base"},
+                "github_pr_connection",
+                return_value={
+                    "baseRefName": "feature/stack-base",
+                    "url": item["pull_request"],
+                    "headRefOid": "head",
+                },
             ) as target,
             mock.patch.object(server, "directory_diff", return_value=diff) as directory,
+            mock.patch.object(
+                server, "pr_viewed_files", side_effect=lambda cwd, data, pr: data
+            ),
             mock.patch.object(handler, "_json") as response,
         ):
             handler.do_GET()
 
-        target.assert_called_once_with("https://github.com/example/repo/pull/42")
+        target.assert_called_once_with(
+            "https://github.com/example/repo/pull/42", item["cwd"], "files"
+        )
         directory.assert_called_once_with(
             "/tmp/worktrees/project-pr-42", "feature/stack-base"
         )
