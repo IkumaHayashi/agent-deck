@@ -1586,6 +1586,41 @@ def parse_confirm_screen(lines):
     return {"question": question, "choices": choices, "multi": False}
 
 
+def question_text_above_choices(lines, row):
+    """選択肢の直上から質問文を取り出し、端末用の引用記号を除く。"""
+    while row >= 0 and not lines[row].strip():
+        row -= 1
+    question_lines = []
+    # 新しい表示では質問の各行が「> 」で始まる。この連続ブロック自体が
+    # 境界なので、長い質問も省略せず拾い、上のヘッダーや会話を含めない。
+    if row >= 0 and re.match(r"^>(?:\s|$)", lines[row].strip()):
+        while row >= 0:
+            match = re.match(r"^>(?:\s(.*)|$)", lines[row].strip())
+            if match is None:
+                break
+            question_lines.insert(0, (match.group(1) or "").strip())
+            row -= 1
+        return " ".join(line for line in question_lines if line)
+
+    bounded = False
+    while row >= 0 and lines[row].strip():
+        line = lines[row].strip()
+        if is_tab_bar(line):
+            bounded = True
+            break
+        if "☐" in line:
+            question_lines.insert(0, line.rsplit("☐", 1)[1].strip())
+            bounded = True
+            break
+        if not line.startswith("[Screen Reader Mode"):
+            question_lines.insert(0, line)
+        row -= 1
+    # マーカーのない旧表示では、直前の会話を際限なく巻き込まない。
+    if not bounded:
+        question_lines = question_lines[-4:]
+    return " ".join(line for line in question_lines if line)
+
+
 def parse_custom_answer_screen(lines):
     """Other 選択後の自由入力待ち画面を拾う。"""
     prompt_index = next(
@@ -1616,18 +1651,11 @@ def parse_custom_answer_screen(lines):
         ),
         None,
     )
-    question_lines = []
-    if first_choice is not None:
-        row = first_choice - 1
-        while row >= 0 and not lines[row].strip():
-            row -= 1
-        while row >= 0 and lines[row].strip() and len(question_lines) < 4:
-            line = lines[row].strip()
-            if is_tab_bar(line):
-                break
-            question_lines.insert(0, line)
-            row -= 1
-    question = " ".join(question_lines)
+    question = (
+        question_text_above_choices(lines, first_choice - 1)
+        if first_choice is not None
+        else ""
+    )
     custom_prompt = f"{label} の内容を入力してください"
     return {
         "question": question or custom_prompt,
@@ -1701,25 +1729,7 @@ def parse_question_screen(screen):
     if expected != 0:
         return None
     choices.reverse()
-    # 選択肢の直上の連続した非空行が質問文。空行を挟まない画面では上の
-    # 出力まで際限なく巻き込むので数行に留め、質問マーカー（☐）があれば
-    # そこから後ろだけを使う。
-    question_lines = []
-    while row >= 0 and not lines[row].strip():
-        row -= 1
-    while row >= 0 and lines[row].strip() and len(question_lines) < 4:
-        line = lines[row].strip()
-        # 複数質問のタブバー（← ☐ タブ名  ✔ Submit →）はダイアログの上端。
-        # ここより上は前の会話なので質問文に含めない。
-        if is_tab_bar(line):
-            break
-        # 起動時ダイアログ（MCP承認等）の画面先頭に出るモード表示は質問文でない
-        if not line.startswith("[Screen Reader Mode"):
-            question_lines.insert(0, line)
-        row -= 1
-    question = " ".join(question_lines)
-    if "☐" in question:
-        question = question.rsplit("☐", 1)[1].strip()
+    question = question_text_above_choices(lines, row)
     return {"question": question, "choices": choices, "multi": multi}
 
 
