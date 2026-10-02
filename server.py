@@ -2468,6 +2468,7 @@ def _codex_exec_commands(source):
     """functions.execの引数オブジェクトから文字列リテラルのcmdを拾う。"""
     string = r""""(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`"""
     quoted = re.compile(string)
+    comment = re.compile(r"//[^\n]*|/\*[\s\S]*?\*/")
     command = re.compile(r"""(?:cmd|"cmd"|'cmd')\s*:\s*(""" + string + ")")
     tokens = re.compile(
         r"//[^\n]*|/\*[\s\S]*?\*/|" + string + r"|\btools\.exec_command\s*\(\s*\{"
@@ -2477,15 +2478,25 @@ def _codex_exec_commands(source):
             continue
         pos, depth = call.end(), 1
         while pos < len(source) and depth:
+            skipped = comment.match(source, pos)
+            if skipped:
+                pos = skipped.end()
+                continue
             match = command.match(source, pos) if depth == 1 else None
-            if match and (pos == call.end() or not source[pos - 1].isalnum()):
+            if match and (
+                pos == call.end()
+                or not (source[pos - 1].isalnum() or source[pos - 1] in "_$")
+            ):
                 literal = match[1]
                 try:
                     if literal.startswith("`"):
                         if "${" not in literal:
-                            yield ast.literal_eval(
-                                '"' + literal[1:-1].replace('"', '\\"') + '"'
+                            body = (
+                                literal[1:-1]
+                                .replace("\\`", "`")
+                                .replace("'''", "\\'\\'\\'")
                             )
+                            yield ast.literal_eval("'''" + body + "\n'''")[:-1]
                     else:
                         yield ast.literal_eval(literal)
                 except (ValueError, SyntaxError):

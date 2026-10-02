@@ -2459,6 +2459,25 @@ class ShellCommandTest(unittest.TestCase):
 
 
 class SessionArtifactTest(unittest.TestCase):
+    def test_codex_exec_handles_multiline_template_and_argument_comments(self):
+        source = """await tools.exec_command({
+          // cmd: "gh pr create --body-file /tmp/unexecuted",
+          /* cmd: "gh issue create --body-file /tmp/unexecuted" */
+          cmd: `cd /tmp/repo
+gh pr create --body-file /tmp/body`,
+        });"""
+        commands = list(server._codex_exec_commands(source))
+        self.assertEqual(["cd /tmp/repo\ngh pr create --body-file /tmp/body"], commands)
+        self.assertEqual(["pr"], server.GH_CREATE_RE.findall(commands[0]))
+        self.assertEqual(
+            ["gh pr create --title '日本語'"],
+            list(
+                server._codex_exec_commands(
+                    "tools.exec_command({cmd:`gh pr create --title '日本語'`})"
+                )
+            ),
+        )
+
     def test_codex_exec_ignores_examples_in_strings_and_comments(self):
         source = """
           const example = 'tools.exec_command({cmd:"gh pr create"})';
