@@ -2459,6 +2459,115 @@ class ShellCommandTest(unittest.TestCase):
 
 
 class SessionArtifactTest(unittest.TestCase):
+    def test_codex_exec_handles_multiline_template_and_argument_comments(self):
+        source = """await tools.exec_command({
+          // cmd: "gh pr create --body-file /tmp/unexecuted",
+          /* cmd: "gh issue create --body-file /tmp/unexecuted" */
+          cmd: `cd /tmp/repo
+gh pr create --body-file /tmp/body`,
+        });"""
+        commands = list(server._codex_exec_commands(source))
+        self.assertEqual(["cd /tmp/repo\ngh pr create --body-file /tmp/body"], commands)
+        self.assertEqual(["pr"], server.GH_CREATE_RE.findall(commands[0]))
+        continued = (
+            "await tools.exec_command({cmd:`gh pr create "
+            + "\\"
+            + "\n  --body-file /tmp/body`});"
+        )
+        self.assertEqual(
+            ["gh pr create   --body-file /tmp/body"],
+            list(server._codex_exec_commands(continued)),
+        )
+        self.assertEqual(
+            ["gh pr create --title '日本語'"],
+            list(
+                server._codex_exec_commands(
+                    "tools.exec_command({cmd:`gh pr create --title '日本語'`})"
+                )
+            ),
+        )
+
+    def test_codex_exec_ignores_examples_in_strings_and_comments(self):
+        source = """
+          const example = 'tools.exec_command({cmd:"gh pr create"})';
+          // tools.exec_command({cmd:"gh pr create"});
+          /* tools.exec_command({cmd:"gh pr create"}); */
+          await tools.exec_command({cmd:"gh pr list"});
+        """
+        self.assertEqual(["gh pr list"], list(server._codex_exec_commands(source)))
+
+    def test_codex_exec_handles_argument_order_and_json_output(self):
+        url = "https://github.com/example/repo/pull/42"
+        for source in (
+            'text(await tools.exec_command({workdir:"/tmp/repo", cmd:"gh pr create --body-file /tmp/body"}));',
+            "text(await tools.exec_command({env:{note:'{example}'}, workdir:'/tmp/repo', cmd:'gh pr create --body-file /tmp/body'}));",
+        ):
+            with self.subTest(source=source):
+                state = {"kinds": [], "items": {}}
+                server._artifact_scan_codex(
+                    state,
+                    json.dumps(
+                        {
+                            "payload": {
+                                "type": "custom_tool_call",
+                                "name": "exec",
+                                "input": source,
+                            }
+                        }
+                    ).encode(),
+                )
+                output = "Script completed\nOutput:\n" + json.dumps(
+                    {"output": url + "\n", "exit_code": 0}
+                )
+                server._artifact_scan_codex(
+                    state,
+                    json.dumps(
+                        {
+                            "payload": {
+                                "type": "custom_tool_call_output",
+                                "output": [{"type": "text", "text": output}],
+                            }
+                        }
+                    ).encode(),
+                )
+                self.assertEqual("pr", state["items"][url]["kind"])
+                self.assertEqual([], state["kinds"])
+
+    def test_codex_exec_creates_pr_from_custom_tool_result(self):
+        state = {"kinds": [], "items": {}}
+        source = 'const result = await tools.exec_command({cmd:"gh pr create --body-file /tmp/pr-body.txt"}); text(result.output);'
+        server._artifact_scan_codex(
+            state,
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "custom_tool_call",
+                        "name": "exec",
+                        "input": source,
+                    }
+                }
+            ).encode(),
+        )
+        url = "https://github.com/example/repo/pull/42"
+        server._artifact_scan_codex(
+            state,
+            json.dumps(
+                {
+                    "payload": {
+                        "type": "custom_tool_call_output",
+                        "output": [
+                            {
+                                "type": "text",
+                                "text": "Script completed\nOutput:\n" + url + "\n",
+                            }
+                        ],
+                    }
+                }
+            ).encode(),
+        )
+        self.assertEqual("pr", state["items"][url]["kind"])
+        self.assertEqual([], state["kinds"])
+
     def test_create_command_with_environment_variable_is_detected(self):
         command = "cd /tmp/repo && SKIP_REVIEW_GATE=1 gh pr create --base develop"
 
@@ -2468,6 +2577,230 @@ class SessionArtifactTest(unittest.TestCase):
         command = "rg 'SKIP_REVIEW_GATE=1 gh pr create' README.md"
 
         self.assertEqual([], server.GH_CREATE_RE.findall(command))
+
+
+class GitHubReviewSyncTest(unittest.TestCase):
+    PR_URL = "https://github.com/example/repo/pull/42"
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.cwd = self.temp.name
+        self.git("init", "-b", "main")
+        self.git("config", "user.email", "test@example.com")
+        self.git("config", "user.name", "test")
+        for path in ("a.txt", "b.txt", "gone.txt"):
+            self.write(path, "before\n")
+        self.git("add", ".")
+        self.git("commit", "-m", "比較元を作成")
+        self.base = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-b", "feature/review")
+        self.write("a.txt", "after\n")
+        self.write("b.txt", "after\n")
+        self.git("mv", "gone.txt", "renamed.txt")
+        self.git("add", ".")
+        self.git("commit", "-m", "変更を作成")
+        self.head = self.git("rev-parse", "HEAD")
+        self.pr = {
+            "id": "PR_42",
+            "url": self.PR_URL,
+            "number": 42,
+            "title": "PRタイトル",
+            "state": "OPEN",
+            "baseRefName": "main",
+            "baseRefOid": self.base,
+            "headRefOid": self.head,
+            "files": [
+                {"path": path, "viewerViewedState": "UNVIEWED"}
+                for path in ("a.txt", "b.txt", "renamed.txt")
+            ],
+        }
+        self.item = {"cwd": self.cwd, "pull_request": self.PR_URL}
+
+    def git(self, *args):
+        result = server.subprocess.run(
+            ["git", *args], cwd=self.cwd, capture_output=True, text=True, check=True
+        )
+        return result.stdout.strip()
+
+    def write(self, path, content):
+        with open(os.path.join(self.cwd, path), "w") as fh:
+            fh.write(content)
+
+    def test_matching_files_and_rename_can_sync_but_dirty_file_cannot(self):
+        self.write("a.txt", "local change\n")
+        diff = server.directory_diff(self.cwd, "main")
+        server.pr_viewed_files(self.cwd, diff, self.pr)
+        files = {file["path"]: file for file in diff["files"]}
+        self.assertFalse(files["a.txt"]["viewedSyncEnabled"])
+        self.assertIn("ローカルの変更", files["a.txt"]["viewedReason"])
+        self.assertTrue(files["b.txt"]["viewedSyncEnabled"])
+        self.assertTrue(files["renamed.txt"]["viewedSyncEnabled"])
+
+    def test_different_head_or_comparison_base_disables_sync(self):
+        for field in ("headRefOid", "baseRefOid"):
+            with self.subTest(field=field):
+                pr = dict(
+                    self.pr,
+                    **{field: self.base if field == "headRefOid" else self.head},
+                )
+                diff = server.directory_diff(self.cwd, "main")
+                server.pr_viewed_files(self.cwd, diff, pr)
+                self.assertTrue(
+                    all(not file["viewedSyncEnabled"] for file in diff["files"])
+                )
+
+    def test_mark_and_unmark_use_authenticated_mutation(self):
+        with (
+            mock.patch.object(server, "github_pr_connection", return_value=self.pr),
+            mock.patch.object(
+                server,
+                "github_graphql",
+                side_effect=lambda query, variables, cwd: {
+                    "unmarkFileAsViewed"
+                    if "unmarkFileAsViewed(" in query
+                    else "markFileAsViewed": {
+                        "pullRequest": {"id": "PR_42", "headRefOid": self.head}
+                    }
+                },
+            ) as graphql,
+        ):
+            for viewed, mutation in (
+                (True, "markFileAsViewed"),
+                (False, "unmarkFileAsViewed"),
+            ):
+                result = server.set_pr_file_viewed(
+                    self.item, "a.txt", viewed, self.head, self.base, self.PR_URL
+                )
+                self.assertIn(mutation + "(input:", graphql.call_args.args[0])
+                self.assertEqual(
+                    {"input": {"pullRequestId": "PR_42", "path": "a.txt"}},
+                    graphql.call_args.args[1],
+                )
+                self.assertEqual(
+                    "VIEWED" if viewed else "UNVIEWED", result["viewerViewedState"]
+                )
+
+    def test_push_during_viewed_mutation_unmarks_the_new_revision(self):
+        with (
+            mock.patch.object(server, "github_pr_connection", return_value=self.pr),
+            mock.patch.object(
+                server,
+                "github_graphql",
+                side_effect=[
+                    {
+                        "markFileAsViewed": {
+                            "pullRequest": {"id": "PR_42", "headRefOid": "new-head"}
+                        }
+                    },
+                    {"unmarkFileAsViewed": {"pullRequest": {"id": "PR_42"}}},
+                ],
+            ) as graphql,
+        ):
+            with self.assertRaisesRegex(ValueError, "操作中にPRが更新"):
+                server.set_pr_file_viewed(
+                    self.item, "a.txt", True, self.head, self.base, self.PR_URL
+                )
+            self.assertEqual(2, graphql.call_count)
+            self.assertIn("unmarkFileAsViewed(input:", graphql.call_args.args[0])
+
+    def test_stale_review_dirty_file_and_unknown_path_never_mutate(self):
+        with (
+            mock.patch.object(server, "github_pr_connection", return_value=self.pr),
+            mock.patch.object(server, "github_graphql") as graphql,
+        ):
+            for path, head, base, url in (
+                ("a.txt", self.base, self.base, self.PR_URL),
+                ("a.txt", self.head, self.head, self.PR_URL),
+                ("a.txt", self.head, self.base, self.PR_URL.replace("42", "43")),
+                ("../outside.txt", self.head, self.base, self.PR_URL),
+            ):
+                with (
+                    self.subTest(path=path, head=head, base=base, url=url),
+                    self.assertRaises(ValueError),
+                ):
+                    server.set_pr_file_viewed(self.item, path, True, head, base, url)
+            self.write("a.txt", "ローカル変更\n")
+            with self.assertRaisesRegex(ValueError, "ローカルの変更"):
+                server.set_pr_file_viewed(
+                    self.item, "a.txt", True, self.head, self.base, self.PR_URL
+                )
+            graphql.assert_not_called()
+
+    def test_connection_paginates_and_keeps_viewed_and_outdated_states(self):
+        pages = []
+        for index, state in enumerate(("VIEWED", "UNVIEWED", "DISMISSED")):
+            pages.append(
+                {
+                    "repository": {
+                        "pullRequest": dict(
+                            self.pr,
+                            files={
+                                "nodes": [
+                                    {"path": str(index), "viewerViewedState": state}
+                                ],
+                                "pageInfo": {
+                                    "hasNextPage": index < 2,
+                                    "endCursor": str(index),
+                                },
+                            },
+                        )
+                    }
+                }
+            )
+        with mock.patch.object(server, "github_graphql", side_effect=pages) as graphql:
+            pr = server.github_pr_connection(self.PR_URL, self.cwd, "files")
+            self.assertEqual(3, len(pr["files"]))
+            self.assertEqual("VIEWED", pr["files"][0]["viewerViewedState"])
+            self.assertEqual("1", graphql.call_args.args[1]["after"])
+
+    def test_header_excludes_standalone_issue_and_includes_linked_issues(self):
+        issue = {
+            "number": 9,
+            "url": "https://github.com/other/project/issues/9",
+            "title": "関連Issue",
+            "state": "OPEN",
+            "repository": {"nameWithOwner": "other/project"},
+        }
+        item = dict(
+            self.item,
+            artifacts=[
+                {"kind": "pr", "repo": "repo", "number": 42, "url": self.PR_URL},
+                {
+                    "kind": "issue",
+                    "repo": "repo",
+                    "number": 99,
+                    "url": "https://github.com/example/repo/issues/99",
+                },
+            ],
+        )
+        with (
+            mock.patch.object(server, "PR_LINK_CACHE", {}),
+            mock.patch.object(
+                server,
+                "github_pr_connection",
+                return_value=dict(self.pr, closingIssuesReferences=[issue]),
+            ) as fetch,
+        ):
+            links = server.session_pr_links(item)
+            self.assertEqual(["pr", "issue"], [link["kind"] for link in links])
+            self.assertEqual([42, 9], [link["number"] for link in links])
+            html = server.artifact_links(links)
+            self.assertIn("PR repo#42", html)
+            self.assertIn("Issue other/project#9", html)
+            self.assertNotIn("#99", html)
+            self.assertEqual(links, server.session_pr_links(item))
+            fetch.assert_called_once()
+            self.assertEqual("closingIssuesReferences", fetch.call_args.args[2])
+
+    def test_github_failure_still_returns_local_diff(self):
+        with mock.patch.object(
+            server, "github_pr_connection", side_effect=RuntimeError("接続失敗")
+        ):
+            diff = server.session_directory_diff(self.item)
+        self.assertEqual(3, len(diff["files"]))
+        self.assertIn("接続失敗", diff["viewedError"])
+        self.assertNotIn("pullRequest", diff)
 
 
 class DirectoryDiffTest(unittest.TestCase):
@@ -2588,15 +2921,24 @@ class DirectoryDiffTest(unittest.TestCase):
             mock.patch.object(server, "managed_sessions", return_value=[item]),
             mock.patch.object(
                 server,
-                "pull_request_target",
-                return_value={"baseRefName": "feature/stack-base"},
+                "github_pr_connection",
+                return_value={
+                    "baseRefName": "feature/stack-base",
+                    "url": item["pull_request"],
+                    "headRefOid": "head",
+                },
             ) as target,
             mock.patch.object(server, "directory_diff", return_value=diff) as directory,
+            mock.patch.object(
+                server, "pr_viewed_files", side_effect=lambda cwd, data, pr: data
+            ),
             mock.patch.object(handler, "_json") as response,
         ):
             handler.do_GET()
 
-        target.assert_called_once_with("https://github.com/example/repo/pull/42")
+        target.assert_called_once_with(
+            "https://github.com/example/repo/pull/42", item["cwd"], "files"
+        )
         directory.assert_called_once_with(
             "/tmp/worktrees/project-pr-42", "feature/stack-base"
         )
