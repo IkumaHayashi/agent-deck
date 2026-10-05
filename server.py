@@ -2674,6 +2674,37 @@ def parse_github_item_metadata(value):
     return github_item_metadata(value)
 
 
+def resume_github_item(cwd, session_id):
+    """会話再開時に保存済み情報、または作成元worktreeからIssue / PRを復元する。"""
+    for item in load_session_registry():
+        if item["session_id"] == session_id:
+            metadata = github_item_metadata(item.get("github_item"))
+            if metadata:
+                return metadata
+    record = worktree_record(cwd)
+    if not record or record["kind"] not in {"issue", "pull"}:
+        return {}
+    suffix = "issues" if record["kind"] == "issue" else "pull"
+    selector = (
+        f"https://github.com/{record['repository']}/{suffix}/{record['number']}"
+        if record["repository"]
+        else str(record["number"])
+    )
+    try:
+        target = github_work_item_target(record["repo"], record["kind"], selector)
+    except (
+        OSError,
+        subprocess.SubprocessError,
+        LookupError,
+        RuntimeError,
+        ValueError,
+        TypeError,
+    ):
+        # GitHubを取得できなくても会話の再開自体は続ける。
+        return {}
+    return github_item_metadata(target)
+
+
 def normalize_pr_selector(value):
     """gh に安全に渡せる PR 番号またはURLを返す。"""
     value = (value or "").strip()
@@ -5075,8 +5106,8 @@ PROJECT_STATUS_DOTS = (
 def sidebar_project_groups(sessions):
     """サイドバーのツリー用に、セッションをプロジェクトごとにまとめる。
 
-    プロジェクトは一覧本来の順序（先頭固定・返事待ちが上）で最初に現れた順に
-    並べ、各プロジェクト内の順序も保つ。後回しはプロジェクトを問わず末尾へ集める。
+    プロジェクトはパス順に固定し、各プロジェクト内では一覧本来の順序を保つ。
+    後回しはプロジェクトを問わず末尾へ集める。
     """
     groups = {}
     later = []
@@ -5089,7 +5120,7 @@ def sidebar_project_groups(sessions):
             continue
         root = project_dir(item["cwd"]) or item["cwd"]
         groups.setdefault(root, []).append(item)
-    return list(groups.items()), later
+    return sorted(groups.items()), later
 
 
 def session_card_html(item, active, label, status, language="ja"):
@@ -5151,9 +5182,17 @@ def project_group_html(
     )
     title_attr = f' title="{html.escape(title, quote=True)}"' if title else ""
     classes = f"project-group{keep}" + (f" {css_class}" if css_class else "")
+    drag_handle = (
+        '<span class="project-drag" draggable="true" role="button" tabindex="0" '
+        f'aria-label="{translate("ディレクトリを並び替え", language)}" '
+        f'title="{translate("ドラッグまたは上下キーで並び替え", language)}">⠿</span>'
+        if key != LATER_GROUP_KEY
+        else ""
+    )
     return (
         f'<section class="{classes}" data-project="{html.escape(key, quote=True)}">'
         '<div class="project-head">'
+        f"{drag_handle}"
         f'<button type="button" class="project-toggle" aria-expanded="true"{title_attr}>'
         '<span class="chev" aria-hidden="true">▾</span>'
         f'{name_html}<small class="project-count">{len(statuses)}</small>'
@@ -5941,6 +5980,14 @@ SIDEBAR_CSS = r"""
   aside .project-group { margin: 0 0 6px; }
   aside .project-head { position: sticky; top: 0; z-index: 2; display: flex;
     align-items: center; gap: 2px; background: #161b22; }
+  aside .project-drag { flex: 0 0 auto; width: 18px; padding: 6px 0;
+    color: #8b949e; font-size: .9rem; text-align: center; cursor: grab;
+    user-select: none; touch-action: none; }
+  aside .project-drag:hover, aside .project-drag:focus-visible { color: #e6edf3; }
+  aside .project-drag:active { cursor: grabbing; }
+  aside .project-group.dragging { opacity: .45; }
+  aside .project-group.drop-before { box-shadow: 0 -2px #58a6ff; }
+  aside .project-group.drop-after { box-shadow: 0 2px #58a6ff; }
   aside .project-toggle { min-width: 0; flex: 1; display: flex; align-items: center;
     gap: 6px; margin: 0; padding: 6px 4px; border: 0; border-radius: 6px;
     background: transparent; color: #cdd9e5; font: inherit; font-size: .84rem;
@@ -6330,6 +6377,7 @@ SIDEBAR_JS = r"""
   // プロジェクトの折りたたみ状態はブラウザごとに覚える。
   const laterGroupKey = "__later__";
   const collapsedStorageKey = "agent-deck:collapsed-projects";
+  const projectOrderStorageKey = "agent-deck:project-order";
   const keepStatuses = ["need", "ask", "wait"];
   const projectStatusDots = [
     ["need", "要対応"], ["ask", "選択待ち"], ["wait", "返事待ち"], ["run", "考え中"],
@@ -6344,6 +6392,97 @@ SIDEBAR_JS = r"""
     try { localStorage.setItem(collapsedStorageKey, JSON.stringify([...keys])); }
     catch (error) { /* 保存できなくても折りたたみ自体は効かせる */ }
   }
+  function projectOrder() {
+    try {
+      const value = JSON.parse(localStorage.getItem(projectOrderStorageKey) || "[]");
+      return Array.isArray(value)
+        ? [...new Set(value.filter(key => typeof key === "string" && key !== laterGroupKey))]
+        : [];
+    } catch (error) { return []; }
+  }
+  function orderedProjectKeys(keys) {
+    const available = new Set(keys);
+    const known = projectOrder().filter(key => available.delete(key));
+    return [...known, ...[...available].sort()];
+  }
+  function visibleProjectGroups() {
+    return [...(sideSessions?.querySelectorAll(".project-group:not(.later-group)") || [])];
+  }
+  function saveProjectOrder() {
+    const visible = visibleProjectGroups().map(group => group.dataset.project);
+    const visibleSet = new Set(visible);
+    const remaining = [...visible];
+    const order = projectOrder().map(key =>
+      visibleSet.has(key) ? remaining.shift() : key);
+    try { localStorage.setItem(projectOrderStorageKey, JSON.stringify([...order, ...remaining])); }
+    catch (error) { /* 保存できなくても現在の並び替えは効かせる */ }
+  }
+  function applyProjectOrder() {
+    if (!sideSessions) return;
+    const groups = visibleProjectGroups();
+    const byKey = new Map(groups.map(group => [group.dataset.project, group]));
+    const later = sideSessions.querySelector(".later-group");
+    for (const key of orderedProjectKeys(byKey.keys()))
+      sideSessions.insertBefore(byKey.get(key), later);
+  }
+  applyProjectOrder();
+  let draggedProject = null;
+  let projectDragPending = false;
+  sideSessions?.addEventListener("pointerdown", event => {
+    if (event.target.closest(".project-drag")) projectDragPending = true;
+  });
+  document.addEventListener("pointerup", () => { projectDragPending = false; });
+  document.addEventListener("pointercancel", () => { projectDragPending = false; });
+  function clearProjectDrag() {
+    sideSessions?.querySelectorAll(".dragging, .drop-before, .drop-after").forEach(group =>
+      group.classList.remove("dragging", "drop-before", "drop-after"));
+    draggedProject = null;
+    projectDragPending = false;
+  }
+  sideSessions?.addEventListener("dragstart", event => {
+    const handle = event.target.closest(".project-drag");
+    if (!handle) return;
+    draggedProject = handle.closest(".project-group");
+    draggedProject.classList.add("dragging");
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", draggedProject.dataset.project);
+  });
+  sideSessions?.addEventListener("dragover", event => {
+    if (!draggedProject) return;
+    const target = event.target.closest(".project-group:not(.later-group)");
+    if (!target || target === draggedProject) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    sideSessions.querySelectorAll(".drop-before, .drop-after").forEach(group =>
+      group.classList.remove("drop-before", "drop-after"));
+    const head = target.querySelector(".project-head");
+    const before = event.clientY < head.getBoundingClientRect().top + head.offsetHeight / 2;
+    target.classList.add(before ? "drop-before" : "drop-after");
+  });
+  sideSessions?.addEventListener("drop", event => {
+    if (!draggedProject) return;
+    const target = event.target.closest(".project-group:not(.later-group)");
+    if (!target || target === draggedProject) { clearProjectDrag(); return; }
+    event.preventDefault();
+    const before = target.classList.contains("drop-before");
+    sideSessions.insertBefore(draggedProject, before ? target : target.nextSibling);
+    saveProjectOrder();
+    clearProjectDrag();
+  });
+  sideSessions?.addEventListener("dragend", clearProjectDrag);
+  sideSessions?.addEventListener("keydown", event => {
+    if (!event.target.matches(".project-drag") ||
+        !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+    const group = event.target.closest(".project-group");
+    const groups = visibleProjectGroups();
+    const index = groups.indexOf(group);
+    const other = groups[index + (event.key === "ArrowUp" ? -1 : 1)];
+    if (!other) return;
+    event.preventDefault();
+    sideSessions.insertBefore(group, event.key === "ArrowUp" ? other : other.nextSibling);
+    saveProjectOrder();
+    event.target.focus();
+  });
   function setProjectCollapsed(group, collapsed) {
     group.classList.toggle("collapsed", collapsed);
     group.querySelector(".project-toggle")?.setAttribute("aria-expanded", collapsed ? "false" : "true");
@@ -6484,6 +6623,17 @@ SIDEBAR_JS = r"""
     if (statuses.some(cls => keepStatuses.includes(cls))) group.classList.add("f-keep");
     const head = document.createElement("div");
     head.className = "project-head";
+    if (key !== laterGroupKey) {
+      const drag = document.createElement("span");
+      drag.className = "project-drag";
+      drag.draggable = true;
+      drag.tabIndex = 0;
+      drag.setAttribute("role", "button");
+      drag.ariaLabel = "ディレクトリを並び替え";
+      drag.title = "ドラッグまたは上下キーで並び替え";
+      drag.textContent = "⠿";
+      head.append(drag);
+    }
     const toggle = document.createElement("button");
     toggle.type = "button";
     toggle.className = "project-toggle";
@@ -6537,12 +6687,12 @@ SIDEBAR_JS = r"""
         location.reload();
         return;
       }
-      // メニュー操作中はカードを差し替えず、選択先とフォーカスを維持する。
-      if (!positionMenu.hidden) return;
+      // メニュー操作中とドラッグ中はカードを差し替えない。
+      if (!positionMenu.hidden || projectDragPending || draggedProject) return;
       // 手動配置だけを優先し、各グループ内ではAPIの順序を保つ。
       const items = data.items.slice().sort((a, b) =>
         positionOrder[itemPosition(a)] - positionOrder[itemPosition(b)]);
-      // プロジェクトは最初に現れた順に並べ、後回しはプロジェクトを問わず末尾へ集める。
+      // 保存したディレクトリ順を優先し、新しいディレクトリはパス順に追加する。
       const groups = new Map();
       const laterItems = [];
       for (const item of items) {
@@ -6552,7 +6702,8 @@ SIDEBAR_JS = r"""
         groups.get(key).push(item);
       }
       const nodes = [];
-      for (const [key, groupItems] of groups) {
+      for (const key of orderedProjectKeys(groups.keys())) {
+        const groupItems = groups.get(key);
         const name = key.replace(/\/+$/, "").split("/").pop() || key;
         nodes.push(buildProjectGroup(key, name, groupItems,
           item => item.worktree || "", {title: key, newDir: key}));
@@ -10509,7 +10660,7 @@ class Handler(BaseHTTPRequestHandler):
                 path = pull_request_worktree(pull_request_target(pull_request))
             except (LookupError, RuntimeError, ValueError) as exc:
                 return launch_page(str(exc))
-        github_item = {}
+        github_item = resume_github_item(path, resume) if resume else {}
         if github_target:
             if resume or pull_request:
                 return launch_page("Issue / PR指定は新規の通常起動でのみ使用できます")

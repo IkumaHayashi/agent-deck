@@ -1256,6 +1256,90 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertEqual(expected_item, metadata.call_args.kwargs["github_item"])
         self.assertEqual(expected_item, register.call_args.args[0]["github_item"])
 
+    def test_resume_restores_github_item_from_worktree(self):
+        handler = object.__new__(server.Handler)
+        session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+        target = {
+            "cwd": "/tmp/project",
+            "kind": "issue",
+            "number": 42,
+            "title": "再開後も表示する",
+            "url": "https://github.com/example/repo/issues/42",
+        }
+        record = {
+            "repo": "/tmp/project",
+            "kind": "issue",
+            "number": 42,
+            "repository": "example/repo",
+        }
+        result = SimpleNamespace(
+            returncode=0, stdout="Started session agent-resumed\n", stderr=""
+        )
+        with (
+            mock.patch.object(
+                server, "validate_dir", return_value=("/tmp/worktree", "")
+            ),
+            mock.patch.object(
+                server, "conversation_log_path", return_value="/tmp/conversation.jsonl"
+            ),
+            mock.patch.object(server, "load_session_registry", return_value=[]),
+            mock.patch.object(server, "worktree_record", return_value=record),
+            mock.patch.object(
+                server, "github_work_item_target", return_value=target
+            ) as resolve,
+            mock.patch.object(
+                server, "log_meta", return_value={"summary": "Issue #42"}
+            ),
+            mock.patch.object(server.subprocess, "run", return_value=result),
+            mock.patch.object(server, "set_session_metadata") as metadata,
+            mock.patch.object(server, "upsert_registered_session") as register,
+            mock.patch.object(server, "invalidate_session_cache"),
+            mock.patch.object(handler, "_redirect"),
+        ):
+            handler._launch("/tmp/worktree", tool="codex", resume=session_id)
+
+        resolve.assert_called_once_with(
+            "/tmp/project", "issue", "https://github.com/example/repo/issues/42"
+        )
+        expected = server.github_item_metadata(target)
+        self.assertEqual(expected, metadata.call_args.kwargs["github_item"])
+        self.assertEqual(expected, register.call_args.args[0]["github_item"])
+
+    def test_resume_prefers_saved_github_item(self):
+        item = {
+            "session_id": "019fd08a-e352-7a22-9aa5-0b5d0de94eba",
+            "github_item": {
+                "kind": "issue",
+                "number": 42,
+                "title": "保存済みタイトル",
+                "url": "https://github.com/example/repo/issues/42",
+            },
+        }
+        with (
+            mock.patch.object(server, "load_session_registry", return_value=[item]),
+            mock.patch.object(server, "worktree_record") as record,
+        ):
+            actual = server.resume_github_item("/tmp/worktree", item["session_id"])
+
+        self.assertEqual(item["github_item"], actual)
+        record.assert_not_called()
+
+    def test_resume_continues_when_github_cli_is_unavailable(self):
+        record = {
+            "repo": "/tmp/project",
+            "kind": "issue",
+            "number": 42,
+            "repository": "example/repo",
+        }
+        with (
+            mock.patch.object(server, "load_session_registry", return_value=[]),
+            mock.patch.object(server, "worktree_record", return_value=record),
+            mock.patch.object(server, "github_work_item_target", side_effect=TypeError),
+        ):
+            self.assertEqual(
+                {}, server.resume_github_item("/tmp/worktree", "session-id")
+            )
+
     def test_claude_resume_finds_moved_log_and_uses_its_latest_cwd(self):
         handler = object.__new__(server.Handler)
         session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
@@ -3475,9 +3559,36 @@ class SessionPositionTest(unittest.TestCase):
         self.assertLess(sidebar.index("session=agent-a2"), beta)
         self.assertLess(beta, sidebar.index("session=agent-b1"))
         self.assertIn('<small class="project-count">2</small>', sidebar)
+        self.assertEqual(2, sidebar.count('class="project-drag" draggable="true"'))
         self.assertIn('href="/new?dir=%2Ftmp%2Falpha"', sidebar)
         self.assertIn(">issue-12</span>", sidebar)
         self.assertIn('<span class="pd st-wait" title="返事待ち">2</span>', sidebar)
+
+    def test_later_group_has_no_drag_handle(self):
+        sessions = [
+            self._session("agent-alpha", cwd="/tmp/alpha"),
+            self._session("agent-later", position="later", cwd="/tmp/beta"),
+        ]
+        with mock.patch.object(server, "managed_sessions", return_value=sessions):
+            sidebar = server.build_sidebar(None)
+
+        self.assertEqual(1, sidebar.count('class="project-drag" draggable="true"'))
+        later = sidebar.split('data-project="__later__"', 1)[1]
+        self.assertNotIn('class="project-drag"', later)
+
+    def test_project_position_does_not_follow_session_priority(self):
+        alpha = self._session("agent-alpha", cwd="/tmp/alpha")
+        beta = self._session("agent-beta", pinned=True, cwd="/tmp/beta")
+        for sessions in ([beta, alpha], [alpha, beta]):
+            with self.subTest(sessions=[item["name"] for item in sessions]):
+                with mock.patch.object(
+                    server, "managed_sessions", return_value=sessions
+                ):
+                    sidebar = server.build_sidebar(None)
+                self.assertLess(
+                    sidebar.index('data-project="/tmp/alpha"'),
+                    sidebar.index('data-project="/tmp/beta"'),
+                )
 
     def test_worktree_label_is_relative_inside_project(self):
         with mock.patch.object(
