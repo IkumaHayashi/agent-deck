@@ -5041,20 +5041,33 @@ def tool_label(tool):
     return f'<span class="tool">{escaped}</span>'
 
 
-def github_item_link_html(item):
-    """起動元のIssue / PRをセッションカード用リンクとして返す。"""
+def github_item_label(item):
+    kind = "Issue" if item["kind"] == "issue" else "PR"
+    label = f"{kind} #{item['number']}"
+    return f"{label} {item['title']}" if item["title"] else label
+
+
+def github_item_title_html(item):
+    """起動元のIssue / PRのタイトルを、セッションカードの見出しとして返す。"""
     item = github_item_metadata(item)
     if not item:
         return ""
-    kind = "Issue" if item["kind"] == "issue" else "PR"
-    label = f"{kind} #{item['number']}"
-    if item["title"]:
-        label += f" {item['title']}"
+    return (
+        f'<span class="issue-title">'
+        f"{html.escape(item['title'] or github_item_label(item))}</span>"
+    )
+
+
+def github_item_link_html(item):
+    """起動元のIssue / PRをGitHubで開く小さなリンクを返す。"""
+    item = github_item_metadata(item)
+    if not item:
+        return ""
+    label = html.escape(github_item_label(item), quote=True)
     return (
         '<a class="github-item" target="_blank" rel="noopener" '
         f'href="{html.escape(item["url"], quote=True)}" '
-        f'title="{html.escape(label, quote=True)}">'
-        f"{html.escape(label)} ↗</a>"
+        f'title="{label}" aria-label="{label}">↗</a>'
     )
 
 
@@ -5108,13 +5121,22 @@ def session_card_html(item, active, label, status, language="ja"):
         if label
         else ""
     )
+    issue_title = github_item_title_html(item.get("github_item"))
+    link_class = " ".join(
+        name
+        for name, enabled in (
+            ("active", item["name"] == active),
+            ("has-issue", bool(issue_title)),
+        )
+        if enabled
+    )
     return (
         f'<div class="session-card{keep}{" is-later" if position == "later" else ""}" '
         f'data-session="{html.escape(item["name"])}" '
         f'data-status="{status_class}">'
-        f'<a class="{"active" if item["name"] == active else ""}" '
+        f'<a class="{link_class}" '
         f'href="/terminal?session={urllib.parse.quote(item["name"])}">'
-        f"<strong>{tool_label(item['tool'])}{dir_html}"
+        f"{issue_title}<strong>{tool_label(item['tool'])}{dir_html}"
         f'<span class="st st-{status_class}">'
         f"{html.escape(translate(status_text, language))}</span>"
         f"{context_chip(item.get('context'))}</strong>"
@@ -5851,7 +5873,9 @@ SIDEBAR_CSS = r"""
   aside small { margin-top: 5px; color: #8b949e; font-size: .78rem;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden; overflow-wrap: anywhere; }
-  aside small.first { color: #cdd9e5; }
+  aside small.first { color: #adbac7; font-size: .72rem; }
+  /* Issue / PRから起動したセッションはタイトルで識別できるので、指示文は1行に縮める */
+  aside #side-sessions a.has-issue small.first { -webkit-line-clamp: 1; }
   aside small.note { color: #d29922; -webkit-line-clamp: 2; }
   aside #side-sessions a small:not(.first) { -webkit-line-clamp: 1; }
   aside .new-link { text-align: center; color: #8ab4f8; border-style: dashed; }
@@ -5957,10 +5981,14 @@ SIDEBAR_CSS = r"""
   aside .project-items .session-card > a { margin: 4px 0; padding: 8px 40px 8px 9px; }
   aside .session-card { position: relative; }
   aside .session-card > a { padding-right: 40px; }
-  aside .session-card > a.github-item { margin: -3px 40px 7px 10px; padding: 0;
-    border: 0; border-radius: 0; color: #8ab4f8; font-size: .76rem;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  aside .session-card > a.github-item:hover { color: #b6d7ff; text-decoration: underline; }
+  /* 起動元のIssue / PRはタイトルをカードの見出しにし、GitHubへは右下の↗で開く */
+  aside .session-card .issue-title { display: -webkit-box; margin-bottom: 6px;
+    color: #e6edf3; font-size: .84rem; font-weight: 600; line-height: 1.35;
+    -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  aside .session-card > a.github-item { position: absolute; right: 7px; bottom: 10px;
+    width: 26px; height: 26px; margin: 0; padding: 0; display: grid; place-items: center;
+    border: 0; border-radius: 6px; color: #8ab4f8; font-size: .8rem; }
+  aside .session-card > a.github-item:hover { background: #30363d; color: #b6d7ff; }
   aside .session-card.is-later > a { opacity: .68; }
   aside .session-card.is-later:hover > a, aside .session-card.is-later > a.active { opacity: 1; }
   aside .side-position { position: absolute; top: 12px; right: 7px; z-index: 1;
@@ -6352,6 +6380,18 @@ SIDEBAR_JS = r"""
     const link = document.createElement("a");
     link.href = "/terminal?session=" + encodeURIComponent(item.name);
     if (item.name === session) link.classList.add("active");
+    const githubItem = item.github_item && item.github_item.url ? item.github_item : null;
+    const githubLabel = githubItem
+      ? (githubItem.kind === "issue" ? "Issue" : "PR") + " #" + githubItem.number
+        + (githubItem.title ? " " + githubItem.title : "")
+      : "";
+    if (githubItem) {
+      link.classList.add("has-issue");
+      const issueTitle = document.createElement("span");
+      issueTitle.className = "issue-title";
+      issueTitle.textContent = githubItem.title || githubLabel;
+      link.append(issueTitle);
+    }
     if (keepStatuses.includes(item.status_class)) card.classList.add("f-keep");
     const title = document.createElement("strong");
     // 公式アイコンのあるツールは画像、それ以外はテキストで表示する
@@ -6421,16 +6461,14 @@ SIDEBAR_JS = r"""
       link.append(arts);
     }
     let githubItemLink = null;
-    if (item.github_item && item.github_item.url) {
+    if (githubItem) {
       githubItemLink = document.createElement("a");
       githubItemLink.className = "github-item";
-      githubItemLink.href = item.github_item.url;
+      githubItemLink.href = githubItem.url;
       githubItemLink.target = "_blank";
       githubItemLink.rel = "noopener";
-      const kind = item.github_item.kind === "issue" ? "Issue" : "PR";
-      githubItemLink.textContent = kind + " #" + item.github_item.number
-        + (item.github_item.title ? " " + item.github_item.title : "") + " ↗";
-      githubItemLink.title = githubItemLink.textContent.slice(0, -2);
+      githubItemLink.textContent = "↗";
+      githubItemLink.title = githubItemLink.ariaLabel = githubLabel;
     }
     const positionButton = document.createElement("button");
     positionButton.type = "button";

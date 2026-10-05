@@ -554,7 +554,12 @@ class FrontendTemplateTest(unittest.TestCase):
         ):
             sidebar = server.build_sidebar(None)
 
-        self.assertIn("Issue #42 一覧にも対象を表示する ↗", sidebar)
+        self.assertIn(
+            '<a class="has-issue" href="/terminal?session=agent-test">'
+            '<span class="issue-title">一覧にも対象を表示する</span><strong>',
+            sidebar,
+        )
+        self.assertIn('title="Issue #42 一覧にも対象を表示する"', sidebar)
         self.assertIn('href="https://github.com/example/repo/issues/42"', sidebar)
         self.assertIn('class="github-item" target="_blank"', sidebar)
 
