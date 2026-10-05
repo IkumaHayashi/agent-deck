@@ -495,9 +495,10 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn(
             'updateButton.textContent = "Update to v" + data.latest;', sidebar
         )
-        self.assertIn('laterItems.length === 1 ? " item" : " items"', sidebar)
         self.assertNotIn("再Loading", sidebar)
-        self.assertNotIn('laterItems.length + "件"', sidebar)
+        self.assertIn(
+            'add.title = add.ariaLabel = "New session in this project"', sidebar
+        )
         self.assertNotIn("diff diff", terminal)
         self.assertIn('error.message + ")"', terminal)
 
@@ -1136,6 +1137,18 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("📥 受信箱から選ぶ", page)
         self.assertNotIn('id="inbox-project-select"', page)
         self.assertNotIn('data-panel="inbox-panel"', page)
+
+    def test_launcher_highlights_project_chosen_from_sidebar_tree(self):
+        with (
+            mock.patch.object(server, "PINNED", [("demo", "/Users/demo/project")]),
+            mock.patch.object(server, "list_other_projects", return_value=[]),
+        ):
+            page = server.render(focus_dir="/Users/demo/other")
+
+        self.assertIn('class="launch project-focus"', page)
+        self.assertIn('name="dir" value="/Users/demo/other"', page)
+        self.assertIn("🚀 other</button>", page)
+        self.assertIn('<option value="/Users/demo/other" selected>other</option>', page)
 
     def test_github_review_does_not_use_initial_prompt(self):
         script_path = os.path.join(os.path.dirname(__file__), "static", "new.js")
@@ -3428,7 +3441,62 @@ class SessionPositionTest(unittest.TestCase):
             sidebar.index("後回し"),
             sidebar.index("session=agent-later"),
         )
-        self.assertIn("1件", sidebar)
+        self.assertIn('data-project="__later__"', sidebar)
+        # 後回しはプロジェクトの外へ出すので、どのプロジェクトかをカードに添える。
+        self.assertIn('<span class="dir" title="/tmp/project">project</span>', sidebar)
+
+    def test_sessions_are_grouped_into_project_tree(self):
+        sessions = [
+            self._session("agent-a1", cwd="/tmp/alpha"),
+            self._session("agent-b1", cwd="/tmp/beta"),
+            self._session("agent-a2", cwd="/tmp/alpha-wt/issue-12"),
+        ]
+        roots = {
+            "/tmp/alpha": "/tmp/alpha",
+            "/tmp/beta": "/tmp/beta",
+            "/tmp/alpha-wt/issue-12": "/tmp/alpha",
+        }
+        with (
+            mock.patch.object(server, "managed_sessions", return_value=sessions),
+            mock.patch.object(server, "REPO_LABEL_CACHE", dict(roots)),
+        ):
+            sidebar = server.build_sidebar("agent-a2")
+
+        alpha = sidebar.index('data-project="/tmp/alpha"')
+        beta = sidebar.index('data-project="/tmp/beta"')
+        # プロジェクトは最初に現れた順。worktreeのセッションも作成元へまとめる。
+        self.assertLess(alpha, sidebar.index("session=agent-a1"))
+        self.assertLess(sidebar.index("session=agent-a2"), beta)
+        self.assertLess(beta, sidebar.index("session=agent-b1"))
+        self.assertIn('<small class="project-count">2</small>', sidebar)
+        self.assertIn('href="/new?dir=%2Ftmp%2Falpha"', sidebar)
+        self.assertIn(">issue-12</span>", sidebar)
+        self.assertIn('<span class="pd st-wait" title="返事待ち">2</span>', sidebar)
+
+    def test_worktree_label_is_relative_inside_project(self):
+        with mock.patch.object(
+            server,
+            "REPO_LABEL_CACHE",
+            {"/tmp/alpha": "/tmp/alpha", "/tmp/alpha/packages/web": "/tmp/alpha"},
+        ):
+            self.assertEqual("", server.worktree_label("/tmp/alpha/"))
+            self.assertEqual(
+                "packages/web", server.worktree_label("/tmp/alpha/packages/web")
+            )
+
+    def test_worktree_label_uses_issue_number_for_registered_worktree(self):
+        record = {
+            "path": os.path.realpath("/tmp/alpha-wt-issue-7"),
+            "kind": "issue",
+            "number": 7,
+        }
+        with (
+            mock.patch.object(
+                server, "REPO_LABEL_CACHE", {"/tmp/alpha-wt-issue-7": "/tmp/alpha"}
+            ),
+            mock.patch.object(server, "worktree_record", return_value=record),
+        ):
+            self.assertEqual("Issue #7", server.worktree_label("/tmp/alpha-wt-issue-7"))
 
     def test_position_is_exclusive_even_when_legacy_pinned_is_true(self):
         session = self._session("agent-later", pinned=True, position="later")
@@ -3506,11 +3574,11 @@ class SessionPositionTest(unittest.TestCase):
         self.assertEqual(item, json.loads(option[-1]))
 
     @staticmethod
-    def _session(name, pinned=False, position=None):
+    def _session(name, pinned=False, position=None, cwd="/tmp/project"):
         return {
             "name": name,
             "tool": "codex",
-            "cwd": "/tmp/project",
+            "cwd": cwd,
             "summary": "summary",
             "last_message": "summary",
             "note": "",

@@ -282,7 +282,6 @@
   "uploaded + \"件を添付しました（残りは失敗: \"": "uploaded + \" files attached (remaining files failed: \"",
   "uploaded + \"件を添付しました（残りは失敗: \" + error.message + \"）\"": "uploaded + \" files attached (remaining files failed: \" + error.message + \")\"",
   "取得に失敗しました": "Could not load data",
-  "laterItems.length + \"件\"": "laterItems.length + (laterItems.length === 1 ? \" item\" : \" items\")",
   "updateButton.textContent = \"v\" + data.latest + \"へ更新\";": "updateButton.textContent = \"Update to v\" + data.latest;",
   "Agent Deckをv\" + version + \"へ更新しますか？": "Update Agent Deck to v\" + version + \"?",
   "更新中…": "Updating…",
@@ -428,5 +427,6 @@
   "Codexの更新処理が終了しました。ターミナルで結果を確認してください。": "The Codex update process ended. Check the terminal for the result.",
   "Codexを更新中": "Updating Codex",
   "Codex本体を更新しています。完了するまでメッセージには応答できません。": "Codex is being updated and cannot respond to messages until it finishes.",
-  "再起動して会話を再開": "Restart and resume conversation"
+  "再起動して会話を再開": "Restart and resume conversation",
+  "このプロジェクトで新規起動": "New session in this project"
 }
