@@ -4958,12 +4958,11 @@ def terminate_session(name, cwd):
         ) from exc
 
 
-def dir_label(cwd):
-    """セッション一覧に出すリポジトリ名を返す。
+def project_dir(cwd):
+    """セッションをまとめるプロジェクトのルートディレクトリを返す。
 
-    フルパスは長いので名前だけにする。worktree やリポジトリ配下の
-    サブディレクトリも、作成元リポジトリの名前へまとめる。
-    Git管理外のディレクトリはそのディレクトリ名を使う。
+    worktree やリポジトリ配下のサブディレクトリは作成元リポジトリへまとめ、
+    Git管理外のディレクトリはそのディレクトリ自体を使う。
     """
     path = (cwd or "").rstrip("/")
     if not path:
@@ -4972,11 +4971,44 @@ def dir_label(cwd):
         cached = REPO_LABEL_CACHE.get(path)
     if cached is not None:
         return cached
-    root = resume_group_dir(path).rstrip("/")
-    label = os.path.basename(root) or root or path
+    root = resume_group_dir(path).rstrip("/") or path
     with REPO_LABEL_LOCK:
-        REPO_LABEL_CACHE[path] = label
-    return label
+        REPO_LABEL_CACHE[path] = root
+    return root
+
+
+def dir_label(cwd):
+    """セッション一覧に出すリポジトリ名を返す。
+
+    フルパスは長いので名前だけにする。worktree やリポジトリ配下の
+    サブディレクトリも、作成元リポジトリの名前へまとめる。
+    Git管理外のディレクトリはそのディレクトリ名を使う。
+    """
+    root = project_dir(cwd)
+    return os.path.basename(root) or root
+
+
+def worktree_label(cwd):
+    """プロジェクトのルート以外で動くセッションの作業場所を短く返す。
+
+    リポジトリ配下のサブディレクトリは相対パス、別の場所にある worktree は
+    ディレクトリ名にする。ルートそのものなら空文字。
+    """
+    path = (cwd or "").rstrip("/")
+    if not path:
+        return ""
+    real_path = os.path.realpath(path)
+    real_root = os.path.realpath(project_dir(path))
+    if real_path == real_root:
+        return ""
+    # Agent Deck が Issue / PR 用に作った worktree は名前が長いので番号で示す。
+    record = worktree_record(real_path)
+    if record and record["path"] == real_path:
+        kind = "Issue" if record["kind"] == "issue" else "PR"
+        return f"{kind} #{record['number']}"
+    if path_is_within(real_path, real_root):
+        return os.path.relpath(real_path, real_root)
+    return os.path.basename(path)
 
 
 def session_position(item):
@@ -5009,20 +5041,124 @@ def tool_label(tool):
     return f'<span class="tool">{escaped}</span>'
 
 
+def github_item_label(item):
+    kind = "Issue" if item["kind"] == "issue" else "PR"
+    label = f"{kind} #{item['number']}"
+    return f"{label} {item['title']}" if item["title"] else label
+
+
 def github_item_link_html(item):
-    """起動元のIssue / PRをセッションカード用リンクとして返す。"""
+    """起動元のIssue / PRのタイトルを、GitHubを開くカード見出しとして返す。"""
     item = github_item_metadata(item)
     if not item:
         return ""
-    kind = "Issue" if item["kind"] == "issue" else "PR"
-    label = f"{kind} #{item['number']}"
-    if item["title"]:
-        label += f" {item['title']}"
+    label = github_item_label(item)
     return (
         '<a class="github-item" target="_blank" rel="noopener" '
         f'href="{html.escape(item["url"], quote=True)}" '
         f'title="{html.escape(label, quote=True)}">'
-        f"{html.escape(label)} ↗</a>"
+        f"{html.escape(item['title'] or label)}"
+        '<span class="github-item-open" aria-hidden="true"> ↗</span></a>'
+    )
+
+
+LATER_GROUP_KEY = "__later__"
+# プロジェクト見出しに件数を出す状態。自分の対応が要るものを先に並べる。
+PROJECT_STATUS_DOTS = (
+    ("need", "要対応"),
+    ("ask", "選択待ち"),
+    ("wait", "返事待ち"),
+    ("run", "考え中"),
+)
+
+
+def sidebar_project_groups(sessions):
+    """サイドバーのツリー用に、セッションをプロジェクトごとにまとめる。
+
+    プロジェクトは一覧本来の順序（先頭固定・返事待ちが上）で最初に現れた順に
+    並べ、各プロジェクト内の順序も保つ。後回しはプロジェクトを問わず末尾へ集める。
+    """
+    groups = {}
+    later = []
+    ordered = sorted(
+        sessions, key=lambda item: SESSION_POSITION_ORDER[session_position(item)]
+    )
+    for item in ordered:
+        if session_position(item) == "later":
+            later.append(item)
+            continue
+        root = project_dir(item["cwd"]) or item["cwd"]
+        groups.setdefault(root, []).append(item)
+    return list(groups.items()), later
+
+
+def session_card_html(item, active, label, status, language="ja"):
+    """ツリー内のセッション1件分のHTML。label はツール名の横に出す作業場所。"""
+    status_text, status_class = status
+    keep = " f-keep" if status_class in ("need", "ask", "wait") else ""
+    position = session_position(item)
+    # 最初のプロンプトでセッションを識別し、最終メッセージは同じでなければ添える。
+    first = item["summary"]
+    last = item["last_message"]
+    lines = f'<small class="first">{html.escape(first)}</small>' if first else ""
+    if last and last != first:
+        lines += f"<small>{html.escape(last)}</small>"
+    if item.get("note"):
+        lines += f'<small class="note">📝 {html.escape(item["note"])}</small>'
+    lines += artifact_chips(item.get("artifacts", []))
+    dir_html = (
+        f'<span class="dir" title="{html.escape(item["cwd"], quote=True)}">'
+        f"{html.escape(label)}</span>"
+        if label
+        else ""
+    )
+    issue_link = github_item_link_html(item.get("github_item"))
+    link_class = " ".join(
+        name
+        for name, enabled in (
+            ("active", item["name"] == active),
+            ("has-issue", bool(issue_link)),
+        )
+        if enabled
+    )
+    return (
+        f'<div class="session-card{keep}{" is-later" if position == "later" else ""}" '
+        f'data-session="{html.escape(item["name"])}" '
+        f'data-status="{status_class}">{issue_link}'
+        f'<a class="{link_class}" '
+        f'href="/terminal?session={urllib.parse.quote(item["name"])}">'
+        f"<strong>{tool_label(item['tool'])}{dir_html}"
+        f'<span class="st st-{status_class}">'
+        f"{html.escape(translate(status_text, language))}</span>"
+        f"{context_chip(item.get('context'))}</strong>"
+        f"{lines}</a>{position_button_html(item, language)}</div>"
+    )
+
+
+def project_group_html(
+    key, name_html, cards, statuses, language="ja", title="", extra="", css_class=""
+):
+    """プロジェクト1つ分の折りたたみ見出しとセッション一覧のHTML。
+
+    statuses は所属セッションの状態クラスの一覧。
+    """
+    keep = " f-keep" if any(cls in ("need", "ask", "wait") for cls in statuses) else ""
+    dots = "".join(
+        f'<span class="pd st-{cls}" title="{translate(label, language)}">'
+        f"{statuses.count(cls)}</span>"
+        for cls, label in PROJECT_STATUS_DOTS
+        if cls in statuses
+    )
+    title_attr = f' title="{html.escape(title, quote=True)}"' if title else ""
+    classes = f"project-group{keep}" + (f" {css_class}" if css_class else "")
+    return (
+        f'<section class="{classes}" data-project="{html.escape(key, quote=True)}">'
+        '<div class="project-head">'
+        f'<button type="button" class="project-toggle" aria-expanded="true"{title_attr}>'
+        '<span class="chev" aria-hidden="true">▾</span>'
+        f'{name_html}<small class="project-count">{len(statuses)}</small>'
+        f'<span class="project-dots">{dots}</span></button>{extra}</div>'
+        f'<div class="project-items">{cards}</div></section>'
     )
 
 
@@ -5051,51 +5187,59 @@ def build_sidebar(active, language="ja"):
         f"{translate('要対応のみ表示', language)}</label>"
     )
     sidebar += '<div id="side-sessions">'
-    # 手動配置だけを優先し、各グループ内では一覧本来の順序を保つ。
-    sessions = sorted(
-        managed_sessions(),
-        key=lambda item: SESSION_POSITION_ORDER[session_position(item)],
-    )
-    later_count = sum(session_position(item) == "later" for item in sessions)
-    later_keep = any(
-        session_position(item) == "later"
-        and sidebar_status(item)[1] in ("need", "ask", "wait")
-        for item in sessions
-    )
-    later_started = False
-    for other in sessions:
-        status_text, status_class = sidebar_status(other)
-        keep = " f-keep" if status_class in ("need", "ask", "wait") else ""
-        position = session_position(other)
-        if position == "later" and not later_started:
-            heading_keep = " f-keep" if later_keep else ""
-            sidebar += (
-                f'<div class="deferred-heading{heading_keep}">'
-                f"<span>{translate('後回し', language)}</span>"
-                f"<small>{item_count(later_count, language)}</small></div>"
-            )
-            later_started = True
-        # 最初のプロンプトでセッションを識別し、最終メッセージは同じでなければ添える。
-        first = other["summary"]
-        last = other["last_message"]
-        lines = f'<small class="first">{html.escape(first)}</small>' if first else ""
-        if last and last != first:
-            lines += f"<small>{html.escape(last)}</small>"
-        if other.get("note"):
-            lines += f'<small class="note">📝 {html.escape(other["note"])}</small>'
-        lines += artifact_chips(other.get("artifacts", []))
-        sidebar += (
-            f'<div class="session-card{keep}{" is-later" if position == "later" else ""}" '
-            f'data-session="{html.escape(other["name"])}">'
-            f'<a class="{"active" if other["name"] == active else ""}" '
-            f'href="/terminal?session={urllib.parse.quote(other["name"])}">'
-            f"<strong>{tool_label(other['tool'])}"
-            f'<span class="dir">{html.escape(dir_label(other["cwd"]))}</span>'
-            f'<span class="st st-{status_class}">'
-            f"{html.escape(translate(status_text, language))}</span>"
-            f"{context_chip(other.get('context'))}</strong>"
-            f"{lines}</a>{github_item_link_html(other.get('github_item'))}"
-            f"{position_button_html(other, language)}</div>"
+    sessions = managed_sessions()
+    # 状態判定はログやtmuxを読むので、セッションごとに1回だけ行う。
+    status = {item["name"]: sidebar_status(item) for item in sessions}
+    groups, later = sidebar_project_groups(sessions)
+    for root, items in groups:
+        name = os.path.basename(root) or root
+        new_title = translate("このプロジェクトで新規起動", language)
+        sidebar += project_group_html(
+            root,
+            f'<span class="project-name">{html.escape(name)}</span>',
+            "".join(
+                session_card_html(
+                    item,
+                    active,
+                    worktree_label(item["cwd"]),
+                    status[item["name"]],
+                    language,
+                )
+                for item in items
+            ),
+            [status[item["name"]][1] for item in items],
+            language,
+            title=root,
+            extra=(
+                f'<a class="project-new" '
+                f'href="/new?dir={html.escape(urllib.parse.quote(root, safe=""))}" '
+                f'title="{new_title}" aria-label="{new_title}">＋</a>'
+            ),
+        )
+    if later:
+        sidebar += project_group_html(
+            LATER_GROUP_KEY,
+            f'<span class="project-name">{translate("後回し", language)}</span>',
+            "".join(
+                session_card_html(
+                    item,
+                    active,
+                    " / ".join(
+                        part
+                        for part in (
+                            dir_label(item["cwd"]),
+                            worktree_label(item["cwd"]),
+                        )
+                        if part
+                    ),
+                    status[item["name"]],
+                    language,
+                )
+                for item in later
+            ),
+            [status[item["name"]][1] for item in later],
+            language,
+            css_class="later-group",
         )
     sidebar += "</div>"
     # バージョンとAI使用量は一覧が短いときもサイドバー最下部へ置く。
@@ -5719,7 +5863,9 @@ SIDEBAR_CSS = r"""
   aside small { margin-top: 5px; color: #8b949e; font-size: .78rem;
     display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
     overflow: hidden; overflow-wrap: anywhere; }
-  aside small.first { color: #cdd9e5; }
+  aside small.first { color: #adbac7; font-size: .72rem; }
+  /* Issue / PRから起動したセッションはタイトルで識別できるので、指示文は1行に縮める */
+  aside #side-sessions a.has-issue small.first { -webkit-line-clamp: 1; }
   aside small.note { color: #d29922; -webkit-line-clamp: 2; }
   aside #side-sessions a small:not(.first) { -webkit-line-clamp: 1; }
   aside .new-link { text-align: center; color: #8ab4f8; border-style: dashed; }
@@ -5790,18 +5936,54 @@ SIDEBAR_CSS = r"""
   aside .filter-toggle input { accent-color: #f85149; }
   /* 要対応のみ表示: 自分のアクションが要るもの（要対応・選択待ち・未分類の返事待ち）だけ残す */
   body.filter-need #side-sessions .session-card:not(.f-keep) { display: none; }
-  body.filter-need #side-sessions .deferred-heading:not(.f-keep) { display: none; }
-  aside .deferred-heading { display: flex; align-items: center; gap: 8px; margin: 14px 4px 4px;
-    color: #8b949e; font-size: .78rem; font-weight: 600; }
-  aside .deferred-heading::before { content: ""; flex: 1; border-top: 1px solid #30363d; }
-  aside .deferred-heading span { order: 1; }
-  aside .deferred-heading small { order: 2; display: inline; margin: 0; font-size: .7rem; }
+  body.filter-need #side-sessions .project-group:not(.f-keep) { display: none; }
+  /* プロジェクトツリー: リポジトリごとに折りたたみ、配下にセッションを並べる */
+  aside .project-group { margin: 0 0 6px; }
+  aside .project-head { position: sticky; top: 0; z-index: 2; display: flex;
+    align-items: center; gap: 2px; background: #161b22; }
+  aside .project-toggle { min-width: 0; flex: 1; display: flex; align-items: center;
+    gap: 6px; margin: 0; padding: 6px 4px; border: 0; border-radius: 6px;
+    background: transparent; color: #cdd9e5; font: inherit; font-size: .84rem;
+    font-weight: 600; text-align: left; cursor: pointer; }
+  aside .project-toggle:hover { background: #21262d; }
+  aside .project-toggle .chev { flex: 0 0 auto; width: 12px; color: #8b949e;
+    font-size: .7rem; transition: transform .12s; }
+  aside .project-group.collapsed .chev { transform: rotate(-90deg); }
+  aside .project-name { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  aside .project-toggle .project-count { flex: 0 0 auto; display: inline; margin: 0;
+    color: #8b949e; font-size: .7rem; font-weight: 400; }
+  aside .project-dots { margin-left: auto; display: flex; gap: 4px; flex: 0 0 auto; }
+  aside .pd { display: inline-flex; align-items: center; gap: 3px; font-size: .68rem;
+    font-weight: 600; }
+  aside .pd::before { content: ""; width: 7px; height: 7px; border-radius: 50%;
+    background: currentColor; }
+  aside .project-head a.project-new { flex: 0 0 auto; width: 26px; height: 26px;
+    margin: 0; padding: 0; display: grid; place-items: center; border: 0;
+    border-radius: 6px; color: #8b949e; font-size: .85rem; opacity: 0; }
+  aside .project-head:hover a.project-new, aside a.project-new:focus-visible { opacity: 1; }
+  aside a.project-new:hover { background: #30363d; color: #e6edf3; }
+  @media (pointer: coarse) { aside .project-head a.project-new { opacity: 1; } }
+  aside .project-items { margin-left: 9px; padding-left: 8px;
+    border-left: 1px solid #30363d; }
+  aside .project-group.collapsed .project-items { display: none; }
+  aside .later-group .project-toggle { color: #8b949e; }
+  /* ツリーのカードは枠を外側に持ち、Issue / PRの見出しリンクと本体リンクを並べる */
+  aside .project-items .session-card { margin: 4px 0; border: 1px solid #30363d;
+    border-radius: 8px; }
+  aside .project-items .session-card:has(> a.active) { border-color: #58a6ff;
+    background: #1f6feb22; }
+  aside .project-items .session-card > a { margin: 0; padding: 8px 40px 8px 9px;
+    border: 0; }
+  aside .project-items .session-card > a.active { background: transparent; }
   aside .session-card { position: relative; }
   aside .session-card > a { padding-right: 40px; }
-  aside .session-card > a.github-item { margin: -3px 40px 7px 10px; padding: 0;
-    border: 0; border-radius: 0; color: #8ab4f8; font-size: .76rem;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 起動元のIssue / PRはタイトル全文をカードの見出しにし、そのままGitHubを開く */
+  aside .project-items .session-card > a.github-item { padding: 8px 40px 0 9px;
+    color: #e6edf3; font-size: .76rem; font-weight: 600; line-height: 1.35; }
   aside .session-card > a.github-item:hover { color: #b6d7ff; text-decoration: underline; }
+  aside .github-item-open { color: #8ab4f8; font-weight: 400; }
+  aside .project-items .session-card > a.github-item + a { padding-top: 5px; }
   aside .session-card.is-later > a { opacity: .68; }
   aside .session-card.is-later:hover > a, aside .session-card.is-later > a.active { opacity: 1; }
   aside .side-position { position: absolute; top: 12px; right: 7px; z-index: 1;
@@ -5830,7 +6012,7 @@ SIDEBAR_CSS = r"""
   aside strong .dir { flex: 0 1 auto; min-width: 0; margin-left: 7px; color: #8b949e;
     font-weight: 400; font-size: .78rem; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; }
-  aside #side-sessions .st { flex: 0 1 auto; min-width: 0; overflow: hidden;
+  aside #side-sessions .st { flex: 0 0 auto; max-width: 60%; min-width: 0; overflow: hidden;
     text-overflow: ellipsis; white-space: nowrap; }
   .language-switch { display: flex; align-items: center; gap: 7px; color: #8b949e;
     font-size: .72rem; }
@@ -6145,6 +6327,205 @@ SIDEBAR_JS = r"""
     if (event.key === "Escape") closePositionMenu();
   });
   window.addEventListener("resize", closePositionMenu);
+  // プロジェクトの折りたたみ状態はブラウザごとに覚える。
+  const laterGroupKey = "__later__";
+  const collapsedStorageKey = "agent-deck:collapsed-projects";
+  const keepStatuses = ["need", "ask", "wait"];
+  const projectStatusDots = [
+    ["need", "要対応"], ["ask", "選択待ち"], ["wait", "返事待ち"], ["run", "考え中"],
+  ];
+  function collapsedProjects() {
+    try {
+      const value = JSON.parse(localStorage.getItem(collapsedStorageKey) || "[]");
+      return new Set(Array.isArray(value) ? value : []);
+    } catch (error) { return new Set(); }
+  }
+  function saveCollapsedProjects(keys) {
+    try { localStorage.setItem(collapsedStorageKey, JSON.stringify([...keys])); }
+    catch (error) { /* 保存できなくても折りたたみ自体は効かせる */ }
+  }
+  function setProjectCollapsed(group, collapsed) {
+    group.classList.toggle("collapsed", collapsed);
+    group.querySelector(".project-toggle")?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+  function applyCollapsedProjects() {
+    const collapsed = collapsedProjects();
+    sideSessions?.querySelectorAll(".project-group").forEach(group => {
+      setProjectCollapsed(group, collapsed.has(group.dataset.project));
+    });
+  }
+  applyCollapsedProjects();
+  sideSessions?.addEventListener("click", event => {
+    const toggle = event.target.closest(".project-toggle");
+    if (!toggle) return;
+    const group = toggle.closest(".project-group");
+    const collapsed = !group.classList.contains("collapsed");
+    setProjectCollapsed(group, collapsed);
+    const keys = collapsedProjects();
+    if (collapsed) keys.add(group.dataset.project); else keys.delete(group.dataset.project);
+    saveCollapsedProjects(keys);
+  });
+  function buildSessionCard(item, label) {
+    const position = itemPosition(item);
+    const card = document.createElement("div");
+    card.className = "session-card";
+    if (position === "later") card.classList.add("is-later");
+    card.dataset.session = item.name;
+    card.dataset.status = item.status_class;
+    const link = document.createElement("a");
+    link.href = "/terminal?session=" + encodeURIComponent(item.name);
+    if (item.name === session) link.classList.add("active");
+    const githubItem = item.github_item && item.github_item.url ? item.github_item : null;
+    const githubLabel = githubItem
+      ? (githubItem.kind === "issue" ? "Issue" : "PR") + " #" + githubItem.number
+        + (githubItem.title ? " " + githubItem.title : "")
+      : "";
+    if (githubItem) link.classList.add("has-issue");
+    if (keepStatuses.includes(item.status_class)) card.classList.add("f-keep");
+    const title = document.createElement("strong");
+    // 公式アイコンのあるツールは画像、それ以外はテキストで表示する
+    let tool;
+    if (item.tool_icon) {
+      tool = document.createElement("img");
+      tool.src = item.tool_icon;
+      tool.alt = item.tool;
+      tool.title = item.tool;
+    } else {
+      tool = document.createElement("span");
+      tool.textContent = item.tool;
+    }
+    tool.className = "tool";
+    title.append(tool);
+    if (label) {
+      const dir = document.createElement("span");
+      dir.className = "dir";
+      dir.textContent = label;
+      title.append(dir);
+    }
+    const badge = document.createElement("span");
+    badge.className = "st st-" + item.status_class;
+    badge.textContent = item.status;
+    title.append(badge);
+    if (item.context !== null && item.context !== undefined) {
+      const ctx = document.createElement("span");
+      ctx.className = "ctx" +
+        (item.context >= 90 ? " ctx-high" : item.context >= 70 ? " ctx-warn" : "");
+      ctx.textContent = item.context + "%";
+      title.append(ctx);
+    }
+    link.append(title);
+    if (item.summary) {
+      const first = document.createElement("small");
+      first.className = "first";
+      first.textContent = item.summary;
+      link.append(first);
+    }
+    if (item.last_message && item.last_message !== item.summary) {
+      const detail = document.createElement("small");
+      detail.textContent = item.last_message;
+      link.append(detail);
+    }
+    if (item.note) {
+      const note = document.createElement("small");
+      note.className = "note";
+      note.textContent = "📝 " + item.note;
+      link.append(note);
+    }
+    if (item.artifacts && item.artifacts.length) {
+      const arts = document.createElement("span");
+      arts.className = "arts";
+      const shown = item.artifacts.slice(-5);
+      if (item.artifacts.length > shown.length) {
+        const more = document.createElement("span");
+        more.className = "art art-more";
+        more.textContent = "+" + (item.artifacts.length - shown.length);
+        arts.append(more);
+      }
+      for (const art of shown) {
+        const chip = document.createElement("span");
+        chip.className = "art art-" + art.kind + (art.state ? " art-" + art.state : "");
+        chip.textContent = art.repo + "#" + art.number;
+        arts.append(chip);
+      }
+      link.append(arts);
+    }
+    let githubItemLink = null;
+    if (githubItem) {
+      githubItemLink = document.createElement("a");
+      githubItemLink.className = "github-item";
+      githubItemLink.href = githubItem.url;
+      githubItemLink.target = "_blank";
+      githubItemLink.rel = "noopener";
+      githubItemLink.textContent = githubItem.title || githubLabel;
+      githubItemLink.title = githubLabel;
+      const open = document.createElement("span");
+      open.className = "github-item-open";
+      open.setAttribute("aria-hidden", "true");
+      open.textContent = " ↗";
+      githubItemLink.append(open);
+    }
+    const positionButton = document.createElement("button");
+    positionButton.type = "button";
+    positionButton.className = "side-position" + (position !== "normal" ? " placed" : "");
+    positionButton.dataset.position = position;
+    positionButton.textContent = positionMeta[position].icon;
+    positionButton.title = positionButton.ariaLabel = "並び位置を変更";
+    // Issue / PRのタイトルはカードの見出しとして本体リンクの上に置く。
+    if (githubItemLink) card.append(githubItemLink);
+    card.append(link);
+    card.append(positionButton);
+    return card;
+  }
+  function buildProjectGroup(key, name, groupItems, labelOf, options) {
+    const group = document.createElement("section");
+    group.className = "project-group" + (options.className ? " " + options.className : "");
+    group.dataset.project = key;
+    const statuses = groupItems.map(item => item.status_class);
+    if (statuses.some(cls => keepStatuses.includes(cls))) group.classList.add("f-keep");
+    const head = document.createElement("div");
+    head.className = "project-head";
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = "project-toggle";
+    toggle.setAttribute("aria-expanded", "true");
+    if (options.title) toggle.title = options.title;
+    const chev = document.createElement("span");
+    chev.className = "chev";
+    chev.setAttribute("aria-hidden", "true");
+    chev.textContent = "▾";
+    const label = document.createElement("span");
+    label.className = "project-name";
+    label.textContent = name;
+    const count = document.createElement("small");
+    count.className = "project-count";
+    count.textContent = groupItems.length;
+    const dots = document.createElement("span");
+    dots.className = "project-dots";
+    for (const [cls, dotLabel] of projectStatusDots) {
+      const found = statuses.filter(value => value === cls).length;
+      if (!found) continue;
+      const dot = document.createElement("span");
+      dot.className = "pd st-" + cls;
+      dot.title = dotLabel;
+      dot.textContent = found;
+      dots.append(dot);
+    }
+    toggle.append(chev, label, count, dots);
+    head.append(toggle);
+    if (options.newDir) {
+      const add = document.createElement("a");
+      add.className = "project-new";
+      add.href = "/new?dir=" + encodeURIComponent(options.newDir);
+      add.title = add.ariaLabel = "このプロジェクトで新規起動";
+      add.textContent = "＋";
+      head.append(add);
+    }
+    const list = document.createElement("div");
+    list.className = "project-items";
+    for (const item of groupItems) list.append(buildSessionCard(item, labelOf(item)));
+    group.append(head, list);
+    return group;
+  }
   async function refreshSidebar() {
     try {
       const response = await fetch("/api/sidebar");
@@ -6161,121 +6542,28 @@ SIDEBAR_JS = r"""
       // 手動配置だけを優先し、各グループ内ではAPIの順序を保つ。
       const items = data.items.slice().sort((a, b) =>
         positionOrder[itemPosition(a)] - positionOrder[itemPosition(b)]);
-      const laterItems = items.filter(item => itemPosition(item) === "later");
-      const nodes = [];
-      let laterStarted = false;
+      // プロジェクトは最初に現れた順に並べ、後回しはプロジェクトを問わず末尾へ集める。
+      const groups = new Map();
+      const laterItems = [];
       for (const item of items) {
-        const position = itemPosition(item);
-        if (position === "later" && !laterStarted) {
-          const heading = document.createElement("div");
-          heading.className = "deferred-heading";
-          if (laterItems.some(other => ["need", "ask", "wait"].includes(other.status_class))) {
-            heading.classList.add("f-keep");
-          }
-          const label = document.createElement("span");
-          label.textContent = "後回し";
-          const count = document.createElement("small");
-          count.textContent = laterItems.length + "件";
-          heading.append(label, count);
-          nodes.push(heading);
-          laterStarted = true;
-        }
-        const card = document.createElement("div");
-        card.className = "session-card";
-        if (position === "later") card.classList.add("is-later");
-        card.dataset.session = item.name;
-        const link = document.createElement("a");
-        link.href = "/terminal?session=" + encodeURIComponent(item.name);
-        if (item.name === session) link.classList.add("active");
-        if (["need", "ask", "wait"].includes(item.status_class)) card.classList.add("f-keep");
-        const title = document.createElement("strong");
-        // 公式アイコンのあるツールは画像、それ以外はテキストで表示する
-        let tool;
-        if (item.tool_icon) {
-          tool = document.createElement("img");
-          tool.src = item.tool_icon;
-          tool.alt = item.tool;
-          tool.title = item.tool;
-        } else {
-          tool = document.createElement("span");
-          tool.textContent = item.tool;
-        }
-        tool.className = "tool";
-        const dir = document.createElement("span");
-        dir.className = "dir";
-        dir.textContent = item.dir || "";
-        title.append(tool, dir);
-        const badge = document.createElement("span");
-        badge.className = "st st-" + item.status_class;
-        badge.textContent = item.status;
-        title.append(badge);
-        if (item.context !== null && item.context !== undefined) {
-          const ctx = document.createElement("span");
-          ctx.className = "ctx" +
-            (item.context >= 90 ? " ctx-high" : item.context >= 70 ? " ctx-warn" : "");
-          ctx.textContent = item.context + "%";
-          title.append(ctx);
-        }
-        link.append(title);
-        if (item.summary) {
-          const first = document.createElement("small");
-          first.className = "first";
-          first.textContent = item.summary;
-          link.append(first);
-        }
-        if (item.last_message && item.last_message !== item.summary) {
-          const detail = document.createElement("small");
-          detail.textContent = item.last_message;
-          link.append(detail);
-        }
-        if (item.note) {
-          const note = document.createElement("small");
-          note.className = "note";
-          note.textContent = "📝 " + item.note;
-          link.append(note);
-        }
-        if (item.artifacts && item.artifacts.length) {
-          const arts = document.createElement("span");
-          arts.className = "arts";
-          const shown = item.artifacts.slice(-5);
-          if (item.artifacts.length > shown.length) {
-            const more = document.createElement("span");
-            more.className = "art art-more";
-            more.textContent = "+" + (item.artifacts.length - shown.length);
-            arts.append(more);
-          }
-          for (const art of shown) {
-            const chip = document.createElement("span");
-            chip.className = "art art-" + art.kind + (art.state ? " art-" + art.state : "");
-            chip.textContent = art.repo + "#" + art.number;
-            arts.append(chip);
-          }
-          link.append(arts);
-        }
-        let githubItemLink = null;
-        if (item.github_item && item.github_item.url) {
-          githubItemLink = document.createElement("a");
-          githubItemLink.className = "github-item";
-          githubItemLink.href = item.github_item.url;
-          githubItemLink.target = "_blank";
-          githubItemLink.rel = "noopener";
-          const kind = item.github_item.kind === "issue" ? "Issue" : "PR";
-          githubItemLink.textContent = kind + " #" + item.github_item.number
-            + (item.github_item.title ? " " + item.github_item.title : "") + " ↗";
-          githubItemLink.title = githubItemLink.textContent.slice(0, -2);
-        }
-        const positionButton = document.createElement("button");
-        positionButton.type = "button";
-        positionButton.className = "side-position" + (position !== "normal" ? " placed" : "");
-        positionButton.dataset.position = position;
-        positionButton.textContent = positionMeta[position].icon;
-        positionButton.title = positionButton.ariaLabel = "並び位置を変更";
-        card.append(link);
-        if (githubItemLink) card.append(githubItemLink);
-        card.append(positionButton);
-        nodes.push(card);
+        if (itemPosition(item) === "later") { laterItems.push(item); continue; }
+        const key = item.project || item.dir || "";
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+      }
+      const nodes = [];
+      for (const [key, groupItems] of groups) {
+        const name = key.replace(/\/+$/, "").split("/").pop() || key;
+        nodes.push(buildProjectGroup(key, name, groupItems,
+          item => item.worktree || "", {title: key, newDir: key}));
+      }
+      if (laterItems.length) {
+        nodes.push(buildProjectGroup(laterGroupKey, "後回し", laterItems,
+          item => [item.dir, item.worktree].filter(Boolean).join(" / "),
+          {className: "later-group"}));
       }
       sideSessions.replaceChildren(...nodes);
+      applyCollapsedProjects();
     } catch (error) { /* サイドバーは更新失敗しても本体に影響させない */ }
   }
   setInterval(refreshSidebar, 5000);
@@ -8880,7 +9168,7 @@ def render_resume_items(language="ja", query=""):
     ), len(items)
 
 
-def render(message="", view="new", language="ja", embedded=False):
+def render(message="", view="new", language="ja", embedded=False, focus_dir=""):
     # view は旧・一覧ページ時代の名残。呼び出し側の互換のため残している。
     del view
     buttons = "\n".join(
@@ -8895,10 +9183,24 @@ def render(message="", view="new", language="ja", embedded=False):
         for name, path in other_projects
     )
     github_projects = list(dict.fromkeys([*PINNED, *other_projects]))
+    focus_dir = (focus_dir or "").strip()
+    if focus_dir and focus_dir not in (path for _, path in github_projects):
+        github_projects.insert(0, (os.path.basename(focus_dir.rstrip("/")), focus_dir))
     github_project_options = "\n".join(
-        f'<option value="{html.escape(path)}">{html.escape(name)}</option>'
+        f'<option value="{html.escape(path)}"'
+        f"{' selected' if path == focus_dir else ''}>{html.escape(name)}</option>"
         for name, path in github_projects
     )
+    # サイドバーのプロジェクトツリーの「＋」から来たときは、そのプロジェクトの
+    # 起動ボタンを先頭に大きく出す。
+    if focus_dir:
+        focus_name = os.path.basename(focus_dir.rstrip("/")) or focus_dir
+        buttons = (
+            '<form class="launch project-focus" method="post" action="/launch">'
+            f'<input type="hidden" name="dir" value="{html.escape(focus_dir)}">'
+            f'<button class="proj" type="submit" title="{html.escape(focus_dir)}">'
+            f"🚀 {html.escape(focus_name)}</button></form>\n{buttons}"
+        )
     inbox_prompt_button = (
         f'<button class="cw-set" id="inbox-open" type="button">'
         f"{translate('📥 受信箱から選ぶ', language)}</button>"
@@ -9116,8 +9418,16 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, RuntimeError) as exc:
                 return self._json({"error": str(exc)}, 500)
         if parsed.path == "/new":
-            embedded = urllib.parse.parse_qs(parsed.query).get("embedded") == ["1"]
-            return self._page(render(view="new", language=language, embedded=embedded))
+            new_qs = urllib.parse.parse_qs(parsed.query)
+            embedded = new_qs.get("embedded") == ["1"]
+            return self._page(
+                render(
+                    view="new",
+                    language=language,
+                    embedded=embedded,
+                    focus_dir=new_qs.get("dir", [""])[0][:1024],
+                )
+            )
         if parsed.path == "/settings":
             return self._page(render_settings(language))
         if parsed.path in {"/", "/sessions"}:
@@ -9311,6 +9621,8 @@ class Handler(BaseHTTPRequestHandler):
                             else ""
                         ),
                         "dir": dir_label(entry["cwd"]),
+                        "project": project_dir(entry["cwd"]) or entry["cwd"],
+                        "worktree": worktree_label(entry["cwd"]),
                         "status": translate(status_text, language),
                         "status_class": status_class,
                         "context": entry.get("context"),

@@ -128,3 +128,6 @@
     border-top-color: #58a6ff; border-radius: 50%;
     animation: nav-spin .8s linear infinite; }
   @keyframes nav-spin { to { transform: rotate(360deg); } }
+  /* サイドバーのプロジェクトツリーから選んだプロジェクトを強調する */
+  .project-grid > form.project-focus { grid-column: 1 / -1; }
+  .project-grid > form.project-focus button.proj { border-color: #6c5ce7; background: #6c5ce733; font-weight: 600; }
