@@ -6442,7 +6442,10 @@ SIDEBAR_JS = r"""
     handle.setPointerCapture(event.pointerId);
   });
   document.addEventListener("pointerup", () => { projectDragPending = false; });
-  document.addEventListener("pointercancel", () => { clearProjectDrag(); });
+  document.addEventListener("pointercancel", event => {
+    if (touchDrag && event.pointerId === touchDrag.pointerId) clearProjectDrag();
+    else projectDragPending = false;
+  });
   function clearProjectDrag() {
     sideSessions?.querySelectorAll(".dragging, .drop-before, .drop-after").forEach(group =>
       group.classList.remove("dragging", "drop-before", "drop-after"));
