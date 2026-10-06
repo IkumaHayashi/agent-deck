@@ -13,6 +13,7 @@ import ast
 import base64
 import binascii
 import collections
+import contextlib
 import datetime
 import hashlib
 import html
@@ -431,6 +432,8 @@ RESTORE_SESSIONS = CONFIG.get("restore_sessions", True) is not False
 SESSION_REGISTRY_LOCK = threading.Lock()
 # 終了直前に始まった一覧更新が、古いスナップショットを後から書き戻すのを防ぐ。
 SESSION_REGISTRY_FORGOTTEN = set()
+# 同じ会話の resume が連打などで同時に届いても、tmux セッションを1つに保つ。
+RESUME_LAUNCH_LOCK = threading.Lock()
 # codexがターンごとにスレッドを切り替えた場合に、チャット表示でつなげる過去
 # スレッドの最大数。
 THREAD_HISTORY_LIMIT = 20
@@ -4511,6 +4514,14 @@ def live_registered_sessions():
         ).stdout.strip()
         items.append({"name": name, "tool": tool, "session_id": session_id, "cwd": cwd})
     return items
+
+
+def live_conversation_session(tool, session_id):
+    """指定した会話を開いている tmux セッション名を返す。なければ空文字。"""
+    for item in live_registered_sessions():
+        if item["tool"] == tool and item["session_id"] == session_id:
+            return item["name"]
+    return ""
 
 
 def restore_registered_sessions():
@@ -10742,79 +10753,90 @@ class Handler(BaseHTTPRequestHandler):
         if len(prompt) > 8000:
             return launch_page("プロンプトが長すぎます（8000文字まで）")
         search = search.strip()[:200]
-        cmd = [*TOOLS[tool], path]
-        if resume:
-            cmd += ["--resume", resume] if tool == "claude" else ["resume", resume]
-        if model != "default":
-            cmd += ["--model", model]
-        if skip_permissions:
-            cmd += BYPASS_FLAGS[tool]
-        if prompt:
-            cmd.append(prompt)
-        started_at = time.time()
-        try:
-            r = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=20,
-                env={**os.environ},
-            )
-        except subprocess.TimeoutExpired:
-            return launch_page("タイムアウトしました")
-        if r.returncode == 0:
-            session_name = launcher_session_name(r.stdout)
+        launch_lock = RESUME_LAUNCH_LOCK if resume else contextlib.nullcontext()
+        with launch_lock:
             if resume:
-                # 再開時は会話IDが分かっているので探索せず、元の要約を引き継ぐ
-                summary = log_meta(resume_log, tool).get("summary", "")
-                set_session_metadata(
-                    session_name,
-                    summary,
-                    resume,
-                    skip_permissions,
-                    pull_request=pull_request,
-                    model=model,
-                    github_item=github_item,
+                # 既に開いている会話は二重に resume せず、そのセッションへ移動する。
+                running = live_conversation_session(tool, resume)
+                if running:
+                    return self._redirect(
+                        "/terminal?session=" + urllib.parse.quote(running)
+                    )
+            cmd = [*TOOLS[tool], path]
+            if resume:
+                cmd += ["--resume", resume] if tool == "claude" else ["resume", resume]
+            if model != "default":
+                cmd += ["--model", model]
+            if skip_permissions:
+                cmd += BYPASS_FLAGS[tool]
+            if prompt:
+                cmd.append(prompt)
+            started_at = time.time()
+            try:
+                r = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    env={**os.environ},
                 )
-                session_id = resume
+            except subprocess.TimeoutExpired:
+                return launch_page("タイムアウトしました")
+            if r.returncode == 0:
+                session_name = launcher_session_name(r.stdout)
+                if resume:
+                    # 再開時は会話IDが分かっているので探索せず、元の要約を引き継ぐ
+                    summary = log_meta(resume_log, tool).get("summary", "")
+                    set_session_metadata(
+                        session_name,
+                        summary,
+                        resume,
+                        skip_permissions,
+                        pull_request=pull_request,
+                        model=model,
+                        github_item=github_item,
+                    )
+                    session_id = resume
+                else:
+                    session_id = wait_for_new_session_id(tool, path, started_at)
+                    set_session_metadata(
+                        session_name,
+                        prompt,
+                        session_id,
+                        skip_permissions,
+                        pull_request=pull_request,
+                        model=model,
+                        github_item=github_item,
+                    )
+                if session_name:
+                    upsert_registered_session(
+                        {
+                            "name": session_name,
+                            "tool": tool,
+                            "cwd": path,
+                            "session_id": session_id,
+                            "summary": summary if resume else prompt,
+                            "note": "",
+                            "position": "normal",
+                            "pull_request": pull_request,
+                            "github_item": github_item,
+                            "bypass": skip_permissions,
+                            "restore_model": model,
+                        }
+                    )
+                    invalidate_session_cache()
+                    return self._redirect(
+                        "/terminal?session="
+                        + urllib.parse.quote(session_name)
+                        + ("&review=1" if pull_request else "")
+                        + ("&search=" + urllib.parse.quote(search) if search else "")
+                    )
+                detail = translate(
+                    "起動したセッション名を取得できませんでした", language
+                )
             else:
-                session_id = wait_for_new_session_id(tool, path, started_at)
-                set_session_metadata(
-                    session_name,
-                    prompt,
-                    session_id,
-                    skip_permissions,
-                    pull_request=pull_request,
-                    model=model,
-                    github_item=github_item,
-                )
-            if session_name:
-                upsert_registered_session(
-                    {
-                        "name": session_name,
-                        "tool": tool,
-                        "cwd": path,
-                        "session_id": session_id,
-                        "summary": summary if resume else prompt,
-                        "note": "",
-                        "position": "normal",
-                        "pull_request": pull_request,
-                        "github_item": github_item,
-                        "bypass": skip_permissions,
-                        "restore_model": model,
-                    }
-                )
-                invalidate_session_cache()
-                return self._redirect(
-                    "/terminal?session="
-                    + urllib.parse.quote(session_name)
-                    + ("&review=1" if pull_request else "")
-                    + ("&search=" + urllib.parse.quote(search) if search else "")
-                )
-            detail = translate("起動したセッション名を取得できませんでした", language)
-        else:
-            detail = (r.stderr or r.stdout or "").strip()
-        return launch_page(f"失敗: {detail}")
+                detail = (r.stderr or r.stdout or "").strip()
+            return launch_page(f"失敗: {detail}")
 
     def log_message(self, fmt, *args):
         pass  # launchd のログを汚さない

@@ -88,9 +88,13 @@
     navLoadingLabel.textContent = message || "読み込み中...";
     navLoading.hidden = false;
   }
-  // bfcacheで戻ってきたときは前回のオーバーレイが残るので消す
+  // bfcacheで戻ってきたときは前回のオーバーレイと送信中の印が残るので消す
   window.addEventListener("pageshow", function (event) {
-    if (event.persisted) navLoading.hidden = true;
+    if (!event.persisted) return;
+    navLoading.hidden = true;
+    document.querySelectorAll("form.launch").forEach(function (f) {
+      delete f.dataset.submitting;
+    });
   });
   document.addEventListener("click", function (event) {
     if (event.defaultPrevented || event.button !== 0) return;
@@ -105,7 +109,13 @@
   // 選択中のツール・モデルを各起動フォームに hidden input として付与する。
   // resume フォームはツールが会話側で決まるため、権限だけを引き継ぐ。
   function wireLaunchForm(f) {
-    f.addEventListener("submit", function () {
+    f.addEventListener("submit", function (event) {
+      // 連打やダブルタップで同じ起動・再開を二重に送らない。
+      if (f.dataset.submitting) {
+        event.preventDefault();
+        return;
+      }
+      f.dataset.submitting = "1";
       showNavLoading(f.dataset.resume ? "会話を再開しています..." : "セッションを起動中...");
       var bypass = document.querySelector('.bypass-modes input:checked');
       var fields = [["bypass", bypass && bypass.value === "bypass" ? "1" : "0"]];

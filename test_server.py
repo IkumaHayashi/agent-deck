@@ -1379,6 +1379,51 @@ class FrontendTemplateTest(unittest.TestCase):
         self.assertIn("/tmp/project-worktree", run.call_args.args[0])
         self.assertIn(session_id, run.call_args.args[0])
 
+    def test_resume_opens_running_session_instead_of_launching_twice(self):
+        # 連打で同じ会話の resume が重なっても、既存セッションへ移動するだけにする
+        handler = object.__new__(server.Handler)
+        session_id = "019fd08a-e352-7a22-9aa5-0b5d0de94eba"
+        live = [
+            {
+                "name": "agent-other",
+                "tool": "claude",
+                "session_id": session_id,
+                "cwd": "/tmp/worktree",
+            },
+            {
+                "name": "agent-running",
+                "tool": "codex",
+                "session_id": session_id,
+                "cwd": "/tmp/worktree",
+            },
+        ]
+        with (
+            mock.patch.object(
+                server, "validate_dir", return_value=("/tmp/worktree", "")
+            ),
+            mock.patch.object(
+                server, "conversation_log_path", return_value="/tmp/conversation.jsonl"
+            ),
+            mock.patch.object(server, "resume_github_item", return_value={}),
+            mock.patch.object(server, "live_registered_sessions", return_value=live),
+            mock.patch.object(server.subprocess, "run") as run,
+            mock.patch.object(handler, "_redirect") as redirect,
+        ):
+            handler._launch("/tmp/worktree", tool="codex", resume=session_id)
+
+        launched = [call for call in run.call_args_list if "resume" in call.args[0]]
+        self.assertEqual([], launched)
+        redirect.assert_called_once_with("/terminal?session=agent-running")
+
+    def test_launch_form_ignores_repeated_submit(self):
+        with open(
+            os.path.join(os.path.dirname(__file__), "static", "new.js"),
+            encoding="utf-8",
+        ) as source:
+            script = source.read()
+        self.assertIn("if (f.dataset.submitting) {", script)
+        self.assertIn("delete f.dataset.submitting;", script)
+
     def test_review_context_is_seeded_into_input_without_sending(self):
         # レビュー対象PRは入力欄への書き出しプリセットでAIへ伝える（自動送信はしない）
         self.assertIn("seedReviewContext()", server.TERMINAL_PAGE)
