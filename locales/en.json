@@ -76,6 +76,8 @@
   "＋ 新規起動": "+ New session",
   "要対応のみ表示": "Needs action only",
   "並び位置を変更": "Change position",
+  "ディレクトリを並び替え": "Reorder directory",
+  "ドラッグまたは上下キーで並び替え": "Drag or use the up/down keys to reorder",
   "先頭に固定": "Pin to top",
   "後回し": "Later",
   "アップデート": "Update",
