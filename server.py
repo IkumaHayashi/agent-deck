@@ -6428,18 +6428,44 @@ SIDEBAR_JS = r"""
   applyProjectOrder();
   let draggedProject = null;
   let projectDragPending = false;
+  let touchDrag = null;
   sideSessions?.addEventListener("pointerdown", event => {
-    if (event.target.closest(".project-drag")) projectDragPending = true;
+    const handle = event.target.closest(".project-drag");
+    if (!handle) return;
+    projectDragPending = true;
+    if (event.pointerType === "mouse") return;
+    touchDrag = {
+      pointerId: event.pointerId,
+      group: handle.closest(".project-group"),
+      startX: event.clientX, startY: event.clientY,
+    };
+    handle.setPointerCapture(event.pointerId);
   });
   document.addEventListener("pointerup", () => { projectDragPending = false; });
-  document.addEventListener("pointercancel", () => { projectDragPending = false; });
+  document.addEventListener("pointercancel", () => { clearProjectDrag(); });
   function clearProjectDrag() {
     sideSessions?.querySelectorAll(".dragging, .drop-before, .drop-after").forEach(group =>
       group.classList.remove("dragging", "drop-before", "drop-after"));
     draggedProject = null;
     projectDragPending = false;
+    touchDrag = null;
+  }
+  function markProjectDrop(target, clientY) {
+    sideSessions.querySelectorAll(".drop-before, .drop-after").forEach(group =>
+      group.classList.remove("drop-before", "drop-after"));
+    if (!target || target === draggedProject) return;
+    const head = target.querySelector(".project-head");
+    const before = clientY < head.getBoundingClientRect().top + head.offsetHeight / 2;
+    target.classList.add(before ? "drop-before" : "drop-after");
+  }
+  function moveProjectToTarget(target) {
+    if (!target || target === draggedProject) return;
+    const before = target.classList.contains("drop-before");
+    sideSessions.insertBefore(draggedProject, before ? target : target.nextSibling);
+    saveProjectOrder();
   }
   sideSessions?.addEventListener("dragstart", event => {
+    if (touchDrag) { event.preventDefault(); return; }
     const handle = event.target.closest(".project-drag");
     if (!handle) return;
     draggedProject = handle.closest(".project-group");
@@ -6453,23 +6479,41 @@ SIDEBAR_JS = r"""
     if (!target || target === draggedProject) return;
     event.preventDefault();
     event.dataTransfer.dropEffect = "move";
-    sideSessions.querySelectorAll(".drop-before, .drop-after").forEach(group =>
-      group.classList.remove("drop-before", "drop-after"));
-    const head = target.querySelector(".project-head");
-    const before = event.clientY < head.getBoundingClientRect().top + head.offsetHeight / 2;
-    target.classList.add(before ? "drop-before" : "drop-after");
+    markProjectDrop(target, event.clientY);
   });
   sideSessions?.addEventListener("drop", event => {
     if (!draggedProject) return;
     const target = event.target.closest(".project-group:not(.later-group)");
     if (!target || target === draggedProject) { clearProjectDrag(); return; }
     event.preventDefault();
-    const before = target.classList.contains("drop-before");
-    sideSessions.insertBefore(draggedProject, before ? target : target.nextSibling);
-    saveProjectOrder();
+    moveProjectToTarget(target);
     clearProjectDrag();
   });
   sideSessions?.addEventListener("dragend", clearProjectDrag);
+  sideSessions?.addEventListener("pointermove", event => {
+    if (!touchDrag || event.pointerId !== touchDrag.pointerId) return;
+    if (!draggedProject) {
+      const distance = Math.hypot(event.clientX - touchDrag.startX,
+        event.clientY - touchDrag.startY);
+      if (distance < 8) return;
+      draggedProject = touchDrag.group;
+      draggedProject.classList.add("dragging");
+    }
+    const target = document.elementFromPoint(event.clientX, event.clientY)
+      ?.closest(".project-group:not(.later-group)");
+    markProjectDrop(target, event.clientY);
+  });
+  sideSessions?.addEventListener("pointerup", event => {
+    if (!touchDrag || event.pointerId !== touchDrag.pointerId) return;
+    if (draggedProject) {
+      const target = document.elementFromPoint(event.clientX, event.clientY)
+        ?.closest(".project-group:not(.later-group)");
+      markProjectDrop(target, event.clientY);
+      moveProjectToTarget(target);
+      event.preventDefault();
+    }
+    clearProjectDrag();
+  });
   sideSessions?.addEventListener("keydown", event => {
     if (!event.target.matches(".project-drag") ||
         !["ArrowUp", "ArrowDown"].includes(event.key)) return;
@@ -6713,8 +6757,12 @@ SIDEBAR_JS = r"""
           item => [item.dir, item.worktree].filter(Boolean).join(" / "),
           {className: "later-group"}));
       }
+      const focusedProject = document.activeElement?.classList.contains("project-drag")
+        ? document.activeElement.closest(".project-group")?.dataset.project : "";
       sideSessions.replaceChildren(...nodes);
       applyCollapsedProjects();
+      if (focusedProject) nodes.find(node => node.dataset.project === focusedProject)
+        ?.querySelector(".project-drag")?.focus({preventScroll: true});
     } catch (error) { /* サイドバーは更新失敗しても本体に影響させない */ }
   }
   setInterval(refreshSidebar, 5000);
