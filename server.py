@@ -6938,6 +6938,7 @@ TERMINAL_PAGE = r"""<!doctype html>
 {sidebar_css}
   header .ctx {{ font-size: .72rem; padding: 2px 7px; }}
   #artifacts {{ display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 12px;
+    max-height: 80px; overflow: auto; overscroll-behavior: contain;
     border-bottom: 1px solid #30363d; background: #161b22; flex-shrink: 0; }}
   #artifacts:empty {{ display: none; }}
   #artifacts .art {{ font-size: .78rem; }}
