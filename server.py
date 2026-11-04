@@ -4313,16 +4313,40 @@ def path_is_within(path, directory):
         return False
 
 
-def remove_session_worktree(cwd, other_cwds=()):
-    """セッション専用のリンク worktree を安全に削除する。
+def removable_worktree_info(cwd, other_cwds=()):
+    """終了時に削除対象となるリンク worktree の情報を返す。対象外なら None。
 
     メイン作業ツリーと Git 管理外は対象外。同じ worktree を別セッションが
     使っている場合は、最後のセッション終了時まで削除を保留する。
     """
     info = linked_worktree_info(cwd)
     if not info:
-        return False
+        return None
     if any(path_is_within(other_cwd, info["path"]) for other_cwd in other_cwds):
+        return None
+    return info
+
+
+def worktree_changes(path):
+    """worktree に残っている未コミットの変更（git status --porcelain の行）を返す。"""
+    result = subprocess.run(
+        [find_bin("git"), "-C", path, "status", "--porcelain"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line.strip()]
+
+
+def remove_session_worktree(cwd, other_cwds=(), force=False):
+    """セッション専用のリンク worktree を安全に削除する。
+
+    force が偽なら、未コミットの変更が残っている worktree は git が削除を拒否する。
+    """
+    info = removable_worktree_info(cwd, other_cwds)
+    if not info:
         return False
     result = subprocess.run(
         [
@@ -4331,6 +4355,7 @@ def remove_session_worktree(cwd, other_cwds=()):
             info["git_common_dir"],
             "worktree",
             "remove",
+            *(["--force"] if force else []),
             info["path"],
         ],
         capture_output=True,
@@ -4981,19 +5006,41 @@ def other_tmux_cwds(name):
     return cwds
 
 
-def terminate_session(name, cwd):
-    """tmux セッションを終了し、専用 worktree があれば続けて削除する。"""
+class DirtyWorktreeError(RuntimeError):
+    """終了しようとしたセッションの worktree に未コミットの変更が残っている。"""
+
+    def __init__(self, path, changes):
+        super().__init__("ワークツリーに未コミットの変更が残っています")
+        self.path = path
+        self.changes = changes
+
+
+def terminate_session(name, cwd, worktree="auto"):
+    """tmux セッションを終了し、専用 worktree があれば続けて削除する。
+
+    worktree の扱い:
+    - "auto": 変更が残っていれば終了せずに DirtyWorktreeError を送出し、利用者に選ばせる
+    - "force": 変更を破棄して削除する
+    - "keep": worktree は残してセッションだけ終了する
+    """
     # キャッシュされた管理セッション一覧ではなく tmux の現在値を見る。
     # 別 pane が同じ worktree を利用中なら、削除を保留するために必要になる。
     other_cwds = other_tmux_cwds(name)
+    if worktree == "auto":
+        info = removable_worktree_info(cwd, other_cwds)
+        changes = worktree_changes(info["path"]) if info else []
+        if changes:
+            raise DirtyWorktreeError(info["path"], changes)
     result = tmux_run("kill-session", "-t", name)
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() or "終了できませんでした")
     # 明示的に終了したセッションは、次回のPC起動で復元しない。
     forget_registered_session(name)
     invalidate_session_cache()
+    if worktree == "keep":
+        return False
     try:
-        return remove_session_worktree(cwd, other_cwds)
+        return remove_session_worktree(cwd, other_cwds, force=worktree == "force")
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         raise RuntimeError(
             f"セッションは終了しましたが、ワークツリーを削除できませんでした: {exc}"
@@ -7338,7 +7385,7 @@ TERMINAL_PAGE = r"""<!doctype html>
   <button type="button" id="lightbox-next" aria-label="次の画像">›</button>
 </div>
 <div class="modal" id="confirm-modal" hidden><div class="modal-card" role="dialog" aria-modal="true">
-  <p id="confirm-message">このセッションを終了しますか？</p><div class="modal-actions"><button type="button" id="confirm-cancel">キャンセル</button><button type="button" class="danger" id="confirm-ok">実行する</button></div>
+  <p id="confirm-message" style="white-space: pre-wrap; overflow-wrap: anywhere; max-height: 50vh; overflow-y: auto;">このセッションを終了しますか？</p><div class="modal-actions"><button type="button" id="confirm-cancel">キャンセル</button><button type="button" class="danger" id="confirm-ok">実行する</button></div>
 </div></div>
 <div class="modal" id="model-modal" hidden><div class="modal-card" role="dialog" aria-modal="true">
   <p>モデルを変更する</p>
@@ -9114,9 +9161,28 @@ TERMINAL_PAGE = r"""<!doctype html>
   document.querySelectorAll("[data-key]").forEach(button => button.addEventListener("click", () => post("/api/sessions/" + encodeURIComponent(session) + "/key", {{key: button.dataset.key}}).then(refresh).catch(e => status.textContent = e.message)));
   document.getElementById("kill").addEventListener("click", async () => {{
     if (!await askConfirm("このセッションを終了しますか？リンクされたGitワークツリーで作業中の場合は、ワークツリーも削除します。")) return;
-    showNavLoading("セッションを終了中...");
+    const killPath = "/api/sessions/" + encodeURIComponent(session) + "/kill";
+    const kill = async mode => {{
+      showNavLoading("セッションを終了中...");
+      const response = await fetch(killPath, {{method: "POST", headers: {{"Content-Type": "application/x-www-form-urlencoded"}}, body: new URLSearchParams({{worktree: mode}})}});
+      const data = await response.json();
+      if (response.ok) return null;
+      hideNavLoading();
+      if (response.status === 409 && data.dirty_worktree) return data;
+      throw new Error(data.error || "操作に失敗しました");
+    }};
     try {{
-      await post("/api/sessions/" + encodeURIComponent(session) + "/kill", {{}});
+      const dirty = await kill("auto");
+      if (dirty) {{
+        const shown = dirty.changes.join("\n");
+        const more = dirty.change_count > dirty.changes.length ? "\n…ほか" + (dirty.change_count - dirty.changes.length) + "件" : "";
+        const detail = "ワークツリーに未コミットの変更が" + dirty.change_count + "件残っています。\n\n" + shown + more;
+        if (await askConfirm(detail + "\n\n変更を破棄してワークツリーごと削除しますか？")) {{
+          if (await kill("force")) return;
+        }} else if (await askConfirm("ワークツリーは残して、セッションだけ終了しますか？")) {{
+          if (await kill("keep")) return;
+        }} else return;
+      }}
       navigateTo("/", "セッション一覧を読み込み中...");
     }}
     catch (error) {{ hideNavLoading(); status.textContent = error.message; }}
@@ -10418,7 +10484,22 @@ class Handler(BaseHTTPRequestHandler):
                 elif action == "kill":
                     items = managed_sessions()
                     item = next(item for item in items if item["name"] == session)
-                    worktree_removed = terminate_session(session, item["cwd"])
+                    mode = qs.get("worktree", ["auto"])[0]
+                    if mode not in {"auto", "force", "keep"}:
+                        return self._json({"error": "worktree の指定が不正です"}, 400)
+                    try:
+                        worktree_removed = terminate_session(session, item["cwd"], mode)
+                    except DirtyWorktreeError as exc:
+                        return self._json(
+                            {
+                                "error": str(exc),
+                                "dirty_worktree": True,
+                                "path": exc.path,
+                                "changes": exc.changes[:20],
+                                "change_count": len(exc.changes),
+                            },
+                            409,
+                        )
                     return self._json(
                         {
                             "ok": True,

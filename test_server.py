@@ -1783,6 +1783,77 @@ class WorktreeCleanupTest(unittest.TestCase):
 
         self.assertTrue(os.path.isfile(dirty_file))
 
+    def test_dirty_worktree_is_removed_when_forced(self):
+        worktree = self.add_worktree()
+        with open(os.path.join(worktree, "untracked.txt"), "w", encoding="utf-8") as f:
+            f.write("discard me\n")
+
+        self.assertTrue(server.remove_session_worktree(worktree, force=True))
+        self.assertFalse(os.path.exists(worktree))
+
+    def test_worktree_changes_lists_porcelain_lines(self):
+        worktree = self.add_worktree()
+        self.assertEqual([], server.worktree_changes(worktree))
+        with open(os.path.join(worktree, "new.txt"), "w", encoding="utf-8") as f:
+            f.write("x\n")
+        self.assertEqual(["?? new.txt"], server.worktree_changes(worktree))
+
+    def _terminate(self, cwd, mode):
+        panes = SimpleNamespace(returncode=0, stdout="", stderr="")
+        killed = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with (
+            mock.patch.object(server, "tmux_run", side_effect=[panes, killed]) as tmux,
+            mock.patch.object(server, "invalidate_session_cache"),
+            mock.patch.object(server, "forget_registered_session"),
+        ):
+            result = server.terminate_session("agent-test", cwd, mode)
+        return result, tmux
+
+    def test_dirty_worktree_blocks_auto_termination(self):
+        worktree = self.add_worktree()
+        with open(os.path.join(worktree, "wip.txt"), "w", encoding="utf-8") as f:
+            f.write("wip\n")
+        panes = SimpleNamespace(returncode=0, stdout="", stderr="")
+        with mock.patch.object(server, "tmux_run", return_value=panes) as tmux:
+            with self.assertRaises(server.DirtyWorktreeError) as caught:
+                server.terminate_session("agent-test", worktree)
+
+        self.assertEqual(["?? wip.txt"], caught.exception.changes)
+        # 変更が残っているときはセッションも終了しない
+        tmux.assert_called_once()
+        self.assertTrue(os.path.isdir(worktree))
+
+    def test_dirty_worktree_is_kept_when_requested(self):
+        worktree = self.add_worktree()
+        with open(os.path.join(worktree, "wip.txt"), "w", encoding="utf-8") as f:
+            f.write("wip\n")
+
+        removed, tmux = self._terminate(worktree, "keep")
+
+        self.assertFalse(removed)
+        self.assertEqual(
+            ("kill-session", "-t", "agent-test"), tmux.call_args_list[1].args
+        )
+        self.assertTrue(os.path.isfile(os.path.join(worktree, "wip.txt")))
+
+    def test_dirty_worktree_is_discarded_when_forced(self):
+        worktree = self.add_worktree()
+        with open(os.path.join(worktree, "wip.txt"), "w", encoding="utf-8") as f:
+            f.write("wip\n")
+
+        removed, _ = self._terminate(worktree, "force")
+
+        self.assertTrue(removed)
+        self.assertFalse(os.path.exists(worktree))
+
+    def test_clean_worktree_is_removed_on_auto_termination(self):
+        worktree = self.add_worktree()
+
+        removed, _ = self._terminate(worktree, "auto")
+
+        self.assertTrue(removed)
+        self.assertFalse(os.path.exists(worktree))
+
     def test_session_is_terminated_before_cleanup_error_is_reported(self):
         panes = SimpleNamespace(
             returncode=0, stdout="agent-test\t/tmp/worktree\n", stderr=""
